@@ -126,7 +126,7 @@ async def process_attendance(request: ProcessAttendanceRequest):
         print(f"[ATTENDANCE] Aggregated to {len(unique_participants)} unique participants", flush=True)
 
         # Final cap to meeting duration (safety check)
-        max_duration_seconds = request.meeting_duration_minutes * 60
+        max_duration_seconds = meeting_duration * 60
         for key in unique_participants:
             if unique_participants[key]["total_duration"] > max_duration_seconds:
                 print(f"[ATTENDANCE] Final cap {key}: {unique_participants[key]['total_duration']}s -> {max_duration_seconds}s", flush=True)
