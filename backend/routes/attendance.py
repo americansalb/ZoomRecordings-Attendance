@@ -54,14 +54,24 @@ async def process_attendance(request: ProcessAttendanceRequest):
         # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
-        # Get meeting details to find scheduled start time
+        # Get meeting details to find scheduled start time and duration
+        zoom_start_time = None
+        zoom_duration_minutes = None
         try:
             meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
             zoom_start_time = meeting_details.get("start_time")
-            print(f"[ATTENDANCE] Meeting start time from Zoom: {zoom_start_time}", flush=True)
+            zoom_duration_minutes = meeting_details.get("duration")  # Zoom returns duration in minutes
+            print(f"[ATTENDANCE] Meeting from Zoom: start={zoom_start_time}, duration={zoom_duration_minutes} min", flush=True)
         except Exception as e:
             print(f"[ATTENDANCE] Could not get meeting details: {e}", flush=True)
-            zoom_start_time = None
+
+        # Determine meeting duration (use Zoom's actual duration if available, otherwise use provided value)
+        if zoom_duration_minutes and zoom_duration_minutes > 0:
+            meeting_duration = zoom_duration_minutes
+            print(f"[ATTENDANCE] Using Zoom's meeting duration: {meeting_duration} min", flush=True)
+        else:
+            meeting_duration = request.meeting_duration_minutes
+            print(f"[ATTENDANCE] Using provided meeting duration: {meeting_duration} min", flush=True)
 
         # Determine scheduled window
         if request.meeting_start_time:
@@ -72,11 +82,11 @@ async def process_attendance(request: ProcessAttendanceRequest):
             scheduled_start = None
 
         if scheduled_start:
-            scheduled_end = scheduled_start + timedelta(minutes=request.meeting_duration_minutes)
-            print(f"[ATTENDANCE] Scheduled window: {scheduled_start} to {scheduled_end} ({request.meeting_duration_minutes} min)", flush=True)
+            scheduled_end = scheduled_start + timedelta(minutes=meeting_duration)
+            print(f"[ATTENDANCE] Scheduled window: {scheduled_start} to {scheduled_end} ({meeting_duration} min)", flush=True)
         else:
             scheduled_end = None
-            print(f"[ATTENDANCE] No scheduled window - will cap at {request.meeting_duration_minutes} min", flush=True)
+            print(f"[ATTENDANCE] No scheduled window - will cap at {meeting_duration} min", flush=True)
 
         # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
