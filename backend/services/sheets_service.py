@@ -274,6 +274,7 @@ class SheetsService:
         - Lowercase
         - Remove parenthetical content like "(Spanish)", "(Arabic)"
         - Remove common suffixes like 's iPhone, 's iPad
+        - Remove dash separators like "- BR Portuguese"
         - Strip extra whitespace
         """
         if not name:
@@ -285,6 +286,9 @@ class SheetsService:
         # Remove parenthetical content
         name = re.sub(r'\([^)]*\)', '', name)
 
+        # Remove dash-separated language/location indicators (e.g., "- BR Portuguese")
+        name = re.sub(r'\s*-\s*[a-z]+(\s+[a-z]+)*\s*$', '', name, flags=re.IGNORECASE)
+
         # Remove device suffixes
         name = re.sub(r"'s\s*(iphone|ipad|macbook|laptop|pc|webcam)", '', name, flags=re.IGNORECASE)
 
@@ -292,7 +296,7 @@ class SheetsService:
         name = name.replace('_', ' ')
 
         # Remove language indicators without parentheses
-        languages = ['spanish', 'arabic', 'french', 'russian', 'chinese', 'haitian', 'creole', 'asl']
+        languages = ['spanish', 'arabic', 'french', 'russian', 'chinese', 'haitian', 'creole', 'asl', 'portuguese', 'vietnamese', 'hakha', 'chin']
         for lang in languages:
             name = re.sub(rf'\b{lang}\b', '', name, flags=re.IGNORECASE)
 
@@ -321,16 +325,31 @@ class SheetsService:
         # Normalize the input names
         norm_first = self._normalize_name(first_name)
         norm_last = self._normalize_name(last_name)
+        # Combined name for two-word first name matching (e.g., "Van Daisy")
+        combined_zoom = f"{norm_first} {norm_last}".strip()
 
         best_match = None
         best_score = 0
 
         for entry in roster:
-            roster_first = entry["first_name"].lower()
-            roster_last = entry["last_name"].lower()
+            roster_first = entry["first_name"].lower().strip()
+            roster_last = entry["last_name"].lower().strip()
 
-            # Score first name match (most important)
+            # Strategy 1: Direct first name match
             first_score = fuzz.ratio(norm_first, roster_first)
+
+            # Strategy 2: Zoom first name is prefix of roster first name (e.g., "Selene" vs "Selene Lizeth")
+            if first_score < threshold and roster_first.startswith(norm_first + " "):
+                first_score = 85  # Good partial match
+
+            # Strategy 3: Roster first name is prefix of Zoom first name
+            if first_score < threshold and norm_first.startswith(roster_first + " "):
+                first_score = 85
+
+            # Strategy 4: Two-word first name - Zoom split "Van Daisy" as first="Van", last="Daisy ..."
+            # Check if combined Zoom name starts with roster first name
+            if first_score < threshold and combined_zoom.startswith(roster_first):
+                first_score = 90  # Strong match for two-word first names
 
             # If first name is a strong match, check last name
             if first_score >= threshold:
