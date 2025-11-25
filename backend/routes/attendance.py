@@ -31,9 +31,13 @@ class BulkUpdateRequest(BaseModel):
 @router.post("/process")
 async def process_attendance(request: ProcessAttendanceRequest):
     """
-    Process attendance from a Zoom meeting and update Google Sheet tab
+    Process attendance from a Zoom meeting and update Google Sheet tab.
+
+    Uses batch operations to minimize Google Sheets API calls and avoid rate limits.
     """
     try:
+        print(f"[ATTENDANCE] Processing attendance for meeting {request.meeting_id}", flush=True)
+
         # Extract session code from title
         session_code = zoom_service.extract_session_code(request.recording_title)
         if not session_code:
@@ -42,12 +46,16 @@ async def process_attendance(request: ProcessAttendanceRequest):
                 detail=f"Could not extract session code from title: {request.recording_title}"
             )
 
-        # Get or create session tab
+        print(f"[ATTENDANCE] Session code: {session_code}", flush=True)
+
+        # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
         # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
         participants = participant_data.get("participants", [])
+
+        print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
 
         # Aggregate participants by unique user
         unique_participants = {}
@@ -66,55 +74,15 @@ async def process_attendance(request: ProcessAttendanceRequest):
 
             unique_participants[key]["total_duration"] += p.get("duration", 0)
 
-        # Ensure date columns exist
-        columns = sheets_service.get_or_add_date_columns(session_code, request.meeting_date)
+        print(f"[ATTENDANCE] Aggregated to {len(unique_participants)} unique participants", flush=True)
 
-        # Process each participant
-        results = {
-            "new_profiles": 0,
-            "updated_profiles": 0,
-            "profiles": []
-        }
-
-        batch_updates = []
-
-        for key, data in unique_participants.items():
-            # Find existing profile or create new one
-            row = sheets_service.find_profile_row(
-                session_code,
-                data["first_name"],
-                data["last_name"],
-                data["email"]
-            )
-
-            if row is None:
-                row = sheets_service.add_profile(
-                    session_code,
-                    data["first_name"],
-                    data["last_name"],
-                    data["email"]
-                )
-                results["new_profiles"] += 1
-            else:
-                results["updated_profiles"] += 1
-
-            attendance_minutes = data["total_duration"] // 60
-
-            batch_updates.append({
-                "row": row,
-                "col": columns["attendance_col"],
-                "value": attendance_minutes
-            })
-
-            results["profiles"].append({
-                "row": row,
-                "name": f"{data['first_name']} {data['last_name']}",
-                "email": data["email"],
-                "attendance_minutes": attendance_minutes
-            })
-
-        if batch_updates:
-            sheets_service.batch_update_attendance(session_code, batch_updates)
+        # Use the new batch processing method (minimizes API calls)
+        participant_list = list(unique_participants.values())
+        results = sheets_service.process_attendance_batch(
+            session_code,
+            request.meeting_date,
+            participant_list
+        )
 
         return {
             "success": True,
@@ -127,6 +95,7 @@ async def process_attendance(request: ProcessAttendanceRequest):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[ATTENDANCE] Error: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

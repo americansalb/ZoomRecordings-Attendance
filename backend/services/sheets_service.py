@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from typing import Optional, List, Dict, Any
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -24,6 +25,8 @@ class SheetsService:
         self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
         self._sheets_service = None
         self._sheet_id_cache = {}  # Cache tab name -> sheet ID mapping
+        self._data_cache = {}  # Cache session_code -> {data, timestamp}
+        self._cache_ttl = 30  # Cache TTL in seconds
         logger.info(f"SheetsService initialized - Spreadsheet ID: {'SET' if self.spreadsheet_id else 'MISSING'}")
 
     def _get_credentials(self):
@@ -162,18 +165,42 @@ class SheetsService:
             return existing
         return self.create_session_tab(session_code)
 
-    def get_tab_data(self, session_code: str, range_suffix: str = "A:ZZ") -> List[List[str]]:
-        """Get all data from a session tab"""
+    def get_tab_data(self, session_code: str, range_suffix: str = "A:ZZ", use_cache: bool = True) -> List[List[str]]:
+        """Get all data from a session tab (with optional caching)"""
         tab_name = f"Session {session_code}"
+        cache_key = f"{session_code}:{range_suffix}"
+
+        # Check cache first
+        if use_cache and cache_key in self._data_cache:
+            cached = self._data_cache[cache_key]
+            if time.time() - cached["timestamp"] < self._cache_ttl:
+                return cached["data"]
+
         try:
             result = self.sheets.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id,
                 range=f"'{tab_name}'!{range_suffix}"
             ).execute()
-            return result.get("values", [])
+            data = result.get("values", [])
+
+            # Cache the result
+            self._data_cache[cache_key] = {
+                "data": data,
+                "timestamp": time.time()
+            }
+            return data
         except HttpError as e:
             print(f"Error reading tab: {e}")
             return []
+
+    def invalidate_cache(self, session_code: str = None):
+        """Invalidate cache for a session or all sessions"""
+        if session_code:
+            keys_to_remove = [k for k in self._data_cache.keys() if k.startswith(f"{session_code}:")]
+            for key in keys_to_remove:
+                del self._data_cache[key]
+        else:
+            self._data_cache.clear()
 
     def get_profiles(self, session_code: str) -> List[Dict[str, Any]]:
         """
@@ -342,6 +369,182 @@ class SheetsService:
                 spreadsheetId=self.spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": data}
             ).execute()
+
+    def process_attendance_batch(self, session_code: str, date_str: str,
+                                  participants: List[Dict]) -> Dict[str, Any]:
+        """
+        Process attendance for multiple participants in an efficient batch operation.
+
+        This method minimizes API calls by:
+        1. Reading sheet data ONCE
+        2. Adding all new profiles in ONE batch append
+        3. Adding date columns ONCE
+        4. Updating all attendance values in ONE batch update
+
+        Args:
+            session_code: The session code (e.g., "126")
+            date_str: The date string (e.g., "11/25")
+            participants: List of {"first_name", "last_name", "email", "total_duration"}
+
+        Returns:
+            {"new_profiles": count, "updated_profiles": count, "profiles": [...]}
+        """
+        print(f"[SHEETS] Processing batch attendance for session {session_code}, {len(participants)} participants", flush=True)
+        tab_name = f"Session {session_code}"
+
+        # Step 1: Read existing data ONCE (bypass cache to get fresh data)
+        data = self.get_tab_data(session_code, use_cache=False)
+        headers = data[0] if data else ["First Name", "Last Name", "Email"]
+        existing_rows = data[1:] if len(data) > 1 else []
+
+        print(f"[SHEETS] Found {len(existing_rows)} existing profiles", flush=True)
+
+        # Step 2: Build lookup index for existing profiles
+        profile_index = {}  # (first_name_lower, last_name_lower) -> row_number
+        email_index = {}    # email_lower -> row_number
+
+        for row_idx, row in enumerate(existing_rows, start=2):
+            if not row or not any(row[:3]):
+                continue
+            first_name = row[0].strip().lower() if len(row) > 0 and row[0] else ""
+            last_name = row[1].strip().lower() if len(row) > 1 and row[1] else ""
+            email = row[2].strip().lower() if len(row) > 2 and row[2] else ""
+
+            if first_name and last_name:
+                profile_index[(first_name, last_name)] = row_idx
+            if email:
+                email_index[email] = row_idx
+
+        # Step 3: Find or add date columns
+        attendance_header = f"{date_str} Attendance"
+        participation_header = f"{date_str} Participation"
+
+        attendance_col = None
+        participation_col = None
+
+        for idx, header in enumerate(headers):
+            if header == attendance_header:
+                attendance_col = idx
+            elif header == participation_header:
+                participation_col = idx
+
+        headers_changed = False
+        if attendance_col is None:
+            attendance_col = len(headers)
+            headers.append(attendance_header)
+            headers_changed = True
+
+        if participation_col is None:
+            participation_col = len(headers)
+            headers.append(participation_header)
+            headers_changed = True
+
+        # Update headers if needed (ONE API call)
+        if headers_changed:
+            print(f"[SHEETS] Adding date columns: {attendance_header}, {participation_header}", flush=True)
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!1:1",
+                valueInputOption="RAW",
+                body={"values": [headers]}
+            ).execute()
+
+        # Step 4: Categorize participants as new or existing
+        new_profiles = []
+        existing_updates = []
+        results = {"new_profiles": 0, "updated_profiles": 0, "profiles": []}
+        next_row = len(data) + 1  # Next available row
+
+        for p in participants:
+            first_name = p["first_name"].strip()
+            last_name = p["last_name"].strip()
+            email = p.get("email", "").strip()
+            attendance_minutes = p["total_duration"] // 60
+
+            # Try to find existing profile
+            row_number = None
+
+            # Check by email first
+            if email and email.lower() in email_index:
+                row_number = email_index[email.lower()]
+
+            # Then by name
+            if row_number is None:
+                name_key = (first_name.lower(), last_name.lower())
+                if name_key in profile_index:
+                    row_number = profile_index[name_key]
+
+            if row_number:
+                # Existing profile - queue for update
+                existing_updates.append({
+                    "row": row_number,
+                    "col": attendance_col,
+                    "value": attendance_minutes
+                })
+                results["updated_profiles"] += 1
+                results["profiles"].append({
+                    "row": row_number,
+                    "name": f"{first_name} {last_name}",
+                    "email": email,
+                    "attendance_minutes": attendance_minutes,
+                    "is_new": False
+                })
+            else:
+                # New profile - queue for batch add
+                new_profiles.append([first_name, last_name, email])
+
+                # Track the row number for this new profile
+                row_number = next_row
+                next_row += 1
+
+                # Also queue attendance update for this new row
+                existing_updates.append({
+                    "row": row_number,
+                    "col": attendance_col,
+                    "value": attendance_minutes
+                })
+
+                results["new_profiles"] += 1
+                results["profiles"].append({
+                    "row": row_number,
+                    "name": f"{first_name} {last_name}",
+                    "email": email,
+                    "attendance_minutes": attendance_minutes,
+                    "is_new": True
+                })
+
+        # Step 5: Batch add all new profiles (ONE API call)
+        if new_profiles:
+            print(f"[SHEETS] Adding {len(new_profiles)} new profiles in batch", flush=True)
+            self.sheets.spreadsheets().values().append(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A:C",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": new_profiles}
+            ).execute()
+
+        # Step 6: Batch update all attendance values (ONE API call)
+        if existing_updates:
+            print(f"[SHEETS] Updating {len(existing_updates)} attendance values in batch", flush=True)
+            batch_data = []
+            for update in existing_updates:
+                col_letter = self._col_index_to_letter(update["col"])
+                batch_data.append({
+                    "range": f"'{tab_name}'!{col_letter}{update['row']}",
+                    "values": [[update["value"]]]
+                })
+
+            self.sheets.spreadsheets().values().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"valueInputOption": "RAW", "data": batch_data}
+            ).execute()
+
+        # Invalidate cache since we modified data
+        self.invalidate_cache(session_code)
+
+        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated", flush=True)
+        return results
 
     def merge_profiles(self, session_code: str, keep_row: int, merge_row: int) -> None:
         """
