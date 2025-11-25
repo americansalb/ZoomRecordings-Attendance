@@ -1,0 +1,43 @@
+# Render Blueprint for deployment
+services:
+  # Backend API
+  - type: web
+    name: zoom-attendance-api
+    runtime: python
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ZOOM_ACCOUNT_ID
+        sync: false
+      - key: ZOOM_CLIENT_ID
+        sync: false
+      - key: ZOOM_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_FILE
+        value: credentials.json
+      - key: GOOGLE_SHARED_DRIVE_ID
+        sync: false
+      - key: FRONTEND_URL
+        fromService:
+          name: zoom-attendance-frontend
+          type: web
+          property: host
+    healthCheckPath: /health
+
+  # Frontend
+  - type: web
+    name: zoom-attendance-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://zoom-attendance-api.onrender.com/api/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
