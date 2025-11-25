@@ -790,6 +790,8 @@ class SheetsService:
         # Step 2: Build lookup index for existing profiles
         profile_index = {}  # (first_name_lower, last_name_lower) -> row_number
         email_index = {}    # email_lower -> row_number
+        # Also build an index for initial-based matching: (first_name_lower, last_initial) -> row_number
+        initial_index = {}  # (first_name_lower, last_initial) -> row_number
 
         for row_idx, row in enumerate(existing_rows, start=2):
             if not row or not any(row[:3]):
@@ -800,6 +802,9 @@ class SheetsService:
 
             if first_name and last_name:
                 profile_index[(first_name, last_name)] = row_idx
+                # Also index by first name + last initial for initial-based matching
+                if len(last_name) >= 1:
+                    initial_index[(first_name, last_name[0])] = row_idx
             if email:
                 email_index[email] = row_idx
 
@@ -888,6 +893,14 @@ class SheetsService:
                 name_key = (first_name.lower(), last_name.lower())
                 if name_key in profile_index:
                     row_number = profile_index[name_key]
+
+            # If roster has an initial (single char last name), try initial-based matching
+            # This handles cases like roster "Jamie R" matching existing "Jamie Reisman"
+            if row_number is None and roster_match and len(last_name) == 1:
+                initial_key = (first_name.lower(), last_name.lower())
+                if initial_key in initial_index:
+                    row_number = initial_index[initial_key]
+                    print(f"[SHEETS] ✓ Initial match: '{first_name} {last_name}' found existing profile at row {row_number}", flush=True)
 
             # Also try original Zoom name if different from canonical
             if row_number is None and roster_match:
