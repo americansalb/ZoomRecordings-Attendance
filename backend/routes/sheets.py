@@ -11,7 +11,7 @@ class CreateTabRequest(BaseModel):
     session_code: str
 
 
-@router.get("/")
+@router.get("")
 async def list_sessions():
     """List all session tabs in the spreadsheet"""
     try:
@@ -60,7 +60,7 @@ async def get_session(session_code: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/")
+@router.post("")
 async def create_session_tab(request: CreateTabRequest):
     """Create a new session tab"""
     try:

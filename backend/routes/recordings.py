@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def list_recordings(
     from_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     to_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
