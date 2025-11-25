@@ -359,9 +359,10 @@ class SheetsService:
 
         # Only return if we have a good enough match
         if best_score >= threshold:
-            print(f"[ROSTER] Matched '{first_name} {last_name}' -> '{best_match['first_name']} {best_match['last_name']}' (score: {best_score:.0f})", flush=True)
+            print(f"[ROSTER] ✓ Matched '{first_name} {last_name}' -> '{best_match['first_name']} {best_match['last_name']}' (score: {best_score:.0f})", flush=True)
             return best_match
 
+        print(f"[ROSTER] ✗ No match for '{first_name} {last_name}' (best score: {best_score:.0f})", flush=True)
         return None
 
     def get_profiles(self, session_code: str) -> List[Dict[str, Any]]:
