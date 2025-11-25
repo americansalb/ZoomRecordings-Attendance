@@ -131,7 +131,7 @@ class SheetsService:
                             "title": tab_name,
                             "gridProperties": {
                                 "frozenRowCount": 1,
-                                "frozenColumnCount": 3
+                                "frozenColumnCount": 4
                             }
                         }
                     }
@@ -145,11 +145,11 @@ class SheetsService:
 
             sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-            # Set up header row
-            headers = [["First Name", "Last Name", "Email"]]
+            # Set up header row (includes Roster Match column for manual review)
+            headers = [["First Name", "Last Name", "Email", "Roster Match"]]
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{tab_name}'!A1:C1",
+                range=f"'{tab_name}'!A1:D1",
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
@@ -813,8 +813,10 @@ class SheetsService:
         # Step 2: Build lookup index for existing profiles
         profile_index = {}  # (first_name_lower, last_name_lower) -> row_number
         email_index = {}    # email_lower -> row_number
-        # Also build an index for initial-based matching: (first_name_lower, last_initial) -> row_number
+        # Index for initial-based matching: (first_name_lower, last_initial) -> row_number
         initial_index = {}  # (first_name_lower, last_initial) -> row_number
+        # Index for first-name-only matching (for Fritz, Dilorom_Russian, etc.)
+        first_name_index = {}  # first_name_lower -> row_number (first occurrence)
 
         for row_idx, row in enumerate(existing_rows, start=2):
             if not row or not any(row[:3]):
@@ -828,6 +830,9 @@ class SheetsService:
                 # Also index by first name + last initial for initial-based matching
                 if len(last_name) >= 1:
                     initial_index[(first_name, last_name[0])] = row_idx
+            # Index by first name only (keep first occurrence to prefer fuller names)
+            if first_name and first_name not in first_name_index:
+                first_name_index[first_name] = row_idx
             if email:
                 email_index[email] = row_idx
 
@@ -865,15 +870,15 @@ class SheetsService:
                 body={"values": [headers]}
             ).execute()
 
-        # Step 4: Load name mappings and roster for canonical name matching
+        # Step 4: Load name mappings and roster for matching info (NOT for replacing names)
         mappings = self.get_name_mappings(session_code)
         roster = self.get_roster(session_code)
-        roster_matched_names = {}  # Track which roster entries we've already matched to existing profiles
 
         # Step 5: Categorize participants as new or existing
         new_profiles = []
         existing_updates = []
-        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "mapping_matched": 0, "unmatched": 0, "profiles": []}
+        roster_match_updates = []  # Updates for the Roster Match column
+        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "mapping_matched": 0, "unmatched": 0, "needs_review": 0, "profiles": []}
         next_row = len(data) + 1  # Next available row
 
         for p in participants:
@@ -883,66 +888,91 @@ class SheetsService:
             zoom_full_name = f"{zoom_first} {zoom_last}".strip()
             attendance_minutes = p["total_duration"] // 60
 
-            # Use canonical name from roster if we can match
-            first_name = zoom_first
-            last_name = zoom_last
+            # Normalize Zoom name for matching (strip device suffixes, language tags, etc.)
+            norm_first = self._normalize_name(zoom_first)
+            norm_last = self._normalize_name(zoom_last)
+
+            # Find roster match (for info only, NOT replacing the name)
             roster_match = None
-            mapping_match = None
+            roster_match_str = ""
+            match_confidence = "none"
 
             # First check for explicit name mappings (highest priority)
             mapping_match = self.find_mapping_for_name(zoom_full_name, session_code)
             if mapping_match:
-                first_name = mapping_match["first_name"]
-                last_name = mapping_match["last_name"]
+                roster_match_str = f"{mapping_match['first_name']} {mapping_match['last_name']}"
+                match_confidence = "high"
                 results["mapping_matched"] += 1
-                print(f"[MAPPINGS] ✓ Used mapping: '{zoom_full_name}' -> '{first_name} {last_name}'", flush=True)
+                print(f"[MAPPINGS] ✓ Used mapping: '{zoom_full_name}' -> '{roster_match_str}'", flush=True)
             elif roster:
                 # Fall back to fuzzy roster matching
                 roster_match = self.match_to_roster(zoom_first, zoom_last, roster)
                 if roster_match:
-                    first_name = roster_match["first_name"]
-                    last_name = roster_match["last_name"]
+                    roster_match_str = f"{roster_match['first_name']} {roster_match['last_name']}"
+                    match_confidence = "high"
                     results["roster_matched"] += 1
 
-            # Try to find existing profile
+            # Try to find existing profile (use ORIGINAL Zoom name, not roster name)
             row_number = None
 
             # Check by email first
             if email and email.lower() in email_index:
                 row_number = email_index[email.lower()]
 
-            # Then by canonical name (from roster or original)
+            # Then by exact Zoom name
             if row_number is None:
-                name_key = (first_name.lower(), last_name.lower())
+                name_key = (norm_first.lower(), norm_last.lower())
                 if name_key in profile_index:
                     row_number = profile_index[name_key]
 
-            # If roster has an initial (single char last name), try initial-based matching
-            # This handles cases like roster "Jamie R" matching existing "Jamie Reisman"
-            if row_number is None and roster_match and len(last_name) == 1:
-                initial_key = (first_name.lower(), last_name.lower())
-                if initial_key in initial_index:
-                    row_number = initial_index[initial_key]
-                    print(f"[SHEETS] ✓ Initial match: '{first_name} {last_name}' found existing profile at row {row_number}", flush=True)
-
-            # Also try original Zoom name if different from canonical
-            if row_number is None and roster_match:
+            # Try original (non-normalized) Zoom name
+            if row_number is None:
                 orig_key = (zoom_first.lower(), zoom_last.lower())
                 if orig_key in profile_index:
                     row_number = profile_index[orig_key]
 
+            # If roster match found, try to find existing profile with roster name
+            if row_number is None and roster_match:
+                roster_key = (roster_match["first_name"].lower(), roster_match["last_name"].lower())
+                if roster_key in profile_index:
+                    row_number = profile_index[roster_key]
+
+            # Try initial-based matching (e.g., "Jamie R" matches existing "Jamie Reisman")
+            if row_number is None and roster_match and len(roster_match["last_name"]) == 1:
+                initial_key = (roster_match["first_name"].lower(), roster_match["last_name"].lower())
+                if initial_key in initial_index:
+                    row_number = initial_index[initial_key]
+                    print(f"[SHEETS] ✓ Initial match: '{roster_match['first_name']} {roster_match['last_name']}' found existing profile at row {row_number}", flush=True)
+
+            # FALLBACK: First-name-only matching for cases like "Fritz", "Dilorom_Russian", "Chrisnove's iPhone"
+            if row_number is None and norm_first:
+                if norm_first in first_name_index:
+                    row_number = first_name_index[norm_first]
+                    if match_confidence == "none":
+                        match_confidence = "low"
+                        roster_match_str = f"⚠️ REVIEW: matched by first name '{norm_first}' only"
+                        results["needs_review"] += 1
+                    print(f"[SHEETS] ✓ First-name match: '{zoom_full_name}' found existing profile at row {row_number} (NEEDS REVIEW)", flush=True)
+
             if row_number:
-                # Existing profile - queue for update
+                # Existing profile - queue attendance update
                 existing_updates.append({
                     "row": row_number,
                     "col": attendance_col,
                     "value": attendance_minutes
                 })
+                # Also update Roster Match column if we have new match info
+                if roster_match_str:
+                    roster_match_updates.append({
+                        "row": row_number,
+                        "value": roster_match_str
+                    })
                 results["updated_profiles"] += 1
                 results["profiles"].append({
                     "row": row_number,
-                    "name": f"{first_name} {last_name}",
-                    "zoom_name": zoom_full_name if (roster_match or mapping_match) else None,
+                    "name": zoom_full_name,
+                    "roster_match": roster_match_str,
+                    "match_confidence": match_confidence,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": False,
@@ -950,12 +980,15 @@ class SheetsService:
                     "mapping_matched": mapping_match is not None
                 })
             else:
-                # New profile - use canonical name from roster
-                new_profiles.append([first_name, last_name, email])
+                # New profile - use ORIGINAL Zoom name (not roster name)
+                new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
 
-                # Track for duplicate detection
-                name_key = (first_name.lower(), last_name.lower())
+                # Track for duplicate detection using normalized name
+                name_key = (norm_first.lower(), norm_last.lower())
                 profile_index[name_key] = next_row
+                # Also track by first name for future first-name-only matching
+                if norm_first and norm_first not in first_name_index:
+                    first_name_index[norm_first] = next_row
 
                 # Track the row number for this new profile
                 row_number = next_row
@@ -973,8 +1006,9 @@ class SheetsService:
                     results["unmatched"] += 1
                 results["profiles"].append({
                     "row": row_number,
-                    "name": f"{first_name} {last_name}",
-                    "zoom_name": zoom_full_name if (roster_match or mapping_match) else None,
+                    "name": zoom_full_name,
+                    "roster_match": roster_match_str,
+                    "match_confidence": match_confidence,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": True,
@@ -982,28 +1016,37 @@ class SheetsService:
                     "mapping_matched": mapping_match is not None
                 })
 
-        # Step 6: Batch add all new profiles (ONE API call)
+        # Step 6: Batch add all new profiles (ONE API call) - now with 4 columns including Roster Match
         if new_profiles:
             print(f"[SHEETS] Adding {len(new_profiles)} new profiles in batch", flush=True)
             self.sheets.spreadsheets().values().append(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{tab_name}'!A:C",
+                range=f"'{tab_name}'!A:D",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": new_profiles}
             ).execute()
 
-        # Step 7: Batch update all attendance values (ONE API call)
-        if existing_updates:
-            print(f"[SHEETS] Updating {len(existing_updates)} attendance values in batch", flush=True)
-            batch_data = []
-            for update in existing_updates:
-                col_letter = self._col_index_to_letter(update["col"])
-                batch_data.append({
-                    "range": f"'{tab_name}'!{col_letter}{update['row']}",
-                    "values": [[update["value"]]]
-                })
+        # Step 7: Batch update all attendance values and roster matches (ONE API call)
+        batch_data = []
 
+        # Add attendance updates
+        for update in existing_updates:
+            col_letter = self._col_index_to_letter(update["col"])
+            batch_data.append({
+                "range": f"'{tab_name}'!{col_letter}{update['row']}",
+                "values": [[update["value"]]]
+            })
+
+        # Add roster match updates (column D = index 3)
+        for update in roster_match_updates:
+            batch_data.append({
+                "range": f"'{tab_name}'!D{update['row']}",
+                "values": [[update["value"]]]
+            })
+
+        if batch_data:
+            print(f"[SHEETS] Updating {len(existing_updates)} attendance values and {len(roster_match_updates)} roster matches in batch", flush=True)
             self.sheets.spreadsheets().values().batchUpdate(
                 spreadsheetId=self.spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": batch_data}
@@ -1012,7 +1055,7 @@ class SheetsService:
         # Invalidate cache since we modified data
         self.invalidate_cache(session_code)
 
-        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated, {results['roster_matched']} roster-matched, {results['mapping_matched']} mapping-matched, {results['unmatched']} unmatched", flush=True)
+        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated, {results['roster_matched']} roster-matched, {results['mapping_matched']} mapping-matched, {results['unmatched']} unmatched, {results['needs_review']} needs review", flush=True)
         return results
 
     def merge_profiles(self, session_code: str, keep_row: int, merge_row: int) -> None:
