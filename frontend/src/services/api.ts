@@ -83,6 +83,15 @@ export interface RosterStudent {
   last_name: string
 }
 
+export interface SummaryStudent {
+  row_number: number
+  student_id: string
+  first_name: string
+  last_name: string
+  known_zoom_names: string[]
+  attendance: Record<string, number>
+}
+
 // Recordings API
 export const recordingsApi = {
   list: async (params?: { from_date?: string; to_date?: string; search?: string }) => {
@@ -162,6 +171,30 @@ export const sheetsApi = {
     const { data } = await api.get(`/sheets/${sessionCode}/data`)
     return data as { headers: string[]; rows: string[][]; total_rows: number }
   },
+
+  getSummary: async (sessionCode: string, regenerate: boolean = false) => {
+    const { data } = await api.get(`/sheets/${sessionCode}/summary`, {
+      params: regenerate ? { regenerate: true } : undefined,
+    })
+    return data as {
+      session_code: string
+      students: SummaryStudent[]
+      dates: string[]
+      total: number
+      spreadsheet_url: string
+    }
+  },
+
+  regenerateSummary: async (sessionCode: string) => {
+    const { data } = await api.post(`/sheets/${sessionCode}/summary/regenerate`)
+    return data as {
+      success: boolean
+      session_code: string
+      students: number
+      dates: string[]
+      summary_tab: { name: string; sheet_id: number; session_code: string }
+    }
+  },
 }
 
 // Students API
@@ -181,6 +214,31 @@ export const studentsApi = {
         total_sessions: number
         total_attendance_minutes: number
         total_participation_minutes: number
+        average_attendance: number
+      }
+    }
+  },
+
+  // Summary-based search (uses canonical roster names, searches Zoom names too)
+  searchSummary: async (query: string, sessionCode?: string) => {
+    const { data } = await api.get('/students/summary/search', {
+      params: { query, session_code: sessionCode },
+    })
+    return data as {
+      results: (SummaryStudent & { session_code: string; session_name: string })[]
+      total: number
+    }
+  },
+
+  // Summary-based profile (shows canonical name with known Zoom names)
+  getSummaryProfile: async (sessionCode: string, rowNumber: number) => {
+    const { data } = await api.get(`/students/summary/profile/${sessionCode}/${rowNumber}`)
+    return data as SummaryStudent & {
+      session_code: string
+      dates: string[]
+      summary: {
+        total_sessions: number
+        total_attendance_minutes: number
         average_attendance: number
       }
     }

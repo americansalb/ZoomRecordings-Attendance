@@ -1151,6 +1151,316 @@ class SheetsService:
             index = index // 26 - 1
         return result
 
+    # ==================== SUMMARY TAB METHODS ====================
+
+    def _get_summary_tab_name(self, session_code: str) -> str:
+        """Get the name for a session's summary tab"""
+        return f"Session {session_code} Summary"
+
+    def find_summary_tab(self, session_code: str) -> Optional[Dict[str, Any]]:
+        """Find the summary tab for a session"""
+        tab_name = self._get_summary_tab_name(session_code)
+        tabs = self._get_all_tabs()
+
+        for tab in tabs:
+            props = tab.get("properties", {})
+            if props.get("title") == tab_name:
+                return {
+                    "name": tab_name,
+                    "sheet_id": props.get("sheetId"),
+                    "session_code": session_code
+                }
+        return None
+
+    def create_summary_tab(self, session_code: str) -> Dict[str, Any]:
+        """Create the summary tab for a session"""
+        tab_name = self._get_summary_tab_name(session_code)
+
+        try:
+            request = {
+                "requests": [{
+                    "addSheet": {
+                        "properties": {
+                            "title": tab_name,
+                            "gridProperties": {
+                                "frozenRowCount": 1,
+                                "frozenColumnCount": 3
+                            }
+                        }
+                    }
+                }]
+            }
+
+            result = self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body=request
+            ).execute()
+
+            sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+            # Set up header row
+            headers = [["Student ID", "First Name", "Last Name", "Known Zoom Names"]]
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A1:D1",
+                valueInputOption="RAW",
+                body={"values": headers}
+            ).execute()
+
+            self._sheet_id_cache[tab_name] = sheet_id
+
+            return {
+                "name": tab_name,
+                "sheet_id": sheet_id,
+                "session_code": session_code
+            }
+
+        except HttpError as e:
+            print(f"[SUMMARY] Error creating summary tab: {e}", flush=True)
+            raise
+
+    def get_or_create_summary_tab(self, session_code: str) -> Dict[str, Any]:
+        """Find existing summary tab or create new one"""
+        existing = self.find_summary_tab(session_code)
+        if existing:
+            return existing
+        return self.create_summary_tab(session_code)
+
+    def generate_session_summary(self, session_code: str) -> Dict[str, Any]:
+        """
+        Generate/update the Summary tab for a session.
+
+        This aggregates data from the raw "Session XXX" tab into a clean view:
+        - Groups Zoom entries by their Roster Match
+        - Shows canonical student names from roster
+        - Lists all known Zoom name variations
+        - Aggregates attendance minutes per date
+
+        Returns:
+            {"students": count, "dates": [...], "summary_tab": tab_info}
+        """
+        print(f"[SUMMARY] Generating summary for session {session_code}", flush=True)
+
+        # Step 1: Read raw attendance data
+        raw_data = self.get_tab_data(session_code, use_cache=False)
+        if not raw_data or len(raw_data) < 2:
+            print(f"[SUMMARY] No raw data found for session {session_code}", flush=True)
+            return {"students": 0, "dates": [], "summary_tab": None}
+
+        raw_headers = raw_data[0]
+        raw_rows = raw_data[1:]
+
+        # Step 2: Load roster for canonical student info
+        roster = self.get_roster(session_code)
+        roster_by_name = {}
+        for entry in roster:
+            key = f"{entry['first_name']} {entry['last_name']}".lower().strip()
+            roster_by_name[key] = entry
+
+        # Step 3: Extract date columns from raw headers
+        # Headers are: First Name, Last Name, Email, Roster Match, [Date Attendance], [Date Participation], ...
+        date_columns = []
+        for idx, header in enumerate(raw_headers):
+            if header.endswith(" Attendance"):
+                date_str = header.replace(" Attendance", "")
+                date_columns.append({"date": date_str, "col_idx": idx})
+
+        print(f"[SUMMARY] Found {len(date_columns)} attendance dates", flush=True)
+
+        # Step 4: Group raw rows by roster match
+        # Structure: {roster_match_key: {"roster_info": {...}, "zoom_names": set(), "attendance": {date: max_minutes}}}
+        summary_data = {}
+
+        for row in raw_rows:
+            if not row or not any(row[:3]):
+                continue
+
+            zoom_first = row[0].strip() if len(row) > 0 and row[0] else ""
+            zoom_last = row[1].strip() if len(row) > 1 and row[1] else ""
+            roster_match = row[3].strip() if len(row) > 3 and row[3] else ""
+            zoom_full = f"{zoom_first} {zoom_last}".strip()
+
+            # Determine the grouping key
+            if roster_match and not roster_match.startswith("⚠️"):
+                # Has a valid roster match - use that as the key
+                group_key = roster_match.lower()
+            else:
+                # No roster match - use the Zoom name itself
+                group_key = zoom_full.lower()
+
+            # Initialize group if needed
+            if group_key not in summary_data:
+                # Try to find roster info
+                roster_info = roster_by_name.get(group_key, {})
+                summary_data[group_key] = {
+                    "roster_info": roster_info,
+                    "canonical_name": roster_match if roster_match and not roster_match.startswith("⚠️") else zoom_full,
+                    "zoom_names": set(),
+                    "attendance": {},
+                    "needs_review": roster_match.startswith("⚠️") if roster_match else False
+                }
+
+            # Add Zoom name to known names
+            summary_data[group_key]["zoom_names"].add(zoom_full)
+
+            # Aggregate attendance (take max for each date)
+            for date_col in date_columns:
+                date_str = date_col["date"]
+                col_idx = date_col["col_idx"]
+                if col_idx < len(row) and row[col_idx]:
+                    try:
+                        minutes = int(float(row[col_idx]))
+                        current_max = summary_data[group_key]["attendance"].get(date_str, 0)
+                        summary_data[group_key]["attendance"][date_str] = max(current_max, minutes)
+                    except ValueError:
+                        pass
+
+        print(f"[SUMMARY] Grouped into {len(summary_data)} students", flush=True)
+
+        # Step 5: Get or create summary tab
+        summary_tab = self.get_or_create_summary_tab(session_code)
+        tab_name = summary_tab["name"]
+
+        # Step 6: Build summary headers and rows
+        summary_headers = ["Student ID", "First Name", "Last Name", "Known Zoom Names"]
+        for date_col in date_columns:
+            summary_headers.append(f"{date_col['date']} Attendance")
+
+        summary_rows = [summary_headers]
+
+        for group_key, data in sorted(summary_data.items()):
+            canonical_name = data["canonical_name"]
+            roster_info = data["roster_info"]
+            zoom_names = sorted(data["zoom_names"])
+
+            # Parse canonical name
+            name_parts = canonical_name.split(" ", 1)
+            first_name = name_parts[0] if name_parts else ""
+            last_name = name_parts[1] if len(name_parts) > 1 else ""
+
+            # Use roster info if available
+            student_id = roster_info.get("student_id", "")
+            if roster_info.get("first_name"):
+                first_name = roster_info["first_name"]
+            if roster_info.get("last_name"):
+                last_name = roster_info["last_name"]
+
+            # Add review flag if needed
+            if data["needs_review"]:
+                first_name = f"⚠️ {first_name}"
+
+            # Build row
+            row = [student_id, first_name, last_name, ", ".join(zoom_names)]
+            for date_col in date_columns:
+                date_str = date_col["date"]
+                row.append(data["attendance"].get(date_str, 0))
+
+            summary_rows.append(row)
+
+        # Step 7: Clear and write summary data
+        # First, clear existing data
+        sheet_id = summary_tab["sheet_id"]
+        try:
+            self.sheets.spreadsheets().values().clear(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A:ZZ"
+            ).execute()
+        except HttpError:
+            pass  # Tab might be empty
+
+        # Write all data at once
+        if summary_rows:
+            last_col = self._col_index_to_letter(len(summary_headers) - 1)
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A1:{last_col}{len(summary_rows)}",
+                valueInputOption="RAW",
+                body={"values": summary_rows}
+            ).execute()
+
+        print(f"[SUMMARY] Summary tab updated with {len(summary_rows) - 1} students", flush=True)
+
+        return {
+            "students": len(summary_rows) - 1,
+            "dates": [dc["date"] for dc in date_columns],
+            "summary_tab": summary_tab
+        }
+
+    def get_summary_data(self, session_code: str) -> Dict[str, Any]:
+        """
+        Get summary data for a session (used by student frontend).
+
+        Returns:
+            {"students": [...], "dates": [...], "total": count}
+        """
+        summary_tab = self.find_summary_tab(session_code)
+        if not summary_tab:
+            # Try to generate it
+            result = self.generate_session_summary(session_code)
+            if result["students"] == 0:
+                return {"students": [], "dates": [], "total": 0}
+            summary_tab = result["summary_tab"]
+
+        tab_name = summary_tab["name"]
+
+        try:
+            result = self.sheets.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A:ZZ"
+            ).execute()
+            data = result.get("values", [])
+
+            if not data or len(data) < 2:
+                return {"students": [], "dates": [], "total": 0}
+
+            headers = data[0]
+            rows = data[1:]
+
+            # Extract dates from headers (columns after "Known Zoom Names")
+            dates = []
+            for header in headers[4:]:
+                if header.endswith(" Attendance"):
+                    dates.append(header.replace(" Attendance", ""))
+
+            # Parse student rows
+            students = []
+            for row_idx, row in enumerate(rows, start=2):
+                if not row or not any(row[:3]):
+                    continue
+
+                student = {
+                    "row_number": row_idx,
+                    "student_id": row[0] if len(row) > 0 else "",
+                    "first_name": row[1] if len(row) > 1 else "",
+                    "last_name": row[2] if len(row) > 2 else "",
+                    "known_zoom_names": row[3].split(", ") if len(row) > 3 and row[3] else [],
+                    "attendance": {}
+                }
+
+                # Parse attendance dates
+                for col_idx, header in enumerate(headers[4:], start=4):
+                    if header.endswith(" Attendance"):
+                        date_str = header.replace(" Attendance", "")
+                        if col_idx < len(row) and row[col_idx]:
+                            try:
+                                student["attendance"][date_str] = int(float(row[col_idx]))
+                            except ValueError:
+                                student["attendance"][date_str] = 0
+                        else:
+                            student["attendance"][date_str] = 0
+
+                students.append(student)
+
+            return {
+                "students": students,
+                "dates": dates,
+                "total": len(students)
+            }
+
+        except HttpError as e:
+            print(f"[SUMMARY] Error reading summary data: {e}", flush=True)
+            return {"students": [], "dates": [], "total": 0}
+
 
 # Singleton instance
 sheets_service = SheetsService()

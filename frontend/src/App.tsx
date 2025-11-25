@@ -10,6 +10,7 @@ import NameMappingsPage from './pages/admin/NameMappings'
 // Student Pages
 import StudentSearch from './pages/student/Search'
 import StudentProfile from './pages/student/Profile'
+import StudentSummaryProfile from './pages/student/SummaryProfile'
 
 function App() {
   const location = useLocation()
@@ -62,6 +63,7 @@ function App() {
           {/* Student Routes */}
           <Route path="/student" element={<StudentSearch />} />
           <Route path="/student/profile/:sessionCode/:rowNumber" element={<StudentProfile />} />
+          <Route path="/student/summary/:sessionCode/:rowNumber" element={<StudentSummaryProfile />} />
         </Routes>
       </main>
     </div>

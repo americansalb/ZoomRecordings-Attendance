@@ -103,3 +103,70 @@ async def get_session_data(session_code: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{session_code}/summary")
+async def get_session_summary(session_code: str, regenerate: bool = False):
+    """
+    Get summary data for a session.
+
+    The summary tab shows:
+    - Canonical student names from roster
+    - All known Zoom name variations
+    - Aggregated attendance per date
+
+    Args:
+        session_code: The session code (e.g., "126")
+        regenerate: If true, regenerate the summary from raw data
+    """
+    try:
+        if regenerate:
+            result = sheets_service.generate_session_summary(session_code)
+            if result["students"] == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No data found for session {session_code}"
+                )
+
+        summary_data = sheets_service.get_summary_data(session_code)
+
+        if not summary_data["students"]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No summary data found for session {session_code}"
+            )
+
+        return {
+            "session_code": session_code,
+            "students": summary_data["students"],
+            "dates": summary_data["dates"],
+            "total": summary_data["total"],
+            "spreadsheet_url": sheets_service.get_spreadsheet_url()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{session_code}/summary/regenerate")
+async def regenerate_session_summary(session_code: str):
+    """
+    Regenerate the summary tab for a session from raw attendance data.
+
+    Use this to refresh the summary if raw data was manually edited.
+    """
+    try:
+        result = sheets_service.generate_session_summary(session_code)
+
+        return {
+            "success": True,
+            "session_code": session_code,
+            "students": result["students"],
+            "dates": result["dates"],
+            "summary_tab": result["summary_tab"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

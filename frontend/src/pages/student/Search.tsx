@@ -7,9 +7,10 @@ export default function StudentSearch() {
   const [searchQuery, setSearchQuery] = useState('')
   const [submittedQuery, setSubmittedQuery] = useState('')
 
+  // Use summary-based search for cleaner roster names and Zoom name matching
   const { data: searchResults, isLoading, isError } = useQuery({
-    queryKey: ['student-search', submittedQuery],
-    queryFn: () => studentsApi.search(submittedQuery),
+    queryKey: ['student-summary-search', submittedQuery],
+    queryFn: () => studentsApi.searchSummary(submittedQuery),
     enabled: submittedQuery.length >= 2,
   })
 
@@ -104,7 +105,7 @@ export default function StudentSearch() {
               {searchResults.results.map((result) => (
                 <Link
                   key={`${result.session_code}-${result.row_number}`}
-                  to={`/student/profile/${result.session_code}/${result.row_number}`}
+                  to={`/student/summary/${result.session_code}/${result.row_number}`}
                   className="card block hover:shadow-lg transition-shadow"
                 >
                   <div className="flex justify-between items-start">
@@ -112,8 +113,13 @@ export default function StudentSearch() {
                       <h3 className="font-medium text-gray-900">
                         {result.first_name} {result.last_name}
                       </h3>
-                      {result.email && (
-                        <p className="text-sm text-gray-500">{result.email}</p>
+                      {result.student_id && (
+                        <p className="text-sm text-gray-500">ID: {result.student_id}</p>
+                      )}
+                      {result.known_zoom_names && result.known_zoom_names.length > 0 && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          Also known as: {result.known_zoom_names.join(', ')}
+                        </p>
                       )}
                       <p className="text-sm text-blue-600 mt-1">
                         {result.session_name}

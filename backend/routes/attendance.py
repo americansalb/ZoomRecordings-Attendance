@@ -84,12 +84,18 @@ async def process_attendance(request: ProcessAttendanceRequest):
             participant_list
         )
 
+        # Auto-generate the Summary tab with aggregated data
+        print(f"[ATTENDANCE] Generating summary tab for session {session_code}", flush=True)
+        summary_result = sheets_service.generate_session_summary(session_code)
+        print(f"[ATTENDANCE] Summary tab updated with {summary_result['students']} students", flush=True)
+
         return {
             "success": True,
             "session_code": session_code,
             "meeting_date": request.meeting_date,
             "spreadsheet_url": sheets_service.get_spreadsheet_url(),
-            "results": results
+            "results": results,
+            "summary": summary_result
         }
 
     except HTTPException:
