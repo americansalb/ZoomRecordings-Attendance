@@ -28,8 +28,10 @@ async def list_recordings(
         if not to_date:
             to_date = datetime.now().strftime("%Y-%m-%d")
 
+        print(f"[RECORDINGS] Fetching from {from_date} to {to_date}", flush=True)
         logger.info(f"GET /api/recordings - Fetching recordings from {from_date} to {to_date}")
         recordings = await zoom_service.list_all_recordings(from_date, to_date)
+        print(f"[RECORDINGS] Found {len(recordings)} recordings", flush=True)
         logger.info(f"GET /api/recordings - Found {len(recordings)} recordings")
 
         # Process recordings to extract session codes and add metadata

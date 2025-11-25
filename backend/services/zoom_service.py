@@ -33,9 +33,11 @@ class ZoomService:
         if self._access_token and self._token_expiry and datetime.now() < self._token_expiry:
             return self._access_token
 
+        print("[ZOOM] Requesting new access token...", flush=True)
         logger.info("Requesting new Zoom access token...")
 
         if not self.client_id or not self.client_secret or not self.account_id:
+            print(f"[ZOOM] ERROR: Missing credentials! account_id={bool(self.account_id)}, client_id={bool(self.client_id)}, client_secret={bool(self.client_secret)}", flush=True)
             logger.error("Missing Zoom credentials - cannot authenticate")
             raise ValueError("Missing Zoom credentials: ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, or ZOOM_CLIENT_SECRET not set")
 
@@ -63,12 +65,15 @@ class ZoomService:
                 # Token expires in 1 hour, refresh 5 minutes early
                 self._token_expiry = datetime.now() + timedelta(seconds=data.get("expires_in", 3600) - 300)
 
+                print("[ZOOM] Successfully obtained access token", flush=True)
                 logger.info("Successfully obtained Zoom access token")
                 return self._access_token
             except httpx.HTTPStatusError as e:
+                print(f"[ZOOM] Token request FAILED: {e.response.status_code} - {e.response.text}", flush=True)
                 logger.error(f"Zoom token request failed: {e.response.status_code} - {e.response.text}")
                 raise
             except Exception as e:
+                print(f"[ZOOM] Token request ERROR: {str(e)}", flush=True)
                 logger.error(f"Zoom token request error: {str(e)}")
                 raise
 
@@ -127,14 +132,18 @@ class ZoomService:
         """
         List all cloud recordings across all users in the account
         """
+        print(f"[ZOOM] list_all_recordings called: {from_date} to {to_date}", flush=True)
         logger.info(f"Fetching all recordings from {from_date} to {to_date}")
 
         # First get list of users
         try:
+            print("[ZOOM] Fetching users list...", flush=True)
             users_response = await self._make_request("GET", "/users", params={"page_size": 300})
             users = users_response.get("users", [])
+            print(f"[ZOOM] Found {len(users)} users", flush=True)
             logger.info(f"Found {len(users)} users in Zoom account")
         except Exception as e:
+            print(f"[ZOOM] Failed to fetch users: {str(e)}", flush=True)
             logger.error(f"Failed to fetch users list: {str(e)}")
             raise
 
