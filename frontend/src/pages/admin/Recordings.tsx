@@ -9,8 +9,8 @@ export default function RecordingsPage() {
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
   )
-  const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(180)
-  const [scheduledStartTime, setScheduledStartTime] = useState<string>('19:00') // Default 7 PM
+  const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(undefined)
+  const [scheduledStartTime, setScheduledStartTime] = useState<string>('') // Empty = use Zoom's scheduled time
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
@@ -180,36 +180,37 @@ export default function RecordingsPage() {
                 />
               </div>
 
-              {/* Scheduled Start Time Input */}
+              {/* Scheduled Start Time Input (Optional - auto-detected from Zoom) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Start Time
+                  Scheduled Start Time <span className="text-gray-400 font-normal">(optional)</span>
                 </label>
                 <input
                   type="time"
                   className="input"
                   value={scheduledStartTime}
                   onChange={(e) => setScheduledStartTime(e.target.value)}
+                  placeholder="Auto-detected"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  When the meeting was SCHEDULED to start (e.g., 7:00 PM). Attendance only counts within this window.
+                  Leave empty to use Zoom's scheduled time. Only override if auto-detection fails.
                 </p>
               </div>
 
-              {/* Meeting Duration Input */}
+              {/* Meeting Duration Input (Optional - auto-detected from Zoom) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Duration (minutes)
+                  Scheduled Duration <span className="text-gray-400 font-normal">(optional)</span>
                 </label>
                 <input
                   type="number"
                   className="input"
                   value={meetingDurationMinutes ?? ''}
                   onChange={(e) => setMeetingDurationMinutes(e.target.value ? parseInt(e.target.value) : undefined)}
-                  placeholder="e.g., 180 for 3 hours"
+                  placeholder="Auto-detected from Zoom"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Meeting length in minutes. Attendance window = Start Time + Duration.
+                  Leave empty to use Zoom's scheduled duration. Only override if needed.
                 </p>
               </div>
 
