@@ -1,13 +1,15 @@
 import os
 from typing import Optional, List, Dict, Any
-from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 
 class SheetsService:
-    """Service for interacting with Google Sheets API"""
+    """Service for interacting with Google Sheets API
+
+    Uses ONE spreadsheet with multiple tabs (sheets) - one tab per session.
+    """
 
     SCOPES = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -15,20 +17,18 @@ class SheetsService:
     ]
 
     def __init__(self):
-        self.shared_drive_id = os.getenv("GOOGLE_SHARED_DRIVE_ID")
+        # The single spreadsheet ID that contains all session tabs
+        self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
         self._sheets_service = None
-        self._drive_service = None
+        self._sheet_id_cache = {}  # Cache tab name -> sheet ID mapping
 
     def _get_credentials(self):
         """Get Google API credentials from environment variables or file"""
-        # Try environment variables first (for Render/production)
         client_email = os.getenv("GOOGLE_CLIENT_EMAIL")
         private_key = os.getenv("GOOGLE_PRIVATE_KEY")
 
         if client_email and private_key:
-            # Handle escaped newlines in private key
             private_key = private_key.replace("\\n", "\n")
-
             credentials_info = {
                 "type": "service_account",
                 "client_email": client_email,
@@ -40,7 +40,6 @@ class SheetsService:
                 scopes=self.SCOPES
             )
 
-        # Fallback to credentials file (for local development)
         credentials_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
         return service_account.Credentials.from_service_account_file(
             credentials_file,
@@ -55,121 +54,138 @@ class SheetsService:
             self._sheets_service = build("sheets", "v4", credentials=credentials)
         return self._sheets_service
 
-    @property
-    def drive(self):
-        """Get the Drive API service"""
-        if not self._drive_service:
-            credentials = self._get_credentials()
-            self._drive_service = build("drive", "v3", credentials=credentials)
-        return self._drive_service
+    def _get_all_tabs(self) -> List[Dict[str, Any]]:
+        """Get all tabs in the spreadsheet"""
+        try:
+            result = self.sheets.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id
+            ).execute()
+            return result.get("sheets", [])
+        except HttpError as e:
+            print(f"Error getting tabs: {e}")
+            return []
 
-    def find_session_sheet(self, session_code: str) -> Optional[Dict[str, str]]:
+    def _get_sheet_id(self, tab_name: str) -> Optional[int]:
+        """Get the numeric sheet ID for a tab name"""
+        if tab_name in self._sheet_id_cache:
+            return self._sheet_id_cache[tab_name]
+
+        tabs = self._get_all_tabs()
+        for tab in tabs:
+            props = tab.get("properties", {})
+            if props.get("title") == tab_name:
+                sheet_id = props.get("sheetId")
+                self._sheet_id_cache[tab_name] = sheet_id
+                return sheet_id
+        return None
+
+    def find_session_tab(self, session_code: str) -> Optional[Dict[str, Any]]:
         """
-        Find a Google Sheet by session code (e.g., "127" -> "Session 127")
+        Find a tab by session code (e.g., "127" -> "Session 127")
 
-        Returns: {"id": "spreadsheet_id", "name": "Sheet Name"} or None
+        Returns: {"name": "Session 127", "sheet_id": 123} or None
         """
-        query = f"name contains 'Session {session_code}' and mimeType='application/vnd.google-apps.spreadsheet'"
+        tab_name = f"Session {session_code}"
+        tabs = self._get_all_tabs()
 
-        if self.shared_drive_id:
-            query += f" and '{self.shared_drive_id}' in parents"
+        for tab in tabs:
+            props = tab.get("properties", {})
+            if props.get("title") == tab_name:
+                return {
+                    "name": tab_name,
+                    "sheet_id": props.get("sheetId"),
+                    "session_code": session_code
+                }
+        return None
+
+    def create_session_tab(self, session_code: str) -> Dict[str, Any]:
+        """
+        Create a new tab for a session
+
+        Returns: {"name": "Session 127", "sheet_id": 123}
+        """
+        tab_name = f"Session {session_code}"
 
         try:
-            results = self.drive.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name)",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-                corpora="allDrives" if self.shared_drive_id else "user"
+            # Create the new tab
+            request = {
+                "requests": [{
+                    "addSheet": {
+                        "properties": {
+                            "title": tab_name,
+                            "gridProperties": {
+                                "frozenRowCount": 1,
+                                "frozenColumnCount": 3
+                            }
+                        }
+                    }
+                }]
+            }
+
+            result = self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body=request
             ).execute()
 
-            files = results.get("files", [])
-            if files:
-                return {"id": files[0]["id"], "name": files[0]["name"]}
-            return None
-        except HttpError as e:
-            print(f"Error finding sheet: {e}")
-            return None
-
-    def create_session_sheet(self, session_code: str, title: Optional[str] = None) -> Dict[str, str]:
-        """
-        Create a new Google Sheet for a session
-
-        Returns: {"id": "spreadsheet_id", "name": "Sheet Name"}
-        """
-        sheet_name = title or f"Session {session_code}"
-
-        spreadsheet = {
-            "properties": {"title": sheet_name},
-            "sheets": [{
-                "properties": {
-                    "title": "Attendance",
-                    "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 3}
-                }
-            }]
-        }
-
-        try:
-            result = self.sheets.spreadsheets().create(body=spreadsheet).execute()
-            spreadsheet_id = result["spreadsheetId"]
+            sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
 
             # Set up header row
             headers = [["First Name", "Last Name", "Email"]]
             self.sheets.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range="Attendance!A1:C1",
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A1:C1",
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
 
-            # Move to shared drive if configured
-            if self.shared_drive_id:
-                self.drive.files().update(
-                    fileId=spreadsheet_id,
-                    addParents=self.shared_drive_id,
-                    supportsAllDrives=True
-                ).execute()
+            # Cache it
+            self._sheet_id_cache[tab_name] = sheet_id
 
-            return {"id": spreadsheet_id, "name": sheet_name}
+            return {
+                "name": tab_name,
+                "sheet_id": sheet_id,
+                "session_code": session_code
+            }
+
         except HttpError as e:
-            print(f"Error creating sheet: {e}")
+            print(f"Error creating tab: {e}")
             raise
 
-    def get_or_create_session_sheet(self, session_code: str, title: Optional[str] = None) -> Dict[str, str]:
-        """Find existing sheet or create new one for session"""
-        existing = self.find_session_sheet(session_code)
+    def get_or_create_session_tab(self, session_code: str) -> Dict[str, Any]:
+        """Find existing tab or create new one for session"""
+        existing = self.find_session_tab(session_code)
         if existing:
             return existing
-        return self.create_session_sheet(session_code, title)
+        return self.create_session_tab(session_code)
 
-    def get_sheet_data(self, spreadsheet_id: str, range_name: str = "Attendance!A:ZZ") -> List[List[str]]:
-        """Get all data from a sheet"""
+    def get_tab_data(self, session_code: str, range_suffix: str = "A:ZZ") -> List[List[str]]:
+        """Get all data from a session tab"""
+        tab_name = f"Session {session_code}"
         try:
             result = self.sheets.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id,
-                range=range_name
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!{range_suffix}"
             ).execute()
             return result.get("values", [])
         except HttpError as e:
-            print(f"Error reading sheet: {e}")
+            print(f"Error reading tab: {e}")
             return []
 
-    def get_profiles(self, spreadsheet_id: str) -> List[Dict[str, Any]]:
+    def get_profiles(self, session_code: str) -> List[Dict[str, Any]]:
         """
-        Get all student profiles from a session sheet
+        Get all student profiles from a session tab
 
         Returns list of profiles with attendance data
         """
-        data = self.get_sheet_data(spreadsheet_id)
+        data = self.get_tab_data(session_code)
         if not data or len(data) < 1:
             return []
 
         headers = data[0]
         profiles = []
 
-        for row_idx, row in enumerate(data[1:], start=2):  # Start at row 2 (1-indexed for sheets)
-            if not row or not any(row[:3]):  # Skip empty rows
+        for row_idx, row in enumerate(data[1:], start=2):
+            if not row or not any(row[:3]):
                 continue
 
             profile = {
@@ -180,11 +196,9 @@ class SheetsService:
                 "attendance": {}
             }
 
-            # Parse attendance columns (format: "MM/DD Attendance", "MM/DD Participation")
             for col_idx, header in enumerate(headers[3:], start=3):
                 if col_idx < len(row):
                     value = row[col_idx]
-                    # Try to parse as number
                     try:
                         profile["attendance"][header] = int(float(value)) if value else 0
                     except ValueError:
@@ -194,38 +208,37 @@ class SheetsService:
 
         return profiles
 
-    def find_profile_row(self, spreadsheet_id: str, first_name: str, last_name: str, email: str = "") -> Optional[int]:
+    def find_profile_row(self, session_code: str, first_name: str, last_name: str, email: str = "") -> Optional[int]:
         """
         Find a profile row by name (and optionally email)
 
         Returns row number (1-indexed) or None if not found
         """
-        profiles = self.get_profiles(spreadsheet_id)
+        profiles = self.get_profiles(session_code)
 
         for profile in profiles:
-            # Match by email first (most reliable)
             if email and profile["email"].lower() == email.lower():
                 return profile["row_number"]
 
-            # Match by name
             if (profile["first_name"].lower() == first_name.lower() and
                     profile["last_name"].lower() == last_name.lower()):
                 return profile["row_number"]
 
         return None
 
-    def add_profile(self, spreadsheet_id: str, first_name: str, last_name: str, email: str = "") -> int:
+    def add_profile(self, session_code: str, first_name: str, last_name: str, email: str = "") -> int:
         """
-        Add a new profile to the sheet
+        Add a new profile to the session tab
 
         Returns: row number of the new profile
         """
-        data = self.get_sheet_data(spreadsheet_id)
+        tab_name = f"Session {session_code}"
+        data = self.get_tab_data(session_code)
         new_row_number = len(data) + 1
 
         self.sheets.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id,
-            range="Attendance!A:C",
+            spreadsheetId=self.spreadsheet_id,
+            range=f"'{tab_name}'!A:C",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": [[first_name, last_name, email]]}
@@ -233,16 +246,14 @@ class SheetsService:
 
         return new_row_number
 
-    def get_or_add_date_columns(self, spreadsheet_id: str, date_str: str) -> Dict[str, int]:
+    def get_or_add_date_columns(self, session_code: str, date_str: str) -> Dict[str, int]:
         """
         Ensure attendance and participation columns exist for a date
 
-        Args:
-            date_str: Date string in MM/DD format
-
         Returns: {"attendance_col": col_index, "participation_col": col_index}
         """
-        data = self.get_sheet_data(spreadsheet_id, "Attendance!1:1")
+        tab_name = f"Session {session_code}"
+        data = self.get_tab_data(session_code, "1:1")
         headers = data[0] if data else []
 
         attendance_header = f"{date_str} Attendance"
@@ -257,7 +268,6 @@ class SheetsService:
             elif header == participation_header:
                 participation_col = idx
 
-        # Add missing columns
         if attendance_col is None:
             attendance_col = len(headers)
             headers.append(attendance_header)
@@ -267,73 +277,74 @@ class SheetsService:
             headers.append(participation_header)
 
         # Update headers if we added new columns
-        if attendance_col >= len(data[0]) if data else True or participation_col >= len(data[0]) if data else True:
-            self.sheets.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range="Attendance!1:1",
-                valueInputOption="RAW",
-                body={"values": [headers]}
-            ).execute()
+        self.sheets.spreadsheets().values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"'{tab_name}'!1:1",
+            valueInputOption="RAW",
+            body={"values": [headers]}
+        ).execute()
 
         return {
             "attendance_col": attendance_col,
             "participation_col": participation_col
         }
 
-    def update_attendance(self, spreadsheet_id: str, row_number: int,
+    def update_attendance(self, session_code: str, row_number: int,
                           attendance_col: int, minutes: int) -> None:
         """Update attendance minutes for a profile"""
+        tab_name = f"Session {session_code}"
         col_letter = self._col_index_to_letter(attendance_col)
-        cell_range = f"Attendance!{col_letter}{row_number}"
+        cell_range = f"'{tab_name}'!{col_letter}{row_number}"
 
         self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
+            spreadsheetId=self.spreadsheet_id,
             range=cell_range,
             valueInputOption="RAW",
             body={"values": [[minutes]]}
         ).execute()
 
-    def update_participation(self, spreadsheet_id: str, row_number: int,
+    def update_participation(self, session_code: str, row_number: int,
                              participation_col: int, minutes: int) -> None:
         """Update participation minutes for a profile"""
+        tab_name = f"Session {session_code}"
         col_letter = self._col_index_to_letter(participation_col)
-        cell_range = f"Attendance!{col_letter}{row_number}"
+        cell_range = f"'{tab_name}'!{col_letter}{row_number}"
 
         self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
+            spreadsheetId=self.spreadsheet_id,
             range=cell_range,
             valueInputOption="RAW",
             body={"values": [[minutes]]}
         ).execute()
 
-    def batch_update_attendance(self, spreadsheet_id: str, updates: List[Dict]) -> None:
+    def batch_update_attendance(self, session_code: str, updates: List[Dict]) -> None:
         """
         Batch update attendance for multiple profiles
 
         Args:
             updates: List of {"row": int, "col": int, "value": int}
         """
+        tab_name = f"Session {session_code}"
         data = []
         for update in updates:
             col_letter = self._col_index_to_letter(update["col"])
             data.append({
-                "range": f"Attendance!{col_letter}{update['row']}",
+                "range": f"'{tab_name}'!{col_letter}{update['row']}",
                 "values": [[update["value"]]]
             })
 
         if data:
             self.sheets.spreadsheets().values().batchUpdate(
-                spreadsheetId=spreadsheet_id,
+                spreadsheetId=self.spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": data}
             ).execute()
 
-    def merge_profiles(self, spreadsheet_id: str, keep_row: int, merge_row: int) -> None:
+    def merge_profiles(self, session_code: str, keep_row: int, merge_row: int) -> None:
         """
         Merge two profiles, keeping one and deleting the other
-
-        Combines attendance/participation data (takes max of each)
         """
-        data = self.get_sheet_data(spreadsheet_id)
+        tab_name = f"Session {session_code}"
+        data = self.get_tab_data(session_code)
         if merge_row > len(data) or keep_row > len(data):
             raise ValueError("Invalid row numbers")
 
@@ -341,7 +352,6 @@ class SheetsService:
         merge_data = data[merge_row - 1]
         headers = data[0]
 
-        # Combine attendance data (take max for each date)
         combined = list(keep_data)
         while len(combined) < len(headers):
             combined.append("")
@@ -353,58 +363,65 @@ class SheetsService:
 
         # Update the kept row
         self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"Attendance!A{keep_row}:{self._col_index_to_letter(len(combined) - 1)}{keep_row}",
+            spreadsheetId=self.spreadsheet_id,
+            range=f"'{tab_name}'!A{keep_row}:{self._col_index_to_letter(len(combined) - 1)}{keep_row}",
             valueInputOption="RAW",
             body={"values": [combined]}
         ).execute()
 
         # Delete the merged row
-        self.sheets.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "requests": [{
-                    "deleteDimension": {
-                        "range": {
-                            "sheetId": 0,
-                            "dimension": "ROWS",
-                            "startIndex": merge_row - 1,
-                            "endIndex": merge_row
+        sheet_id = self._get_sheet_id(tab_name)
+        if sheet_id is not None:
+            self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [{
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": merge_row - 1,
+                                "endIndex": merge_row
+                            }
                         }
-                    }
-                }]
-            }
-        ).execute()
+                    }]
+                }
+            ).execute()
 
-    def update_profile(self, spreadsheet_id: str, row_number: int,
+    def update_profile(self, session_code: str, row_number: int,
                        first_name: str, last_name: str, email: str) -> None:
         """Update profile information"""
+        tab_name = f"Session {session_code}"
         self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"Attendance!A{row_number}:C{row_number}",
+            spreadsheetId=self.spreadsheet_id,
+            range=f"'{tab_name}'!A{row_number}:C{row_number}",
             valueInputOption="RAW",
             body={"values": [[first_name, last_name, email]]}
         ).execute()
 
-    def list_all_sheets(self) -> List[Dict[str, str]]:
-        """List all session sheets in the shared drive"""
-        query = "name contains 'Session' and mimeType='application/vnd.google-apps.spreadsheet'"
+    def list_all_sessions(self) -> List[Dict[str, str]]:
+        """List all session tabs in the spreadsheet"""
+        tabs = self._get_all_tabs()
+        sessions = []
 
-        try:
-            results = self.drive.files().list(
-                q=query,
-                spaces="drive",
-                fields="files(id, name)",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-                corpora="allDrives" if self.shared_drive_id else "user",
-                orderBy="name"
-            ).execute()
+        for tab in tabs:
+            props = tab.get("properties", {})
+            title = props.get("title", "")
 
-            return results.get("files", [])
-        except HttpError as e:
-            print(f"Error listing sheets: {e}")
-            return []
+            # Check if it's a session tab (starts with "Session ")
+            if title.startswith("Session "):
+                session_code = title.replace("Session ", "")
+                sessions.append({
+                    "name": title,
+                    "session_code": session_code,
+                    "sheet_id": props.get("sheetId")
+                })
+
+        return sessions
+
+    def get_spreadsheet_url(self) -> str:
+        """Get the URL to the spreadsheet"""
+        return f"https://docs.google.com/spreadsheets/d/{self.spreadsheet_id}"
 
     @staticmethod
     def _col_index_to_letter(index: int) -> str:

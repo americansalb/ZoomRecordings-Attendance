@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 
 from services.sheets_service import sheets_service
 from services.duplicate_detector import duplicate_detector
@@ -9,13 +9,13 @@ router = APIRouter()
 
 
 class MergeProfilesRequest(BaseModel):
-    spreadsheet_id: str
+    session_code: str
     keep_row: int
     merge_row: int
 
 
 class UpdateProfileRequest(BaseModel):
-    spreadsheet_id: str
+    session_code: str
     row_number: int
     first_name: str
     last_name: str
@@ -27,50 +27,37 @@ async def search_students(
     query: str = Query(..., min_length=1, description="Search query (name or email)"),
     session_code: Optional[str] = Query(None, description="Limit search to specific session")
 ):
-    """
-    Search for students across all sessions or within a specific session
-
-    Used by students to find their profiles
-    """
+    """Search for students across all sessions or within a specific session"""
     try:
         results = []
 
         if session_code:
             # Search in specific session
-            sheet = sheets_service.find_session_sheet(session_code)
-            if sheet:
-                profiles = sheets_service.get_profiles(sheet["id"])
+            tab = sheets_service.find_session_tab(session_code)
+            if tab:
+                profiles = sheets_service.get_profiles(session_code)
                 for profile in profiles:
                     if _matches_query(profile, query):
                         results.append({
                             "session_code": session_code,
-                            "spreadsheet_id": sheet["id"],
-                            "spreadsheet_name": sheet["name"],
+                            "session_name": tab["name"],
                             **profile
                         })
         else:
             # Search across all sessions
-            all_sheets = sheets_service.list_all_sheets()
-            for sheet in all_sheets:
-                # Extract session code from sheet name
-                code = None
-                if "Session " in sheet["name"]:
-                    parts = sheet["name"].split("Session ")
-                    if len(parts) > 1:
-                        code = parts[1][:3] if len(parts[1]) >= 3 else parts[1].split()[0]
-
+            all_sessions = sheets_service.list_all_sessions()
+            for session in all_sessions:
                 try:
-                    profiles = sheets_service.get_profiles(sheet["id"])
+                    profiles = sheets_service.get_profiles(session["session_code"])
                     for profile in profiles:
                         if _matches_query(profile, query):
                             results.append({
-                                "session_code": code,
-                                "spreadsheet_id": sheet["id"],
-                                "spreadsheet_name": sheet["name"],
+                                "session_code": session["session_code"],
+                                "session_name": session["name"],
                                 **profile
                             })
                 except Exception as e:
-                    print(f"Error searching sheet {sheet['id']}: {e}")
+                    print(f"Error searching session {session['session_code']}: {e}")
                     continue
 
         return {
@@ -82,15 +69,14 @@ async def search_students(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/profile/{spreadsheet_id}/{row_number}")
-async def get_student_profile(spreadsheet_id: str, row_number: int):
+@router.get("/profile/{session_code}/{row_number}")
+async def get_student_profile(session_code: str, row_number: int):
     """Get detailed profile for a specific student"""
     try:
-        profiles = sheets_service.get_profiles(spreadsheet_id)
+        profiles = sheets_service.get_profiles(session_code)
 
         for profile in profiles:
             if profile["row_number"] == row_number:
-                # Calculate summary stats
                 attendance_dates = []
                 total_attendance = 0
                 total_participation = 0
@@ -107,6 +93,7 @@ async def get_student_profile(spreadsheet_id: str, row_number: int):
 
                 return {
                     **profile,
+                    "session_code": session_code,
                     "summary": {
                         "total_sessions": len(attendance_dates),
                         "total_attendance_minutes": total_attendance,
@@ -123,28 +110,18 @@ async def get_student_profile(spreadsheet_id: str, row_number: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/duplicates/{spreadsheet_id}")
-async def find_duplicates(spreadsheet_id: str):
-    """
-    Find potential duplicate profiles in a session sheet
-
-    Returns pairs of profiles that might be the same person
-    """
+@router.get("/duplicates/{session_code}")
+async def find_duplicates(session_code: str):
+    """Find potential duplicate profiles in a session"""
     try:
-        profiles = sheets_service.get_profiles(spreadsheet_id)
+        profiles = sheets_service.get_profiles(session_code)
         duplicates = duplicate_detector.find_duplicates(profiles)
 
         return {
             "duplicates": [
                 {
-                    "profile1": {
-                        "row": d.profile1_row,
-                        "name": d.profile1_name
-                    },
-                    "profile2": {
-                        "row": d.profile2_row,
-                        "name": d.profile2_name
-                    },
+                    "profile1": {"row": d.profile1_row, "name": d.profile1_name},
+                    "profile2": {"row": d.profile2_row, "name": d.profile2_name},
                     "confidence": d.confidence,
                     "reason": d.reason
                 }
@@ -159,15 +136,10 @@ async def find_duplicates(spreadsheet_id: str):
 
 @router.post("/merge")
 async def merge_profiles(request: MergeProfilesRequest):
-    """
-    Merge two profiles into one
-
-    Keeps the first profile and merges attendance data from the second.
-    The second profile is deleted after merging.
-    """
+    """Merge two profiles into one"""
     try:
         sheets_service.merge_profiles(
-            request.spreadsheet_id,
+            request.session_code,
             request.keep_row,
             request.merge_row
         )
@@ -186,7 +158,7 @@ async def update_profile(request: UpdateProfileRequest):
     """Update a student's profile information"""
     try:
         sheets_service.update_profile(
-            request.spreadsheet_id,
+            request.session_code,
             request.row_number,
             request.first_name,
             request.last_name,
@@ -199,13 +171,12 @@ async def update_profile(request: UpdateProfileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/session/{spreadsheet_id}")
-async def get_session_students(spreadsheet_id: str):
+@router.get("/session/{session_code}")
+async def get_session_students(session_code: str):
     """Get all students in a session with their attendance data"""
     try:
-        profiles = sheets_service.get_profiles(spreadsheet_id)
+        profiles = sheets_service.get_profiles(session_code)
 
-        # Extract unique dates from headers
         dates = set()
         for profile in profiles:
             for key in profile["attendance"].keys():
@@ -227,20 +198,16 @@ def _matches_query(profile: dict, query: str) -> bool:
     """Check if a profile matches a search query"""
     query_lower = query.lower()
 
-    # Check name
     full_name = f"{profile['first_name']} {profile['last_name']}".lower()
     if query_lower in full_name:
         return True
 
-    # Check email
     if profile.get("email") and query_lower in profile["email"].lower():
         return True
 
-    # Check first name alone
     if query_lower in profile["first_name"].lower():
         return True
 
-    # Check last name alone
     if query_lower in profile["last_name"].lower():
         return True
 

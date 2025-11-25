@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
 
 from services.zoom_service import zoom_service
 from services.sheets_service import sheets_service
@@ -13,11 +12,10 @@ class ProcessAttendanceRequest(BaseModel):
     meeting_id: str
     recording_title: str
     meeting_date: str  # Format: MM/DD
-    spreadsheet_id: Optional[str] = None  # If None, will find/create based on session code
 
 
 class UpdateAttendanceRequest(BaseModel):
-    spreadsheet_id: str
+    session_code: str
     row_number: int
     date: str  # Format: MM/DD
     attendance_minutes: Optional[int] = None
@@ -25,7 +23,7 @@ class UpdateAttendanceRequest(BaseModel):
 
 
 class BulkUpdateRequest(BaseModel):
-    spreadsheet_id: str
+    session_code: str
     date: str  # Format: MM/DD
     updates: List[dict]  # List of {row_number, attendance_minutes, participation_minutes}
 
@@ -33,12 +31,7 @@ class BulkUpdateRequest(BaseModel):
 @router.post("/process")
 async def process_attendance(request: ProcessAttendanceRequest):
     """
-    Process attendance from a Zoom meeting and update Google Sheet
-
-    1. Gets participant data from Zoom
-    2. Finds or creates the session sheet based on recording title
-    3. Adds/updates profiles for each participant
-    4. Records attendance minutes for the meeting date
+    Process attendance from a Zoom meeting and update Google Sheet tab
     """
     try:
         # Extract session code from title
@@ -49,16 +42,8 @@ async def process_attendance(request: ProcessAttendanceRequest):
                 detail=f"Could not extract session code from title: {request.recording_title}"
             )
 
-        # Get or use provided spreadsheet
-        if request.spreadsheet_id:
-            sheet = {"id": request.spreadsheet_id}
-        else:
-            sheet = sheets_service.get_or_create_session_sheet(
-                session_code,
-                title=f"Session {session_code}"
-            )
-
-        spreadsheet_id = sheet["id"]
+        # Get or create session tab
+        sheets_service.get_or_create_session_tab(session_code)
 
         # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
@@ -82,7 +67,7 @@ async def process_attendance(request: ProcessAttendanceRequest):
             unique_participants[key]["total_duration"] += p.get("duration", 0)
 
         # Ensure date columns exist
-        columns = sheets_service.get_or_add_date_columns(spreadsheet_id, request.meeting_date)
+        columns = sheets_service.get_or_add_date_columns(session_code, request.meeting_date)
 
         # Process each participant
         results = {
@@ -96,16 +81,15 @@ async def process_attendance(request: ProcessAttendanceRequest):
         for key, data in unique_participants.items():
             # Find existing profile or create new one
             row = sheets_service.find_profile_row(
-                spreadsheet_id,
+                session_code,
                 data["first_name"],
                 data["last_name"],
                 data["email"]
             )
 
             if row is None:
-                # Add new profile
                 row = sheets_service.add_profile(
-                    spreadsheet_id,
+                    session_code,
                     data["first_name"],
                     data["last_name"],
                     data["email"]
@@ -114,10 +98,8 @@ async def process_attendance(request: ProcessAttendanceRequest):
             else:
                 results["updated_profiles"] += 1
 
-            # Calculate attendance minutes (Zoom returns duration in seconds)
             attendance_minutes = data["total_duration"] // 60
 
-            # Queue attendance update
             batch_updates.append({
                 "row": row,
                 "col": columns["attendance_col"],
@@ -131,15 +113,14 @@ async def process_attendance(request: ProcessAttendanceRequest):
                 "attendance_minutes": attendance_minutes
             })
 
-        # Batch update attendance
         if batch_updates:
-            sheets_service.batch_update_attendance(spreadsheet_id, batch_updates)
+            sheets_service.batch_update_attendance(session_code, batch_updates)
 
         return {
             "success": True,
-            "spreadsheet_id": spreadsheet_id,
             "session_code": session_code,
             "meeting_date": request.meeting_date,
+            "spreadsheet_url": sheets_service.get_spreadsheet_url(),
             "results": results
         }
 
@@ -153,14 +134,11 @@ async def process_attendance(request: ProcessAttendanceRequest):
 async def update_attendance(request: UpdateAttendanceRequest):
     """Update attendance or participation for a specific profile and date"""
     try:
-        columns = sheets_service.get_or_add_date_columns(
-            request.spreadsheet_id,
-            request.date
-        )
+        columns = sheets_service.get_or_add_date_columns(request.session_code, request.date)
 
         if request.attendance_minutes is not None:
             sheets_service.update_attendance(
-                request.spreadsheet_id,
+                request.session_code,
                 request.row_number,
                 columns["attendance_col"],
                 request.attendance_minutes
@@ -168,7 +146,7 @@ async def update_attendance(request: UpdateAttendanceRequest):
 
         if request.participation_minutes is not None:
             sheets_service.update_participation(
-                request.spreadsheet_id,
+                request.session_code,
                 request.row_number,
                 columns["participation_col"],
                 request.participation_minutes
@@ -184,10 +162,7 @@ async def update_attendance(request: UpdateAttendanceRequest):
 async def bulk_update_attendance(request: BulkUpdateRequest):
     """Bulk update attendance and participation for multiple profiles"""
     try:
-        columns = sheets_service.get_or_add_date_columns(
-            request.spreadsheet_id,
-            request.date
-        )
+        columns = sheets_service.get_or_add_date_columns(request.session_code, request.date)
 
         attendance_updates = []
         participation_updates = []
@@ -208,10 +183,10 @@ async def bulk_update_attendance(request: BulkUpdateRequest):
                 })
 
         if attendance_updates:
-            sheets_service.batch_update_attendance(request.spreadsheet_id, attendance_updates)
+            sheets_service.batch_update_attendance(request.session_code, attendance_updates)
 
         if participation_updates:
-            sheets_service.batch_update_attendance(request.spreadsheet_id, participation_updates)
+            sheets_service.batch_update_attendance(request.session_code, participation_updates)
 
         return {
             "success": True,
@@ -224,25 +199,17 @@ async def bulk_update_attendance(request: BulkUpdateRequest):
 
 @router.get("/preview/{meeting_id}")
 async def preview_attendance(meeting_id: str, recording_title: str):
-    """
-    Preview attendance data before processing
-
-    Shows what will be added/updated without making changes
-    """
+    """Preview attendance data before processing"""
     try:
-        # Extract session code
         session_code = zoom_service.extract_session_code(recording_title)
 
-        # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(meeting_id)
         participants = participant_data.get("participants", [])
 
-        # Find existing sheet if any
-        existing_sheet = None
+        existing_tab = None
         if session_code:
-            existing_sheet = sheets_service.find_session_sheet(session_code)
+            existing_tab = sheets_service.find_session_tab(session_code)
 
-        # Aggregate participants
         unique_participants = {}
         for p in participants:
             key = p.get("user_email") or p.get("name", "Unknown")
@@ -259,12 +226,11 @@ async def preview_attendance(meeting_id: str, recording_title: str):
 
             unique_participants[key]["total_duration"] += p.get("duration", 0)
 
-        # Check against existing profiles if sheet exists
         preview = []
         existing_profiles = []
 
-        if existing_sheet:
-            existing_profiles = sheets_service.get_profiles(existing_sheet["id"])
+        if existing_tab:
+            existing_profiles = sheets_service.get_profiles(session_code)
 
         for key, data in unique_participants.items():
             is_new = True
@@ -295,7 +261,7 @@ async def preview_attendance(meeting_id: str, recording_title: str):
 
         return {
             "session_code": session_code,
-            "existing_sheet": existing_sheet,
+            "existing_tab": existing_tab,
             "participants": preview,
             "new_count": sum(1 for p in preview if p["is_new"]),
             "existing_count": sum(1 for p in preview if not p["is_new"])

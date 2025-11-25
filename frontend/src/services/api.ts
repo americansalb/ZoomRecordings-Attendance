@@ -51,11 +51,11 @@ export interface Profile {
   attendance: Record<string, number | string>
 }
 
-export interface Sheet {
-  id: string
+export interface Session {
   name: string
-  session_code: string | null
-  url: string
+  session_code: string
+  sheet_id: number
+  spreadsheet_url?: string
   profile_count?: number
   dates?: string[]
 }
@@ -88,26 +88,25 @@ export const attendanceApi = {
     })
     return data as {
       session_code: string | null
-      existing_sheet: { id: string; name: string } | null
+      existing_tab: { name: string; sheet_id: number } | null
       participants: Participant[]
       new_count: number
       existing_count: number
     }
   },
 
-  process: async (meetingId: string, recordingTitle: string, meetingDate: string, spreadsheetId?: string) => {
+  process: async (meetingId: string, recordingTitle: string, meetingDate: string) => {
     const { data } = await api.post('/attendance/process', {
       meeting_id: meetingId,
       recording_title: recordingTitle,
       meeting_date: meetingDate,
-      spreadsheet_id: spreadsheetId,
     })
     return data
   },
 
-  update: async (spreadsheetId: string, rowNumber: number, date: string, attendanceMinutes?: number, participationMinutes?: number) => {
+  update: async (sessionCode: string, rowNumber: number, date: string, attendanceMinutes?: number, participationMinutes?: number) => {
     const { data } = await api.post('/attendance/update', {
-      spreadsheet_id: spreadsheetId,
+      session_code: sessionCode,
       row_number: rowNumber,
       date: date,
       attendance_minutes: attendanceMinutes,
@@ -116,9 +115,9 @@ export const attendanceApi = {
     return data
   },
 
-  bulkUpdate: async (spreadsheetId: string, date: string, updates: Array<{ row_number: number; attendance_minutes?: number; participation_minutes?: number }>) => {
+  bulkUpdate: async (sessionCode: string, date: string, updates: Array<{ row_number: number; attendance_minutes?: number; participation_minutes?: number }>) => {
     const { data } = await api.post('/attendance/bulk-update', {
-      spreadsheet_id: spreadsheetId,
+      session_code: sessionCode,
       date: date,
       updates: updates,
     })
@@ -126,25 +125,25 @@ export const attendanceApi = {
   },
 }
 
-// Sheets API
+// Sheets/Sessions API
 export const sheetsApi = {
   list: async () => {
     const { data } = await api.get('/sheets')
-    return data as { sheets: Sheet[]; total: number }
+    return data as { sessions: Session[]; total: number; spreadsheet_url: string }
   },
 
   getBySession: async (sessionCode: string) => {
     const { data } = await api.get(`/sheets/${sessionCode}`)
-    return data as Sheet
+    return data as Session
   },
 
-  create: async (sessionCode: string, title?: string) => {
-    const { data } = await api.post('/sheets', { session_code: sessionCode, title })
-    return data as Sheet
+  create: async (sessionCode: string) => {
+    const { data } = await api.post('/sheets', { session_code: sessionCode })
+    return data as Session
   },
 
-  getData: async (spreadsheetId: string) => {
-    const { data } = await api.get(`/sheets/${spreadsheetId}/data`)
+  getData: async (sessionCode: string) => {
+    const { data } = await api.get(`/sheets/${sessionCode}/data`)
     return data as { headers: string[]; rows: string[][]; total_rows: number }
   },
 }
@@ -155,12 +154,13 @@ export const studentsApi = {
     const { data } = await api.get('/students/search', {
       params: { query, session_code: sessionCode },
     })
-    return data as { results: (Profile & { session_code: string; spreadsheet_id: string; spreadsheet_name: string })[]; total: number }
+    return data as { results: (Profile & { session_code: string; session_name: string })[]; total: number }
   },
 
-  getProfile: async (spreadsheetId: string, rowNumber: number) => {
-    const { data } = await api.get(`/students/profile/${spreadsheetId}/${rowNumber}`)
+  getProfile: async (sessionCode: string, rowNumber: number) => {
+    const { data } = await api.get(`/students/profile/${sessionCode}/${rowNumber}`)
     return data as Profile & {
+      session_code: string
       summary: {
         total_sessions: number
         total_attendance_minutes: number
@@ -170,28 +170,28 @@ export const studentsApi = {
     }
   },
 
-  getSessionStudents: async (spreadsheetId: string) => {
-    const { data } = await api.get(`/students/session/${spreadsheetId}`)
+  getSessionStudents: async (sessionCode: string) => {
+    const { data } = await api.get(`/students/session/${sessionCode}`)
     return data as { profiles: Profile[]; total: number; dates: string[] }
   },
 
-  findDuplicates: async (spreadsheetId: string) => {
-    const { data } = await api.get(`/students/duplicates/${spreadsheetId}`)
+  findDuplicates: async (sessionCode: string) => {
+    const { data } = await api.get(`/students/duplicates/${sessionCode}`)
     return data as { duplicates: DuplicateMatch[]; total: number }
   },
 
-  merge: async (spreadsheetId: string, keepRow: number, mergeRow: number) => {
+  merge: async (sessionCode: string, keepRow: number, mergeRow: number) => {
     const { data } = await api.post('/students/merge', {
-      spreadsheet_id: spreadsheetId,
+      session_code: sessionCode,
       keep_row: keepRow,
       merge_row: mergeRow,
     })
     return data
   },
 
-  updateProfile: async (spreadsheetId: string, rowNumber: number, firstName: string, lastName: string, email: string) => {
+  updateProfile: async (sessionCode: string, rowNumber: number, firstName: string, lastName: string, email: string) => {
     const { data } = await api.put('/students/profile', {
-      spreadsheet_id: spreadsheetId,
+      session_code: sessionCode,
       row_number: rowNumber,
       first_name: firstName,
       last_name: lastName,

@@ -3,36 +3,24 @@ from pydantic import BaseModel
 from typing import Optional
 
 from services.sheets_service import sheets_service
-from services.zoom_service import zoom_service
 
 router = APIRouter()
 
 
-class CreateSheetRequest(BaseModel):
+class CreateTabRequest(BaseModel):
     session_code: str
-    title: Optional[str] = None
 
 
 @router.get("/")
-async def list_sheets():
-    """List all session sheets"""
+async def list_sessions():
+    """List all session tabs in the spreadsheet"""
     try:
-        sheets = sheets_service.list_all_sheets()
-
-        # Extract session codes from names
-        processed = []
-        for sheet in sheets:
-            session_code = zoom_service.extract_session_code(sheet["name"])
-            processed.append({
-                "id": sheet["id"],
-                "name": sheet["name"],
-                "session_code": session_code,
-                "url": f"https://docs.google.com/spreadsheets/d/{sheet['id']}"
-            })
+        sessions = sheets_service.list_all_sessions()
 
         return {
-            "sheets": processed,
-            "total": len(processed)
+            "sessions": sessions,
+            "total": len(sessions),
+            "spreadsheet_url": sheets_service.get_spreadsheet_url()
         }
 
     except Exception as e:
@@ -40,17 +28,16 @@ async def list_sheets():
 
 
 @router.get("/{session_code}")
-async def get_sheet_by_session(session_code: str):
-    """Get sheet details by session code"""
+async def get_session(session_code: str):
+    """Get session tab details by session code"""
     try:
-        sheet = sheets_service.find_session_sheet(session_code)
+        tab = sheets_service.find_session_tab(session_code)
 
-        if not sheet:
-            raise HTTPException(status_code=404, detail=f"No sheet found for session {session_code}")
+        if not tab:
+            raise HTTPException(status_code=404, detail=f"No tab found for session {session_code}")
 
-        profiles = sheets_service.get_profiles(sheet["id"])
+        profiles = sheets_service.get_profiles(session_code)
 
-        # Extract dates
         dates = set()
         for profile in profiles:
             for key in profile["attendance"].keys():
@@ -59,10 +46,10 @@ async def get_sheet_by_session(session_code: str):
                     dates.add(date)
 
         return {
-            "id": sheet["id"],
-            "name": sheet["name"],
             "session_code": session_code,
-            "url": f"https://docs.google.com/spreadsheets/d/{sheet['id']}",
+            "name": tab["name"],
+            "sheet_id": tab["sheet_id"],
+            "spreadsheet_url": sheets_service.get_spreadsheet_url(),
             "profile_count": len(profiles),
             "dates": sorted(list(dates))
         }
@@ -74,27 +61,23 @@ async def get_sheet_by_session(session_code: str):
 
 
 @router.post("/")
-async def create_sheet(request: CreateSheetRequest):
-    """Create a new session sheet"""
+async def create_session_tab(request: CreateTabRequest):
+    """Create a new session tab"""
     try:
-        # Check if sheet already exists
-        existing = sheets_service.find_session_sheet(request.session_code)
+        existing = sheets_service.find_session_tab(request.session_code)
         if existing:
             raise HTTPException(
                 status_code=400,
-                detail=f"Sheet for session {request.session_code} already exists"
+                detail=f"Tab for session {request.session_code} already exists"
             )
 
-        sheet = sheets_service.create_session_sheet(
-            request.session_code,
-            request.title
-        )
+        tab = sheets_service.create_session_tab(request.session_code)
 
         return {
-            "id": sheet["id"],
-            "name": sheet["name"],
             "session_code": request.session_code,
-            "url": f"https://docs.google.com/spreadsheets/d/{sheet['id']}"
+            "name": tab["name"],
+            "sheet_id": tab["sheet_id"],
+            "spreadsheet_url": sheets_service.get_spreadsheet_url()
         }
 
     except HTTPException:
@@ -103,11 +86,11 @@ async def create_sheet(request: CreateSheetRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{spreadsheet_id}/data")
-async def get_sheet_data(spreadsheet_id: str):
-    """Get raw data from a sheet"""
+@router.get("/{session_code}/data")
+async def get_session_data(session_code: str):
+    """Get raw data from a session tab"""
     try:
-        data = sheets_service.get_sheet_data(spreadsheet_id)
+        data = sheets_service.get_tab_data(session_code)
 
         if not data:
             return {"headers": [], "rows": []}

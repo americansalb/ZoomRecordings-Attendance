@@ -50,7 +50,7 @@ export default function AdminDashboard() {
               <h3 className="text-lg font-medium text-gray-900">
                 {sheetsLoading ? '...' : sheetsData?.total || 0} Sessions
               </h3>
-              <p className="text-sm text-gray-500">Active attendance sheets</p>
+              <p className="text-sm text-gray-500">Active session tabs</p>
             </div>
           </div>
         </div>
@@ -76,11 +76,21 @@ export default function AdminDashboard() {
       <div className="card">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-lg font-semibold text-gray-900">Sessions</h2>
+          {sheetsData?.spreadsheet_url && (
+            <a
+              href={sheetsData.spreadsheet_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:text-blue-800 text-sm"
+            >
+              Open Spreadsheet
+            </a>
+          )}
         </div>
 
         {sheetsLoading ? (
           <div className="text-center py-8 text-gray-500">Loading sessions...</div>
-        ) : sheetsData?.sheets.length === 0 ? (
+        ) : !sheetsData?.sessions || sheetsData.sessions.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             No sessions found. Process a recording to create one.
           </div>
@@ -90,39 +100,31 @@ export default function AdminDashboard() {
               <thead>
                 <tr>
                   <th className="table-header px-6 py-3">Session</th>
-                  <th className="table-header px-6 py-3">Sheet Name</th>
+                  <th className="table-header px-6 py-3">Tab Name</th>
                   <th className="table-header px-6 py-3">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {sheetsData?.sheets.map((sheet) => (
-                  <tr key={sheet.id} className="hover:bg-gray-50">
+                {sheetsData.sessions.map((session) => (
+                  <tr key={session.session_code} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="px-2 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded">
-                        {sheet.session_code || 'N/A'}
+                        {session.session_code}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {sheet.name}
+                      {session.name}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       <div className="flex space-x-2">
                         <Link
-                          to={`/session/${sheet.session_code}`}
+                          to={`/session/${session.session_code}`}
                           className="text-blue-600 hover:text-blue-900"
                         >
                           View
                         </Link>
-                        <a
-                          href={sheet.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-green-600 hover:text-green-900"
-                        >
-                          Open Sheet
-                        </a>
                         <Link
-                          to={`/duplicates/${sheet.id}`}
+                          to={`/duplicates/${session.session_code}`}
                           className="text-orange-600 hover:text-orange-900"
                         >
                           Check Duplicates
@@ -148,13 +150,13 @@ export default function AdminDashboard() {
 
         {recordingsLoading ? (
           <div className="text-center py-8 text-gray-500">Loading recordings...</div>
-        ) : recordingsData?.recordings.length === 0 ? (
+        ) : !recordingsData?.recordings || recordingsData.recordings.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             No recordings found in the last 30 days.
           </div>
         ) : (
           <div className="space-y-3">
-            {recordingsData?.recordings.slice(0, 5).map((recording) => (
+            {recordingsData.recordings.slice(0, 5).map((recording) => (
               <div
                 key={recording.id}
                 className="flex justify-between items-center p-3 bg-gray-50 rounded-lg"
