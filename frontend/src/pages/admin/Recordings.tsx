@@ -95,11 +95,11 @@ export default function RecordingsPage() {
 
           {isLoading ? (
             <div className="text-center py-8 text-gray-500">Loading recordings...</div>
-          ) : recordingsData?.recordings.length === 0 ? (
+          ) : (recordingsData?.recordings?.length ?? 0) === 0 ? (
             <div className="text-center py-8 text-gray-500">No recordings found</div>
           ) : (
             <div className="space-y-2 max-h-[600px] overflow-y-auto">
-              {recordingsData?.recordings.map((recording) => (
+              {(recordingsData?.recordings ?? []).map((recording) => (
                 <div
                   key={recording.id}
                   onClick={() => handleSelectRecording(recording)}

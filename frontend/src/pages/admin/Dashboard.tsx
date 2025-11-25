@@ -90,7 +90,7 @@ export default function AdminDashboard() {
 
         {sheetsLoading ? (
           <div className="text-center py-8 text-gray-500">Loading sessions...</div>
-        ) : !sheetsData?.sessions || sheetsData.sessions.length === 0 ? (
+        ) : (sheetsData?.sessions?.length ?? 0) === 0 ? (
           <div className="text-center py-8 text-gray-500">
             No sessions found. Process a recording to create one.
           </div>
@@ -105,7 +105,7 @@ export default function AdminDashboard() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {sheetsData.sessions.map((session) => (
+                {(sheetsData?.sessions ?? []).map((session) => (
                   <tr key={session.session_code} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="px-2 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded">
@@ -150,13 +150,13 @@ export default function AdminDashboard() {
 
         {recordingsLoading ? (
           <div className="text-center py-8 text-gray-500">Loading recordings...</div>
-        ) : !recordingsData?.recordings || recordingsData.recordings.length === 0 ? (
+        ) : (recordingsData?.recordings?.length ?? 0) === 0 ? (
           <div className="text-center py-8 text-gray-500">
             No recordings found in the last 30 days.
           </div>
         ) : (
           <div className="space-y-3">
-            {recordingsData.recordings.slice(0, 5).map((recording) => (
+            {(recordingsData?.recordings ?? []).slice(0, 5).map((recording) => (
               <div
                 key={recording.id}
                 className="flex justify-between items-center p-3 bg-gray-50 rounded-lg"
