@@ -71,15 +71,8 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# Serve static frontend files
+# Serve static frontend files - MUST be last, mount has lowest priority
 static_dir = Path(__file__).parent.parent / "frontend" / "dist"
 if static_dir.exists():
-    app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_frontend(request: Request, full_path: str):
-        # Serve index.html for all non-API routes (SPA routing)
-        file_path = static_dir / full_path
-        if file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(static_dir / "index.html")
+    # Mount static files - this has lower priority than explicit routes
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
