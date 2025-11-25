@@ -273,7 +273,7 @@ class SheetsService:
         Normalize a name for matching:
         - Lowercase
         - Remove parenthetical content like "(Spanish)", "(Arabic)"
-        - Remove common suffixes like 's iPhone, 's iPad
+        - Remove common suffixes like 's iPhone, 's iPad, or just 's
         - Remove dash separators like "- BR Portuguese"
         - Strip extra whitespace
         """
@@ -289,14 +289,18 @@ class SheetsService:
         # Remove dash-separated language/location indicators (e.g., "- BR Portuguese")
         name = re.sub(r'\s*-\s*[a-z]+(\s+[a-z]+)*\s*$', '', name, flags=re.IGNORECASE)
 
-        # Remove device suffixes
+        # Remove device suffixes (e.g., "'s iPhone", "'s iPad")
         name = re.sub(r"'s\s*(iphone|ipad|macbook|laptop|pc|webcam)", '', name, flags=re.IGNORECASE)
 
-        # Remove underscores (like "Dilorom_Russian")
+        # Remove standalone possessive 's (e.g., "Chrisnove's" -> "Chrisnove")
+        name = re.sub(r"'s\s*$", '', name)
+        name = re.sub(r"'s\s+", ' ', name)
+
+        # Remove underscores (like "Dilorom_Russian" -> "Dilorom Russian")
         name = name.replace('_', ' ')
 
         # Remove language indicators without parentheses
-        languages = ['spanish', 'arabic', 'french', 'russian', 'chinese', 'haitian', 'creole', 'asl', 'portuguese', 'vietnamese', 'hakha', 'chin']
+        languages = ['spanish', 'arabic', 'french', 'russian', 'chinese', 'haitian', 'creole', 'asl', 'portuguese', 'vietnamese', 'hakha', 'chin', 'br']
         for lang in languages:
             name = re.sub(rf'\b{lang}\b', '', name, flags=re.IGNORECASE)
 
@@ -817,6 +821,9 @@ class SheetsService:
         initial_index = {}  # (first_name_lower, last_initial) -> row_number
         # Index for first-name-only matching (for Fritz, Dilorom_Russian, etc.)
         first_name_index = {}  # first_name_lower -> row_number (first occurrence)
+        # ALSO build normalized indexes to match cleaned Zoom names
+        norm_profile_index = {}  # (normalized_first, normalized_last) -> row_number
+        norm_first_name_index = {}  # normalized_first -> row_number
 
         for row_idx, row in enumerate(existing_rows, start=2):
             if not row or not any(row[:3]):
@@ -825,14 +832,31 @@ class SheetsService:
             last_name = row[1].strip().lower() if len(row) > 1 and row[1] else ""
             email = row[2].strip().lower() if len(row) > 2 and row[2] else ""
 
+            # Also normalize for matching (handles "Dilorom_Russian" -> "dilorom", "Chrisnove's" -> "chrisnove")
+            norm_first = self._normalize_name(first_name)
+            norm_last = self._normalize_name(last_name)
+
             if first_name and last_name:
                 profile_index[(first_name, last_name)] = row_idx
                 # Also index by first name + last initial for initial-based matching
                 if len(last_name) >= 1:
                     initial_index[(first_name, last_name[0])] = row_idx
+
+            # Build normalized profile index
+            if norm_first and norm_last:
+                if (norm_first, norm_last) not in norm_profile_index:
+                    norm_profile_index[(norm_first, norm_last)] = row_idx
+                # Also index normalized first name + last initial
+                if len(norm_last) >= 1 and (norm_first, norm_last[0]) not in initial_index:
+                    initial_index[(norm_first, norm_last[0])] = row_idx
+
             # Index by first name only (keep first occurrence to prefer fuller names)
             if first_name and first_name not in first_name_index:
                 first_name_index[first_name] = row_idx
+            # Also index by normalized first name
+            if norm_first and norm_first not in norm_first_name_index:
+                norm_first_name_index[norm_first] = row_idx
+
             if email:
                 email_index[email] = row_idx
 
@@ -919,23 +943,32 @@ class SheetsService:
             if email and email.lower() in email_index:
                 row_number = email_index[email.lower()]
 
-            # Then by exact Zoom name
-            if row_number is None:
-                name_key = (norm_first.lower(), norm_last.lower())
-                if name_key in profile_index:
-                    row_number = profile_index[name_key]
-
-            # Try original (non-normalized) Zoom name
+            # Try original (non-normalized) Zoom name in raw index
             if row_number is None:
                 orig_key = (zoom_first.lower(), zoom_last.lower())
                 if orig_key in profile_index:
                     row_number = profile_index[orig_key]
+
+            # Try normalized Zoom name in normalized index
+            if row_number is None:
+                norm_key = (norm_first.lower(), norm_last.lower()) if norm_first and norm_last else None
+                if norm_key and norm_key in norm_profile_index:
+                    row_number = norm_profile_index[norm_key]
+
+            # Try normalized name in raw profile index (in case stored names are clean)
+            if row_number is None and norm_first:
+                name_key = (norm_first.lower(), norm_last.lower() if norm_last else "")
+                if name_key in profile_index:
+                    row_number = profile_index[name_key]
 
             # If roster match found, try to find existing profile with roster name
             if row_number is None and roster_match:
                 roster_key = (roster_match["first_name"].lower(), roster_match["last_name"].lower())
                 if roster_key in profile_index:
                     row_number = profile_index[roster_key]
+                # Also try in normalized index
+                if row_number is None and roster_key in norm_profile_index:
+                    row_number = norm_profile_index[roster_key]
 
             # Try initial-based matching (e.g., "Jamie R" matches existing "Jamie Reisman")
             if row_number is None and roster_match and len(roster_match["last_name"]) == 1:
@@ -946,7 +979,16 @@ class SheetsService:
 
             # FALLBACK: First-name-only matching for cases like "Fritz", "Dilorom_Russian", "Chrisnove's iPhone"
             if row_number is None and norm_first:
-                if norm_first in first_name_index:
+                # Try normalized first name index first (most likely to match)
+                if norm_first in norm_first_name_index:
+                    row_number = norm_first_name_index[norm_first]
+                    if match_confidence == "none":
+                        match_confidence = "low"
+                        roster_match_str = f"⚠️ REVIEW: matched by first name '{norm_first}' only"
+                        results["needs_review"] += 1
+                    print(f"[SHEETS] ✓ First-name match: '{zoom_full_name}' -> normalized '{norm_first}' found at row {row_number} (NEEDS REVIEW)", flush=True)
+                # Also try raw first name index
+                elif norm_first in first_name_index:
                     row_number = first_name_index[norm_first]
                     if match_confidence == "none":
                         match_confidence = "low"
@@ -983,12 +1025,19 @@ class SheetsService:
                 # New profile - use ORIGINAL Zoom name (not roster name)
                 new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
 
-                # Track for duplicate detection using normalized name
-                name_key = (norm_first.lower(), norm_last.lower())
-                profile_index[name_key] = next_row
-                # Also track by first name for future first-name-only matching
-                if norm_first and norm_first not in first_name_index:
-                    first_name_index[norm_first] = next_row
+                # Track for duplicate detection using BOTH raw and normalized names
+                # Raw name (as stored in sheet)
+                raw_key = (zoom_first.lower(), zoom_last.lower())
+                profile_index[raw_key] = next_row
+
+                # Normalized name (for matching variations like "Dilorom_Russian" -> "dilorom")
+                if norm_first:
+                    norm_key = (norm_first.lower(), norm_last.lower() if norm_last else "")
+                    if norm_key not in norm_profile_index:
+                        norm_profile_index[norm_key] = next_row
+                    # Also track by normalized first name for first-name-only matching
+                    if norm_first not in norm_first_name_index:
+                        norm_first_name_index[norm_first] = next_row
 
                 # Track the row number for this new profile
                 row_number = next_row
