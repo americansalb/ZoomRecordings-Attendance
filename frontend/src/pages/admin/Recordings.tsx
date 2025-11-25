@@ -1,10 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
 import { recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
 
 export default function RecordingsPage() {
-  const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
 
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null)
@@ -14,7 +12,7 @@ export default function RecordingsPage() {
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
-    existing_sheet: { id: string; name: string } | null
+    existing_tab: { name: string; sheet_id: number } | null
     participants: Participant[]
     new_count: number
     existing_count: number
@@ -42,8 +40,7 @@ export default function RecordingsPage() {
       return attendanceApi.process(
         String(selectedRecording.meeting_id),
         selectedRecording.topic,
-        meetingDate,
-        previewData?.existing_sheet?.id
+        meetingDate
       )
     },
     onSuccess: (data) => {
@@ -173,8 +170,8 @@ export default function RecordingsPage() {
                     {previewData.session_code ? `Session ${previewData.session_code}` : 'No session code found'}
                   </p>
                   <p className="text-sm">
-                    <strong>Sheet:</strong>{' '}
-                    {previewData.existing_sheet ? previewData.existing_sheet.name : 'Will create new sheet'}
+                    <strong>Tab:</strong>{' '}
+                    {previewData.existing_tab ? previewData.existing_tab.name : 'Will create new tab'}
                   </p>
                 </div>
               )}

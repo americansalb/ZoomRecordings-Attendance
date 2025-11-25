@@ -103,8 +103,8 @@ export default function StudentSearch() {
             <div className="space-y-3">
               {searchResults.results.map((result) => (
                 <Link
-                  key={`${result.spreadsheet_id}-${result.row_number}`}
-                  to={`/student/profile/${result.spreadsheet_id}/${result.row_number}`}
+                  key={`${result.session_code}-${result.row_number}`}
+                  to={`/student/profile/${result.session_code}/${result.row_number}`}
                   className="card block hover:shadow-lg transition-shadow"
                 >
                   <div className="flex justify-between items-start">
@@ -116,7 +116,7 @@ export default function StudentSearch() {
                         <p className="text-sm text-gray-500">{result.email}</p>
                       )}
                       <p className="text-sm text-blue-600 mt-1">
-                        {result.spreadsheet_name}
+                        {result.session_name}
                       </p>
                     </div>
                     <span className="px-2 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded">

@@ -3,15 +3,15 @@ import { useQuery } from '@tanstack/react-query'
 import { studentsApi } from '../../services/api'
 
 export default function StudentProfile() {
-  const { spreadsheetId, rowNumber } = useParams<{
-    spreadsheetId: string
+  const { sessionCode, rowNumber } = useParams<{
+    sessionCode: string
     rowNumber: string
   }>()
 
   const { data: profile, isLoading, isError } = useQuery({
-    queryKey: ['student-profile', spreadsheetId, rowNumber],
-    queryFn: () => studentsApi.getProfile(spreadsheetId!, parseInt(rowNumber!)),
-    enabled: !!spreadsheetId && !!rowNumber,
+    queryKey: ['student-profile', sessionCode, rowNumber],
+    queryFn: () => studentsApi.getProfile(sessionCode!, parseInt(rowNumber!)),
+    enabled: !!sessionCode && !!rowNumber,
   })
 
   if (isLoading) {
@@ -229,7 +229,6 @@ export default function StudentProfile() {
             {attendanceData.map((record) => {
               const maxMinutes = 60 // Assume 60 min sessions for visualization
               const attendancePercent = Math.min(100, (record.attendance / maxMinutes) * 100)
-              const participationPercent = Math.min(100, (record.participation / maxMinutes) * 100)
 
               return (
                 <div key={record.date}>

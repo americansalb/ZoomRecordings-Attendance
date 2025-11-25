@@ -4,31 +4,31 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { studentsApi, DuplicateMatch } from '../../services/api'
 
 export default function DuplicatesPage() {
-  const { spreadsheetId } = useParams<{ spreadsheetId: string }>()
+  const { sessionCode } = useParams<{ sessionCode: string }>()
   const queryClient = useQueryClient()
 
   const [selectedPair, setSelectedPair] = useState<DuplicateMatch | null>(null)
   const [keepRow, setKeepRow] = useState<number | null>(null)
 
   const { data: duplicatesData, isLoading } = useQuery({
-    queryKey: ['duplicates', spreadsheetId],
-    queryFn: () => studentsApi.findDuplicates(spreadsheetId!),
-    enabled: !!spreadsheetId,
+    queryKey: ['duplicates', sessionCode],
+    queryFn: () => studentsApi.findDuplicates(sessionCode!),
+    enabled: !!sessionCode,
   })
 
   const { data: studentsData } = useQuery({
-    queryKey: ['session-students', spreadsheetId],
-    queryFn: () => studentsApi.getSessionStudents(spreadsheetId!),
-    enabled: !!spreadsheetId,
+    queryKey: ['session-students', sessionCode],
+    queryFn: () => studentsApi.getSessionStudents(sessionCode!),
+    enabled: !!sessionCode,
   })
 
   const mergeMutation = useMutation({
     mutationFn: async ({ keepRow, mergeRow }: { keepRow: number; mergeRow: number }) => {
-      return studentsApi.merge(spreadsheetId!, keepRow, mergeRow)
+      return studentsApi.merge(sessionCode!, keepRow, mergeRow)
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['duplicates', spreadsheetId] })
-      queryClient.invalidateQueries({ queryKey: ['session-students', spreadsheetId] })
+      queryClient.invalidateQueries({ queryKey: ['duplicates', sessionCode] })
+      queryClient.invalidateQueries({ queryKey: ['session-students', sessionCode] })
       setSelectedPair(null)
       setKeepRow(null)
     },

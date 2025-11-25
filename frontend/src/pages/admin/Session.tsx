@@ -22,9 +22,9 @@ export default function SessionPage() {
   })
 
   const { data: studentsData, isLoading: studentsLoading } = useQuery({
-    queryKey: ['session-students', sheetData?.id],
-    queryFn: () => studentsApi.getSessionStudents(sheetData!.id),
-    enabled: !!sheetData?.id,
+    queryKey: ['session-students', sessionCode],
+    queryFn: () => studentsApi.getSessionStudents(sessionCode!),
+    enabled: !!sessionCode && !!sheetData,
   })
 
   const updateMutation = useMutation({
@@ -34,10 +34,10 @@ export default function SessionPage() {
       attendance?: number
       participation?: number
     }) => {
-      return attendanceApi.update(sheetData!.id, row, date, attendance, participation)
+      return attendanceApi.update(sessionCode!, row, date, attendance, participation)
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['session-students', sheetData?.id] })
+      queryClient.invalidateQueries({ queryKey: ['session-students', sessionCode] })
       setEditingCell(null)
     },
   })
@@ -45,7 +45,7 @@ export default function SessionPage() {
   const updateProfileMutation = useMutation({
     mutationFn: async (profile: Profile) => {
       return studentsApi.updateProfile(
-        sheetData!.id,
+        sessionCode!,
         profile.row_number,
         profile.first_name,
         profile.last_name,
@@ -53,7 +53,7 @@ export default function SessionPage() {
       )
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['session-students', sheetData?.id] })
+      queryClient.invalidateQueries({ queryKey: ['session-students', sessionCode] })
       setEditingProfile(null)
     },
   })
@@ -114,13 +114,13 @@ export default function SessionPage() {
         </div>
         <div className="flex space-x-2">
           <Link
-            to={`/duplicates/${sheetData.id}`}
+            to={`/duplicates/${sessionCode}`}
             className="btn btn-secondary"
           >
             Check Duplicates
           </Link>
           <a
-            href={sheetData.url}
+            href={sheetData.spreadsheet_url}
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn-primary"

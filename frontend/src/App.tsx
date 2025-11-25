@@ -55,11 +55,11 @@ function App() {
           <Route path="/" element={<AdminDashboard />} />
           <Route path="/recordings" element={<RecordingsPage />} />
           <Route path="/session/:sessionCode" element={<SessionPage />} />
-          <Route path="/duplicates/:spreadsheetId" element={<DuplicatesPage />} />
+          <Route path="/duplicates/:sessionCode" element={<DuplicatesPage />} />
 
           {/* Student Routes */}
           <Route path="/student" element={<StudentSearch />} />
-          <Route path="/student/profile/:spreadsheetId/:rowNumber" element={<StudentProfile />} />
+          <Route path="/student/profile/:sessionCode/:rowNumber" element={<StudentProfile />} />
         </Routes>
       </main>
     </div>
