@@ -54,75 +54,48 @@ async def process_attendance(request: ProcessAttendanceRequest):
         # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
-        # Get participants from Zoom FIRST (we always have access to this)
+        # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
         participants = participant_data.get("participants", [])
 
-        # Calculate meeting duration from participant data (earliest join to latest leave)
-        # This is our fallback when we don't have access to past_meetings endpoint
-        earliest_join = None
-        latest_leave = None
-        for p in participants:
-            join_time = p.get("join_time")
-            leave_time = p.get("leave_time")
-            if join_time:
-                join_dt = datetime.fromisoformat(join_time.replace("Z", "+00:00"))
-                if earliest_join is None or join_dt < earliest_join:
-                    earliest_join = join_dt
-            if leave_time:
-                leave_dt = datetime.fromisoformat(leave_time.replace("Z", "+00:00"))
-                if latest_leave is None or leave_dt > latest_leave:
-                    latest_leave = leave_dt
+        print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
 
-        # Calculate duration from participant times
-        participant_duration_minutes = None
-        if earliest_join and latest_leave:
-            participant_duration_minutes = int((latest_leave - earliest_join).total_seconds() / 60)
-            print(f"[ATTENDANCE] Meeting time from participants: {earliest_join} to {latest_leave} = {participant_duration_minutes} min", flush=True)
-
-        # Try to get meeting details (may fail if missing scopes)
+        # Try to get scheduled meeting details from Zoom API (requires meeting:read:past_meeting:admin scope)
         zoom_start_time = None
-        zoom_end_time = None
         zoom_duration_minutes = None
         try:
             meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
             zoom_start_time = meeting_details.get("start_time")
-            zoom_end_time = meeting_details.get("end_time")
             zoom_duration_minutes = meeting_details.get("duration")
-            print(f"[ATTENDANCE] Meeting from Zoom API: start={zoom_start_time}, end={zoom_end_time}, duration={zoom_duration_minutes} min", flush=True)
+            print(f"[ATTENDANCE] Zoom API: start={zoom_start_time}, duration={zoom_duration_minutes} min", flush=True)
         except Exception as e:
-            print(f"[ATTENDANCE] Could not get meeting details (missing scope?): {e}", flush=True)
+            print(f"[ATTENDANCE] Could not get meeting details (add meeting:read:past_meeting:admin scope): {e}", flush=True)
 
-        # Determine meeting duration: prefer Zoom API, fall back to participant times, then request default
+        # Determine meeting duration: Zoom API > user-provided (NO participant fallback - that defeats the purpose)
         if zoom_duration_minutes and zoom_duration_minutes > 0:
             meeting_duration = zoom_duration_minutes
             print(f"[ATTENDANCE] Using Zoom API duration: {meeting_duration} min", flush=True)
-        elif participant_duration_minutes and participant_duration_minutes > 0:
-            meeting_duration = participant_duration_minutes
-            print(f"[ATTENDANCE] Using participant-calculated duration: {meeting_duration} min", flush=True)
         else:
             meeting_duration = request.meeting_duration_minutes
-            print(f"[ATTENDANCE] Using provided duration (default): {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Using user-provided duration: {meeting_duration} min", flush=True)
 
-        # Determine scheduled window start time
+        # Determine scheduled window start time: Zoom API > user-provided (NO earliest_join fallback)
         if request.meeting_start_time:
             scheduled_start = datetime.fromisoformat(request.meeting_start_time.replace("Z", "+00:00"))
+            print(f"[ATTENDANCE] Using user-provided start time: {scheduled_start}", flush=True)
         elif zoom_start_time:
             scheduled_start = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
-        elif earliest_join:
-            scheduled_start = earliest_join
-            print(f"[ATTENDANCE] Using earliest join as meeting start: {scheduled_start}", flush=True)
+            print(f"[ATTENDANCE] Using Zoom API start time: {scheduled_start}", flush=True)
         else:
             scheduled_start = None
+            print(f"[ATTENDANCE] WARNING: No scheduled start time available", flush=True)
 
         if scheduled_start:
             scheduled_end = scheduled_start + timedelta(minutes=meeting_duration)
-            print(f"[ATTENDANCE] Meeting window: {scheduled_start} to {scheduled_end} ({meeting_duration} min)", flush=True)
+            print(f"[ATTENDANCE] Scheduled window: {scheduled_start} to {scheduled_end} ({meeting_duration} min)", flush=True)
         else:
             scheduled_end = None
             print(f"[ATTENDANCE] No scheduled window - will cap at {meeting_duration} min", flush=True)
-
-        print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
 
         # Aggregate participants by unique user, calculating ONLY time within scheduled window
         unique_participants = {}
