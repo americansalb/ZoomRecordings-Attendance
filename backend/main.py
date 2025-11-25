@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -28,27 +28,35 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     """Log configuration status on startup"""
-    logger.info("=" * 50)
-    logger.info("ZOOM ATTENDANCE TRACKER - STARTUP")
-    logger.info("=" * 50)
+    print("=" * 50, flush=True)
+    print("ZOOM ATTENDANCE TRACKER - STARTUP", flush=True)
+    print("=" * 50, flush=True)
 
     # Check Zoom credentials
     zoom_account = os.getenv("ZOOM_ACCOUNT_ID")
     zoom_client = os.getenv("ZOOM_CLIENT_ID")
     zoom_secret = os.getenv("ZOOM_CLIENT_SECRET")
-    logger.info(f"ZOOM_ACCOUNT_ID: {'SET' if zoom_account else 'MISSING'}")
-    logger.info(f"ZOOM_CLIENT_ID: {'SET' if zoom_client else 'MISSING'}")
-    logger.info(f"ZOOM_CLIENT_SECRET: {'SET' if zoom_secret else 'MISSING'}")
+    print(f"ZOOM_ACCOUNT_ID: {'SET' if zoom_account else 'MISSING'}", flush=True)
+    print(f"ZOOM_CLIENT_ID: {'SET' if zoom_client else 'MISSING'}", flush=True)
+    print(f"ZOOM_CLIENT_SECRET: {'SET' if zoom_secret else 'MISSING'}", flush=True)
 
     # Check Google credentials
     google_email = os.getenv("GOOGLE_CLIENT_EMAIL")
     google_key = os.getenv("GOOGLE_PRIVATE_KEY")
     spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
-    logger.info(f"GOOGLE_CLIENT_EMAIL: {'SET' if google_email else 'MISSING'}")
-    logger.info(f"GOOGLE_PRIVATE_KEY: {'SET' if google_key else 'MISSING'}")
-    logger.info(f"GOOGLE_SPREADSHEET_ID: {'SET' if spreadsheet_id else 'MISSING'} (checked GOOGLE_SPREADSHEET_ID and GOOGLE_SHEET_ID)")
+    print(f"GOOGLE_CLIENT_EMAIL: {'SET' if google_email else 'MISSING'}", flush=True)
+    print(f"GOOGLE_PRIVATE_KEY: {'SET' if google_key else 'MISSING'}", flush=True)
+    print(f"GOOGLE_SPREADSHEET_ID: {'SET' if spreadsheet_id else 'MISSING'}", flush=True)
 
-    logger.info("=" * 50)
+    # Log registered routes
+    print("=" * 50, flush=True)
+    print("REGISTERED ROUTES:", flush=True)
+    for route in app.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            print(f"  {route.methods} {route.path}", flush=True)
+        elif hasattr(route, 'path'):
+            print(f"  MOUNT {route.path}", flush=True)
+    print("=" * 50, flush=True)
 
 # CORS configuration
 app.add_middleware(
@@ -68,11 +76,33 @@ app.include_router(sheets.router, prefix="/api/sheets", tags=["Sheets"])
 
 @app.get("/api/health")
 async def health_check():
+    print("[HEALTH] Health check called", flush=True)
     return {"status": "healthy"}
 
 
-# Serve static frontend files - MUST be last, mount has lowest priority
+@app.get("/api/test")
+async def test_endpoint():
+    print("[TEST] Test endpoint called", flush=True)
+    return {"test": "working", "message": "API routes are functioning"}
+
+
+# Serve static frontend files
 static_dir = Path(__file__).parent.parent / "frontend" / "dist"
 if static_dir.exists():
-    # Mount static files - this has lower priority than explicit routes
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
+    # Mount assets directory for JS/CSS bundles
+    app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+    # Catch-all for frontend SPA - must check it's not an API route
+    @app.get("/{full_path:path}")
+    async def serve_frontend(request: Request, full_path: str):
+        # Don't intercept API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+
+        # Serve actual files if they exist
+        file_path = static_dir / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+
+        # Serve index.html for SPA routing
+        return FileResponse(static_dir / "index.html")
