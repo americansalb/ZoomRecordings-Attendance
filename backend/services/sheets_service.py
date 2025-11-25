@@ -346,11 +346,15 @@ class SheetsService:
                     # No last name provided - rely on first name only
                     last_score = 50  # Partial credit
                 elif len(norm_last) == 1:
-                    # Single character - treat as initial
+                    # Zoom has single character initial - check if roster last name starts with it
                     if roster_last and roster_last[0] == norm_last:
                         last_score = 90
+                elif len(roster_last) == 1:
+                    # Roster has single character initial - check if Zoom last name starts with it
+                    if norm_last and norm_last[0] == roster_last:
+                        last_score = 90
                 else:
-                    # Full last name - fuzzy match
+                    # Both have full last names - fuzzy match
                     last_score = fuzz.ratio(norm_last, roster_last)
 
                 # Combined score (weighted toward first name)
