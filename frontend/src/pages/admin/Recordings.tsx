@@ -9,6 +9,7 @@ export default function RecordingsPage() {
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
   )
+  const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(undefined)
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
@@ -42,7 +43,8 @@ export default function RecordingsPage() {
       return attendanceApi.process(
         selectedRecording.id,
         selectedRecording.topic,
-        meetingDate
+        meetingDate,
+        meetingDurationMinutes
       )
     },
     onSuccess: (data) => {
@@ -162,6 +164,23 @@ export default function RecordingsPage() {
                   onChange={(e) => setMeetingDate(e.target.value)}
                   placeholder="MM/DD"
                 />
+              </div>
+
+              {/* Meeting Duration Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Scheduled Duration (minutes)
+                </label>
+                <input
+                  type="number"
+                  className="input"
+                  value={meetingDurationMinutes ?? ''}
+                  onChange={(e) => setMeetingDurationMinutes(e.target.value ? parseInt(e.target.value) : undefined)}
+                  placeholder="e.g., 180 for 3 hours"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Leave blank to use Zoom's actual duration. Set to scheduled time (e.g., 180) to cap attendance to scheduled window.
+                </p>
               </div>
 
               {/* Session Info */}
