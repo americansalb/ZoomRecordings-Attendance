@@ -9,7 +9,7 @@ export default function RecordingsPage() {
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
   )
-  const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(undefined)
+  const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(180)
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
