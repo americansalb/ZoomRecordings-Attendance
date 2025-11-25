@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import datetime, timedelta
 
 from services.zoom_service import zoom_service
 from services.sheets_service import sheets_service
@@ -12,6 +13,8 @@ class ProcessAttendanceRequest(BaseModel):
     meeting_id: str
     recording_title: str
     meeting_date: str  # Format: MM/DD
+    meeting_duration_minutes: int = 60  # Scheduled meeting duration
+    meeting_start_time: Optional[str] = None  # ISO format, if not provided will use Zoom's start time
 
 
 class UpdateAttendanceRequest(BaseModel):
@@ -51,13 +54,37 @@ async def process_attendance(request: ProcessAttendanceRequest):
         # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
+        # Get meeting details to find scheduled start time
+        try:
+            meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
+            zoom_start_time = meeting_details.get("start_time")
+            print(f"[ATTENDANCE] Meeting start time from Zoom: {zoom_start_time}", flush=True)
+        except Exception as e:
+            print(f"[ATTENDANCE] Could not get meeting details: {e}", flush=True)
+            zoom_start_time = None
+
+        # Determine scheduled window
+        if request.meeting_start_time:
+            scheduled_start = datetime.fromisoformat(request.meeting_start_time.replace("Z", "+00:00"))
+        elif zoom_start_time:
+            scheduled_start = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
+        else:
+            scheduled_start = None
+
+        if scheduled_start:
+            scheduled_end = scheduled_start + timedelta(minutes=request.meeting_duration_minutes)
+            print(f"[ATTENDANCE] Scheduled window: {scheduled_start} to {scheduled_end} ({request.meeting_duration_minutes} min)", flush=True)
+        else:
+            scheduled_end = None
+            print(f"[ATTENDANCE] No scheduled window - will cap at {request.meeting_duration_minutes} min", flush=True)
+
         # Get participants from Zoom
         participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
         participants = participant_data.get("participants", [])
 
         print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
 
-        # Aggregate participants by unique user
+        # Aggregate participants by unique user, calculating ONLY time within scheduled window
         unique_participants = {}
         for p in participants:
             key = p.get("user_email") or p.get("name", "Unknown")
@@ -72,9 +99,28 @@ async def process_attendance(request: ProcessAttendanceRequest):
                     "total_duration": 0
                 }
 
-            unique_participants[key]["total_duration"] += p.get("duration", 0)
+            # Calculate time within scheduled window for this join/leave session
+            join_time = p.get("join_time")
+            leave_time = p.get("leave_time")
+
+            if join_time and leave_time and scheduled_start and scheduled_end:
+                # Use the helper function to calculate overlap with scheduled window
+                session_minutes = zoom_service.calculate_attendance_minutes(
+                    join_time, leave_time, scheduled_start, scheduled_end
+                )
+                unique_participants[key]["total_duration"] += session_minutes * 60  # Convert to seconds
+            else:
+                # Fallback: use Zoom's reported duration
+                unique_participants[key]["total_duration"] += p.get("duration", 0)
 
         print(f"[ATTENDANCE] Aggregated to {len(unique_participants)} unique participants", flush=True)
+
+        # Final cap to meeting duration (safety check)
+        max_duration_seconds = request.meeting_duration_minutes * 60
+        for key in unique_participants:
+            if unique_participants[key]["total_duration"] > max_duration_seconds:
+                print(f"[ATTENDANCE] Final cap {key}: {unique_participants[key]['total_duration']}s -> {max_duration_seconds}s", flush=True)
+                unique_participants[key]["total_duration"] = max_duration_seconds
 
         # Use the new batch processing method (minimizes API calls)
         participant_list = list(unique_participants.values())

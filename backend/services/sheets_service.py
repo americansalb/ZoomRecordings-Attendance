@@ -1317,8 +1317,11 @@ class SheetsService:
         print(f"[SUMMARY] Found {len(date_columns)} attendance dates", flush=True)
 
         # Step 4: Group raw rows by roster match
+        # ONLY include rows that have a valid roster match (Summary is roster-only)
+        # Unmatched Zoom names stay in the raw tab for manual review
         # Structure: {roster_match_key: {"roster_info": {...}, "zoom_names": set(), "attendance": {date: max_minutes}}}
         summary_data = {}
+        skipped_unmatched = 0
 
         for row in raw_rows:
             if not row or not any(row[:3]):
@@ -1329,13 +1332,14 @@ class SheetsService:
             roster_match = row[3].strip() if len(row) > 3 and row[3] else ""
             zoom_full = f"{zoom_first} {zoom_last}".strip()
 
-            # Determine the grouping key
-            if roster_match and not roster_match.startswith("⚠️"):
-                # Has a valid roster match - use that as the key
-                group_key = roster_match.lower()
-            else:
-                # No roster match - use the Zoom name itself
-                group_key = zoom_full.lower()
+            # ONLY include entries with a valid roster match
+            # Skip unmatched entries and entries needing review (they stay in raw tab only)
+            if not roster_match or roster_match.startswith("⚠️"):
+                skipped_unmatched += 1
+                continue
+
+            # Use roster match as the grouping key
+            group_key = roster_match.lower()
 
             # Initialize group if needed
             if group_key not in summary_data:
@@ -1343,10 +1347,9 @@ class SheetsService:
                 roster_info = roster_by_name.get(group_key, {})
                 summary_data[group_key] = {
                     "roster_info": roster_info,
-                    "canonical_name": roster_match if roster_match and not roster_match.startswith("⚠️") else zoom_full,
+                    "canonical_name": roster_match,
                     "zoom_names": set(),
-                    "attendance": {},
-                    "needs_review": roster_match.startswith("⚠️") if roster_match else False
+                    "attendance": {}
                 }
 
             # Add Zoom name to known names
@@ -1364,7 +1367,7 @@ class SheetsService:
                     except ValueError:
                         pass
 
-        print(f"[SUMMARY] Grouped into {len(summary_data)} students", flush=True)
+        print(f"[SUMMARY] Grouped into {len(summary_data)} roster students (skipped {skipped_unmatched} unmatched)", flush=True)
 
         # Step 5: Get or create summary tab
         summary_tab = self.get_or_create_summary_tab(session_code)
@@ -1387,18 +1390,14 @@ class SheetsService:
             first_name = name_parts[0] if name_parts else ""
             last_name = name_parts[1] if len(name_parts) > 1 else ""
 
-            # Use roster info if available
+            # Use roster info if available (preferred over parsed name)
             student_id = roster_info.get("student_id", "")
             if roster_info.get("first_name"):
                 first_name = roster_info["first_name"]
             if roster_info.get("last_name"):
                 last_name = roster_info["last_name"]
 
-            # Add review flag if needed
-            if data["needs_review"]:
-                first_name = f"⚠️ {first_name}"
-
-            # Build row
+            # Build row (roster-matched students only, no review flags needed)
             row = [student_id, first_name, last_name, ", ".join(zoom_names)]
             for date_col in date_columns:
                 date_str = date_col["date"]
