@@ -13,7 +13,7 @@ class ProcessAttendanceRequest(BaseModel):
     meeting_id: str
     recording_title: str
     meeting_date: str  # Format: MM/DD
-    meeting_duration_minutes: int = 60  # Scheduled meeting duration
+    meeting_duration_minutes: Optional[int] = None  # Scheduled meeting duration (if not provided, uses Zoom's actual duration)
     meeting_start_time: Optional[str] = None  # ISO format, if not provided will use Zoom's start time
 
 
@@ -71,13 +71,16 @@ async def process_attendance(request: ProcessAttendanceRequest):
         except Exception as e:
             print(f"[ATTENDANCE] Could not get meeting details (add meeting:read:past_meeting:admin scope): {e}", flush=True)
 
-        # Determine meeting duration: Zoom API > user-provided (NO participant fallback - that defeats the purpose)
-        if zoom_duration_minutes and zoom_duration_minutes > 0:
-            meeting_duration = zoom_duration_minutes
-            print(f"[ATTENDANCE] Using Zoom API duration: {meeting_duration} min", flush=True)
-        else:
+        # Determine meeting duration: user-provided > Zoom API (user knows scheduled time, Zoom gives actual time)
+        if request.meeting_duration_minutes and request.meeting_duration_minutes > 0:
             meeting_duration = request.meeting_duration_minutes
-            print(f"[ATTENDANCE] Using user-provided duration: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Using user-provided SCHEDULED duration: {meeting_duration} min", flush=True)
+        elif zoom_duration_minutes and zoom_duration_minutes > 0:
+            meeting_duration = zoom_duration_minutes
+            print(f"[ATTENDANCE] Using Zoom ACTUAL duration: {meeting_duration} min", flush=True)
+        else:
+            meeting_duration = 180  # Default 3 hours for typical sessions
+            print(f"[ATTENDANCE] Using default duration: {meeting_duration} min", flush=True)
 
         # Determine scheduled window start time: Zoom API > user-provided (NO earliest_join fallback)
         if request.meeting_start_time:
