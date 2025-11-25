@@ -15,6 +15,7 @@ class ProcessAttendanceRequest(BaseModel):
     meeting_date: str  # Format: MM/DD
     meeting_duration_minutes: Optional[int] = None  # Scheduled meeting duration (if not provided, uses Zoom's actual duration)
     meeting_start_time: Optional[str] = None  # ISO format, if not provided will use Zoom's start time
+    grace_period_minutes: Optional[int] = 5  # Buffer time before/after scheduled window (default 5 min)
 
 
 class UpdateAttendanceRequest(BaseModel):
@@ -165,8 +166,20 @@ async def process_attendance(request: ProcessAttendanceRequest):
         if scheduled_start:
             scheduled_end = scheduled_start + timedelta(minutes=meeting_duration)
             print(f"[ATTENDANCE] Scheduled window: {scheduled_start} to {scheduled_end} ({meeting_duration} min)", flush=True)
+
+            # Apply grace period buffer (extends window on both ends)
+            grace_minutes = request.grace_period_minutes or 5
+            if grace_minutes > 0:
+                window_start = scheduled_start - timedelta(minutes=grace_minutes)
+                window_end = scheduled_end + timedelta(minutes=grace_minutes)
+                print(f"[ATTENDANCE] Grace period: {grace_minutes} min -> effective window: {window_start} to {window_end}", flush=True)
+            else:
+                window_start = scheduled_start
+                window_end = scheduled_end
         else:
             scheduled_end = None
+            window_start = None
+            window_end = None
             print(f"[ATTENDANCE] No scheduled window - will cap at {meeting_duration} min", flush=True)
 
         # Aggregate participants by unique user, calculating ONLY time within scheduled window
@@ -188,10 +201,10 @@ async def process_attendance(request: ProcessAttendanceRequest):
             join_time = p.get("join_time")
             leave_time = p.get("leave_time")
 
-            if join_time and leave_time and scheduled_start and scheduled_end:
-                # Use the helper function to calculate overlap with scheduled window
+            if join_time and leave_time and window_start and window_end:
+                # Use the helper function to calculate overlap with extended window (includes grace period)
                 session_minutes = zoom_service.calculate_attendance_minutes(
-                    join_time, leave_time, scheduled_start, scheduled_end
+                    join_time, leave_time, window_start, window_end
                 )
                 unique_participants[key]["total_duration"] += session_minutes * 60  # Convert to seconds
             else:
