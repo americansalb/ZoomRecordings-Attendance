@@ -1,9 +1,13 @@
 import httpx
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 import base64
 import re
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class ZoomService:
@@ -19,52 +23,81 @@ class ZoomService:
         self._access_token: Optional[str] = None
         self._token_expiry: Optional[datetime] = None
 
+        # Log configuration status on init
+        logger.info(f"ZoomService initialized - Account ID: {'SET' if self.account_id else 'MISSING'}, "
+                   f"Client ID: {'SET' if self.client_id else 'MISSING'}, "
+                   f"Client Secret: {'SET' if self.client_secret else 'MISSING'}")
+
     async def _get_access_token(self) -> str:
         """Get or refresh the OAuth access token using Server-to-Server OAuth"""
         if self._access_token and self._token_expiry and datetime.now() < self._token_expiry:
             return self._access_token
+
+        logger.info("Requesting new Zoom access token...")
+
+        if not self.client_id or not self.client_secret or not self.account_id:
+            logger.error("Missing Zoom credentials - cannot authenticate")
+            raise ValueError("Missing Zoom credentials: ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, or ZOOM_CLIENT_SECRET not set")
 
         # Create Basic Auth header
         credentials = f"{self.client_id}:{self.client_secret}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.TOKEN_URL,
-                headers={
-                    "Authorization": f"Basic {encoded_credentials}",
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                data={
-                    "grant_type": "account_credentials",
-                    "account_id": self.account_id
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = await client.post(
+                    self.TOKEN_URL,
+                    headers={
+                        "Authorization": f"Basic {encoded_credentials}",
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    data={
+                        "grant_type": "account_credentials",
+                        "account_id": self.account_id
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
 
-            self._access_token = data["access_token"]
-            # Token expires in 1 hour, refresh 5 minutes early
-            self._token_expiry = datetime.now() + timedelta(seconds=data.get("expires_in", 3600) - 300)
+                self._access_token = data["access_token"]
+                # Token expires in 1 hour, refresh 5 minutes early
+                self._token_expiry = datetime.now() + timedelta(seconds=data.get("expires_in", 3600) - 300)
 
-            return self._access_token
+                logger.info("Successfully obtained Zoom access token")
+                return self._access_token
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Zoom token request failed: {e.response.status_code} - {e.response.text}")
+                raise
+            except Exception as e:
+                logger.error(f"Zoom token request error: {str(e)}")
+                raise
 
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> dict:
         """Make an authenticated request to Zoom API"""
         token = await self._get_access_token()
 
+        url = f"{self.BASE_URL}{endpoint}"
+        logger.debug(f"Zoom API request: {method} {url}")
+
         async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method,
-                f"{self.BASE_URL}{endpoint}",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                },
-                **kwargs
-            )
-            response.raise_for_status()
-            return response.json()
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json"
+                    },
+                    **kwargs
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Zoom API error: {method} {endpoint} -> {e.response.status_code}: {e.response.text}")
+                raise
+            except Exception as e:
+                logger.error(f"Zoom API request failed: {method} {endpoint} -> {str(e)}")
+                raise
 
     async def list_recordings(self, user_id: str = "me", from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
         """
@@ -94,23 +127,32 @@ class ZoomService:
         """
         List all cloud recordings across all users in the account
         """
+        logger.info(f"Fetching all recordings from {from_date} to {to_date}")
+
         # First get list of users
-        users_response = await self._make_request("GET", "/users", params={"page_size": 300})
-        users = users_response.get("users", [])
+        try:
+            users_response = await self._make_request("GET", "/users", params={"page_size": 300})
+            users = users_response.get("users", [])
+            logger.info(f"Found {len(users)} users in Zoom account")
+        except Exception as e:
+            logger.error(f"Failed to fetch users list: {str(e)}")
+            raise
 
         all_recordings = []
         for user in users:
             try:
                 recordings = await self.list_recordings(user["id"], from_date, to_date)
                 meetings = recordings.get("meetings", [])
+                logger.debug(f"User {user.get('email', user['id'])}: {len(meetings)} recordings")
                 for meeting in meetings:
                     meeting["host_email"] = user.get("email", "")
                     meeting["host_name"] = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
                 all_recordings.extend(meetings)
             except Exception as e:
-                print(f"Error fetching recordings for user {user['id']}: {e}")
+                logger.warning(f"Error fetching recordings for user {user.get('email', user['id'])}: {e}")
                 continue
 
+        logger.info(f"Total recordings found: {len(all_recordings)}")
         return all_recordings
 
     async def get_meeting_participants(self, meeting_id: str) -> dict:

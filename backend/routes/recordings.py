@@ -1,8 +1,11 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from datetime import datetime, timedelta
+import logging
 
 from services.zoom_service import zoom_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -25,7 +28,9 @@ async def list_recordings(
         if not to_date:
             to_date = datetime.now().strftime("%Y-%m-%d")
 
+        logger.info(f"GET /api/recordings - Fetching recordings from {from_date} to {to_date}")
         recordings = await zoom_service.list_all_recordings(from_date, to_date)
+        logger.info(f"GET /api/recordings - Found {len(recordings)} recordings")
 
         # Process recordings to extract session codes and add metadata
         processed = []
@@ -75,6 +80,7 @@ async def list_recordings(
         }
 
     except Exception as e:
+        logger.error(f"GET /api/recordings - Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -86,6 +92,7 @@ async def get_recording(recording_id: str):
         details = await zoom_service.get_past_meeting_details(recording_id)
         return details
     except Exception as e:
+        logger.error(f"GET /api/recordings/{recording_id} - Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
