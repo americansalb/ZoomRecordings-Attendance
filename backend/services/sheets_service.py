@@ -22,6 +22,8 @@ class SheetsService:
         "https://www.googleapis.com/auth/drive"
     ]
 
+    MAPPINGS_TAB_NAME = "Name Mappings"
+
     def __init__(self):
         # The single spreadsheet ID that contains all session tabs (check both env var names)
         self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
@@ -31,6 +33,7 @@ class SheetsService:
         self._sheet_id_cache = {}  # Cache tab name -> sheet ID mapping
         self._data_cache = {}  # Cache session_code -> {data, timestamp}
         self._roster_cache = {}  # Cache session_code -> roster data
+        self._mappings_cache = {}  # Cache for name mappings
         self._cache_ttl = 30  # Cache TTL in seconds
         logger.info(f"SheetsService initialized - Spreadsheet ID: {'SET' if self.spreadsheet_id else 'MISSING'}")
         logger.info(f"Roster Spreadsheet ID: {'SET' if self.roster_spreadsheet_id else 'NOT SET'}")
@@ -365,6 +368,228 @@ class SheetsService:
         print(f"[ROSTER] ✗ No match for '{first_name} {last_name}' (best score: {best_score:.0f})", flush=True)
         return None
 
+    # ==================== NAME MAPPINGS METHODS ====================
+
+    def _ensure_mappings_tab(self) -> None:
+        """Ensure the Name Mappings tab exists, create if not"""
+        tabs = self._get_all_tabs()
+        for tab in tabs:
+            if tab.get("properties", {}).get("title") == self.MAPPINGS_TAB_NAME:
+                return  # Tab exists
+
+        # Create the mappings tab
+        try:
+            request = {
+                "requests": [{
+                    "addSheet": {
+                        "properties": {
+                            "title": self.MAPPINGS_TAB_NAME,
+                            "gridProperties": {
+                                "frozenRowCount": 1
+                            }
+                        }
+                    }
+                }]
+            }
+            result = self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body=request
+            ).execute()
+
+            # Set up header row
+            headers = [["Zoom Name", "Student ID", "First Name", "Last Name", "Session Code", "Created At"]]
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{self.MAPPINGS_TAB_NAME}'!A1:F1",
+                valueInputOption="RAW",
+                body={"values": headers}
+            ).execute()
+
+            print(f"[MAPPINGS] Created '{self.MAPPINGS_TAB_NAME}' tab", flush=True)
+        except HttpError as e:
+            print(f"[MAPPINGS] Error creating mappings tab: {e}", flush=True)
+            raise
+
+    def get_name_mappings(self, session_code: str = None) -> List[Dict[str, str]]:
+        """
+        Get all name mappings, optionally filtered by session code.
+
+        Returns list of {"zoom_name", "student_id", "first_name", "last_name", "session_code", "created_at"}
+        """
+        cache_key = f"mappings:{session_code or 'all'}"
+        if cache_key in self._mappings_cache:
+            cached = self._mappings_cache[cache_key]
+            if time.time() - cached["timestamp"] < self._cache_ttl:
+                return cached["data"]
+
+        self._ensure_mappings_tab()
+
+        try:
+            result = self.sheets.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{self.MAPPINGS_TAB_NAME}'!A:F"
+            ).execute()
+            rows = result.get("values", [])
+
+            mappings = []
+            for row_idx, row in enumerate(rows[1:], start=2):  # Skip header
+                if not row or not row[0]:
+                    continue
+
+                mapping = {
+                    "row_number": row_idx,
+                    "zoom_name": row[0].strip() if len(row) > 0 else "",
+                    "student_id": row[1].strip() if len(row) > 1 else "",
+                    "first_name": row[2].strip() if len(row) > 2 else "",
+                    "last_name": row[3].strip() if len(row) > 3 else "",
+                    "session_code": row[4].strip() if len(row) > 4 else "",
+                    "created_at": row[5].strip() if len(row) > 5 else ""
+                }
+
+                # Filter by session code if specified
+                if session_code is None or not mapping["session_code"] or mapping["session_code"] == session_code:
+                    mappings.append(mapping)
+
+            # Cache the result
+            self._mappings_cache[cache_key] = {
+                "data": mappings,
+                "timestamp": time.time()
+            }
+
+            print(f"[MAPPINGS] Loaded {len(mappings)} name mappings", flush=True)
+            return mappings
+
+        except HttpError as e:
+            print(f"[MAPPINGS] Error loading mappings: {e}", flush=True)
+            return []
+
+    def add_name_mapping(self, zoom_name: str, student_id: str, first_name: str,
+                          last_name: str, session_code: str = "") -> Dict[str, Any]:
+        """
+        Add a new name mapping.
+
+        Args:
+            zoom_name: The Zoom display name to map (e.g., "Jamie R (Spanish)")
+            student_id: The roster student ID
+            first_name: Canonical first name
+            last_name: Canonical last name
+            session_code: Optional session code to limit scope
+
+        Returns:
+            The created mapping
+        """
+        self._ensure_mappings_tab()
+
+        from datetime import datetime
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        new_row = [zoom_name, student_id, first_name, last_name, session_code, created_at]
+
+        try:
+            self.sheets.spreadsheets().values().append(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{self.MAPPINGS_TAB_NAME}'!A:F",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [new_row]}
+            ).execute()
+
+            # Invalidate cache
+            self._mappings_cache.clear()
+
+            print(f"[MAPPINGS] Added mapping: '{zoom_name}' -> '{first_name} {last_name}'", flush=True)
+
+            return {
+                "zoom_name": zoom_name,
+                "student_id": student_id,
+                "first_name": first_name,
+                "last_name": last_name,
+                "session_code": session_code,
+                "created_at": created_at
+            }
+
+        except HttpError as e:
+            print(f"[MAPPINGS] Error adding mapping: {e}", flush=True)
+            raise
+
+    def delete_name_mapping(self, zoom_name: str) -> bool:
+        """
+        Delete a name mapping by Zoom name.
+
+        Returns True if deleted, False if not found.
+        """
+        self._ensure_mappings_tab()
+
+        try:
+            result = self.sheets.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{self.MAPPINGS_TAB_NAME}'!A:A"
+            ).execute()
+            rows = result.get("values", [])
+
+            # Find the row with matching zoom_name
+            row_to_delete = None
+            for row_idx, row in enumerate(rows[1:], start=2):  # Skip header
+                if row and row[0].strip().lower() == zoom_name.strip().lower():
+                    row_to_delete = row_idx
+                    break
+
+            if row_to_delete is None:
+                return False
+
+            # Delete the row
+            sheet_id = self._get_sheet_id(self.MAPPINGS_TAB_NAME)
+            if sheet_id is not None:
+                self.sheets.spreadsheets().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={
+                        "requests": [{
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": row_to_delete - 1,
+                                    "endIndex": row_to_delete
+                                }
+                            }
+                        }]
+                    }
+                ).execute()
+
+                # Invalidate cache
+                self._mappings_cache.clear()
+
+                print(f"[MAPPINGS] Deleted mapping for '{zoom_name}'", flush=True)
+                return True
+
+            return False
+
+        except HttpError as e:
+            print(f"[MAPPINGS] Error deleting mapping: {e}", flush=True)
+            raise
+
+    def find_mapping_for_name(self, zoom_name: str, session_code: str = None) -> Optional[Dict]:
+        """
+        Find a mapping for a given Zoom name.
+
+        Args:
+            zoom_name: The full Zoom display name
+            session_code: Optional session to filter mappings
+
+        Returns:
+            Mapping entry or None
+        """
+        mappings = self.get_name_mappings(session_code)
+
+        # Normalize for comparison
+        norm_zoom = zoom_name.strip().lower()
+
+        for mapping in mappings:
+            if mapping["zoom_name"].lower() == norm_zoom:
+                return mapping
+
+        return None
+
     def get_profiles(self, session_code: str) -> List[Dict[str, Any]]:
         """
         Get all student profiles from a session tab
@@ -612,28 +837,39 @@ class SheetsService:
                 body={"values": [headers]}
             ).execute()
 
-        # Step 4: Load roster for canonical name matching
+        # Step 4: Load name mappings and roster for canonical name matching
+        mappings = self.get_name_mappings(session_code)
         roster = self.get_roster(session_code)
         roster_matched_names = {}  # Track which roster entries we've already matched to existing profiles
 
         # Step 5: Categorize participants as new or existing
         new_profiles = []
         existing_updates = []
-        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "unmatched": 0, "profiles": []}
+        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "mapping_matched": 0, "unmatched": 0, "profiles": []}
         next_row = len(data) + 1  # Next available row
 
         for p in participants:
             zoom_first = p["first_name"].strip()
             zoom_last = p["last_name"].strip()
             email = p.get("email", "").strip()
+            zoom_full_name = f"{zoom_first} {zoom_last}".strip()
             attendance_minutes = p["total_duration"] // 60
 
             # Use canonical name from roster if we can match
             first_name = zoom_first
             last_name = zoom_last
             roster_match = None
+            mapping_match = None
 
-            if roster:
+            # First check for explicit name mappings (highest priority)
+            mapping_match = self.find_mapping_for_name(zoom_full_name, session_code)
+            if mapping_match:
+                first_name = mapping_match["first_name"]
+                last_name = mapping_match["last_name"]
+                results["mapping_matched"] += 1
+                print(f"[MAPPINGS] ✓ Used mapping: '{zoom_full_name}' -> '{first_name} {last_name}'", flush=True)
+            elif roster:
+                # Fall back to fuzzy roster matching
                 roster_match = self.match_to_roster(zoom_first, zoom_last, roster)
                 if roster_match:
                     first_name = roster_match["first_name"]
@@ -670,11 +906,12 @@ class SheetsService:
                 results["profiles"].append({
                     "row": row_number,
                     "name": f"{first_name} {last_name}",
-                    "zoom_name": f"{zoom_first} {zoom_last}" if roster_match else None,
+                    "zoom_name": zoom_full_name if (roster_match or mapping_match) else None,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": False,
-                    "roster_matched": roster_match is not None
+                    "roster_matched": roster_match is not None,
+                    "mapping_matched": mapping_match is not None
                 })
             else:
                 # New profile - use canonical name from roster
@@ -696,16 +933,17 @@ class SheetsService:
                 })
 
                 results["new_profiles"] += 1
-                if not roster_match:
+                if not roster_match and not mapping_match:
                     results["unmatched"] += 1
                 results["profiles"].append({
                     "row": row_number,
                     "name": f"{first_name} {last_name}",
-                    "zoom_name": f"{zoom_first} {zoom_last}" if roster_match else None,
+                    "zoom_name": zoom_full_name if (roster_match or mapping_match) else None,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": True,
-                    "roster_matched": roster_match is not None
+                    "roster_matched": roster_match is not None,
+                    "mapping_matched": mapping_match is not None
                 })
 
         # Step 6: Batch add all new profiles (ONE API call)
@@ -738,7 +976,7 @@ class SheetsService:
         # Invalidate cache since we modified data
         self.invalidate_cache(session_code)
 
-        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated, {results['roster_matched']} roster-matched, {results['unmatched']} unmatched", flush=True)
+        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated, {results['roster_matched']} roster-matched, {results['mapping_matched']} mapping-matched, {results['unmatched']} unmatched", flush=True)
         return results
 
     def merge_profiles(self, session_code: str, keep_row: int, merge_row: int) -> None:

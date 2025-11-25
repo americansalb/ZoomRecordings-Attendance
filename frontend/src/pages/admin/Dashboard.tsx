@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { sheetsApi, recordingsApi } from '../../services/api'
+import { sheetsApi, recordingsApi, mappingsApi } from '../../services/api'
 
 export default function AdminDashboard() {
   const { data: sheetsData, isLoading: sheetsLoading } = useQuery({
@@ -13,6 +13,11 @@ export default function AdminDashboard() {
     queryFn: () => recordingsApi.list(),
   })
 
+  const { data: mappingsData, isLoading: mappingsLoading } = useQuery({
+    queryKey: ['mappings'],
+    queryFn: () => mappingsApi.list(),
+  })
+
   return (
     <div className="space-y-8">
       <div>
@@ -21,7 +26,7 @@ export default function AdminDashboard() {
       </div>
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Link
           to="/recordings"
           className="card hover:shadow-lg transition-shadow cursor-pointer"
@@ -34,7 +39,26 @@ export default function AdminDashboard() {
             </div>
             <div className="ml-4">
               <h3 className="text-lg font-medium text-gray-900">Process Recording</h3>
-              <p className="text-sm text-gray-500">Take attendance from a Zoom recording</p>
+              <p className="text-sm text-gray-500">Take attendance from Zoom</p>
+            </div>
+          </div>
+        </Link>
+
+        <Link
+          to="/mappings"
+          className="card hover:shadow-lg transition-shadow cursor-pointer"
+        >
+          <div className="flex items-center">
+            <div className="p-3 bg-orange-100 rounded-lg">
+              <svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+              </svg>
+            </div>
+            <div className="ml-4">
+              <h3 className="text-lg font-medium text-gray-900">
+                {mappingsLoading ? '...' : mappingsData?.total || 0} Mappings
+              </h3>
+              <p className="text-sm text-gray-500">Name associations</p>
             </div>
           </div>
         </Link>

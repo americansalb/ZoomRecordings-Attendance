@@ -67,6 +67,22 @@ export interface DuplicateMatch {
   reason: string
 }
 
+export interface NameMapping {
+  row_number?: number
+  zoom_name: string
+  student_id: string
+  first_name: string
+  last_name: string
+  session_code: string
+  created_at?: string
+}
+
+export interface RosterStudent {
+  student_id: string
+  first_name: string
+  last_name: string
+}
+
 // Recordings API
 export const recordingsApi = {
   list: async (params?: { from_date?: string; to_date?: string; search?: string }) => {
@@ -198,6 +214,31 @@ export const studentsApi = {
       email: email,
     })
     return data
+  },
+}
+
+// Name Mappings API
+export const mappingsApi = {
+  list: async (sessionCode?: string) => {
+    const { data } = await api.get('/mappings', {
+      params: sessionCode ? { session_code: sessionCode } : undefined,
+    })
+    return data as { mappings: NameMapping[]; total: number }
+  },
+
+  create: async (mapping: Omit<NameMapping, 'row_number' | 'created_at'>) => {
+    const { data } = await api.post('/mappings', mapping)
+    return data as { success: boolean; mapping: NameMapping }
+  },
+
+  delete: async (zoomName: string) => {
+    const { data } = await api.delete(`/mappings/${encodeURIComponent(zoomName)}`)
+    return data as { success: boolean; deleted: string }
+  },
+
+  getRoster: async (sessionCode: string) => {
+    const { data } = await api.get(`/mappings/roster/${sessionCode}`)
+    return data as { roster: RosterStudent[]; total: number; session_code: string }
   },
 }
 

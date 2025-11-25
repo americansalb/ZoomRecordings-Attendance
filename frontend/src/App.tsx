@@ -5,6 +5,7 @@ import AdminDashboard from './pages/admin/Dashboard'
 import RecordingsPage from './pages/admin/Recordings'
 import SessionPage from './pages/admin/Session'
 import DuplicatesPage from './pages/admin/Duplicates'
+import NameMappingsPage from './pages/admin/NameMappings'
 
 // Student Pages
 import StudentSearch from './pages/student/Search'
@@ -56,6 +57,7 @@ function App() {
           <Route path="/recordings" element={<RecordingsPage />} />
           <Route path="/session/:sessionCode" element={<SessionPage />} />
           <Route path="/duplicates/:sessionCode" element={<DuplicatesPage />} />
+          <Route path="/mappings" element={<NameMappingsPage />} />
 
           {/* Student Routes */}
           <Route path="/student" element={<StudentSearch />} />
