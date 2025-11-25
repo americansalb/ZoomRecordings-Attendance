@@ -1,5 +1,5 @@
 from typing import List, Dict, Tuple
-from fuzzywuzzy import fuzz
+from thefuzz import fuzz
 from dataclasses import dataclass
 
 
