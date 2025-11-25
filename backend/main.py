@@ -44,9 +44,11 @@ async def startup_event():
     google_email = os.getenv("GOOGLE_CLIENT_EMAIL")
     google_key = os.getenv("GOOGLE_PRIVATE_KEY")
     spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
+    roster_id = os.getenv("ROSTER_SPREADSHEET_ID")
     print(f"GOOGLE_CLIENT_EMAIL: {'SET' if google_email else 'MISSING'}", flush=True)
     print(f"GOOGLE_PRIVATE_KEY: {'SET' if google_key else 'MISSING'}", flush=True)
     print(f"GOOGLE_SPREADSHEET_ID: {'SET' if spreadsheet_id else 'MISSING'}", flush=True)
+    print(f"ROSTER_SPREADSHEET_ID: {'SET' if roster_id else 'NOT SET (roster matching disabled)'}", flush=True)
 
     # Log registered routes
     print("=" * 50, flush=True)

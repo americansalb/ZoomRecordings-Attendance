@@ -1,10 +1,12 @@
 import os
 import logging
 import time
-from typing import Optional, List, Dict, Any
+import re
+from typing import Optional, List, Dict, Any, Tuple
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +25,15 @@ class SheetsService:
     def __init__(self):
         # The single spreadsheet ID that contains all session tabs (check both env var names)
         self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
+        # Master roster spreadsheet for canonical student names
+        self.roster_spreadsheet_id = os.getenv("ROSTER_SPREADSHEET_ID")
         self._sheets_service = None
         self._sheet_id_cache = {}  # Cache tab name -> sheet ID mapping
         self._data_cache = {}  # Cache session_code -> {data, timestamp}
+        self._roster_cache = {}  # Cache session_code -> roster data
         self._cache_ttl = 30  # Cache TTL in seconds
         logger.info(f"SheetsService initialized - Spreadsheet ID: {'SET' if self.spreadsheet_id else 'MISSING'}")
+        logger.info(f"Roster Spreadsheet ID: {'SET' if self.roster_spreadsheet_id else 'NOT SET'}")
 
     def _get_credentials(self):
         """Get Google API credentials from environment variables or file"""
@@ -199,8 +205,164 @@ class SheetsService:
             keys_to_remove = [k for k in self._data_cache.keys() if k.startswith(f"{session_code}:")]
             for key in keys_to_remove:
                 del self._data_cache[key]
+            # Also clear roster cache for this session
+            if session_code in self._roster_cache:
+                del self._roster_cache[session_code]
         else:
             self._data_cache.clear()
+            self._roster_cache.clear()
+
+    # ==================== ROSTER METHODS ====================
+
+    def get_roster(self, session_code: str) -> List[Dict[str, str]]:
+        """
+        Get the master roster for a session from the roster spreadsheet.
+
+        Roster spreadsheet has tabs named "Session XXX" with columns:
+        A: Student ID #, B: First Name, C: Last Name
+
+        Returns list of {"student_id", "first_name", "last_name"}
+        """
+        if not self.roster_spreadsheet_id:
+            print("[ROSTER] No roster spreadsheet configured", flush=True)
+            return []
+
+        # Check cache
+        if session_code in self._roster_cache:
+            cached = self._roster_cache[session_code]
+            if time.time() - cached["timestamp"] < self._cache_ttl * 10:  # Longer TTL for roster
+                return cached["data"]
+
+        tab_name = f"Session {session_code}"
+        try:
+            result = self.sheets.spreadsheets().values().get(
+                spreadsheetId=self.roster_spreadsheet_id,
+                range=f"'{tab_name}'!A:C"
+            ).execute()
+            rows = result.get("values", [])
+
+            # Skip header row, parse roster
+            roster = []
+            for row in rows[1:]:  # Skip header
+                if not row or len(row) < 2:
+                    continue
+                roster.append({
+                    "student_id": row[0].strip() if len(row) > 0 and row[0] else "",
+                    "first_name": row[1].strip() if len(row) > 1 and row[1] else "",
+                    "last_name": row[2].strip() if len(row) > 2 and row[2] else ""
+                })
+
+            print(f"[ROSTER] Loaded {len(roster)} students for session {session_code}", flush=True)
+
+            # Cache it
+            self._roster_cache[session_code] = {
+                "data": roster,
+                "timestamp": time.time()
+            }
+            return roster
+
+        except HttpError as e:
+            print(f"[ROSTER] Error loading roster for session {session_code}: {e}", flush=True)
+            return []
+
+    def _normalize_name(self, name: str) -> str:
+        """
+        Normalize a name for matching:
+        - Lowercase
+        - Remove parenthetical content like "(Spanish)", "(Arabic)"
+        - Remove common suffixes like 's iPhone, 's iPad
+        - Strip extra whitespace
+        """
+        if not name:
+            return ""
+
+        # Lowercase
+        name = name.lower()
+
+        # Remove parenthetical content
+        name = re.sub(r'\([^)]*\)', '', name)
+
+        # Remove device suffixes
+        name = re.sub(r"'s\s*(iphone|ipad|macbook|laptop|pc|webcam)", '', name, flags=re.IGNORECASE)
+
+        # Remove underscores (like "Dilorom_Russian")
+        name = name.replace('_', ' ')
+
+        # Remove language indicators without parentheses
+        languages = ['spanish', 'arabic', 'french', 'russian', 'chinese', 'haitian', 'creole', 'asl']
+        for lang in languages:
+            name = re.sub(rf'\b{lang}\b', '', name, flags=re.IGNORECASE)
+
+        # Clean up whitespace
+        name = ' '.join(name.split())
+
+        return name.strip()
+
+    def match_to_roster(self, first_name: str, last_name: str, roster: List[Dict],
+                        threshold: int = 80) -> Optional[Dict]:
+        """
+        Match a Zoom participant name to a roster entry using fuzzy matching.
+
+        Args:
+            first_name: First name from Zoom
+            last_name: Last name from Zoom (might be empty or abbreviated)
+            roster: List of roster entries
+            threshold: Minimum fuzzy match score (0-100)
+
+        Returns:
+            Matched roster entry or None
+        """
+        if not roster:
+            return None
+
+        # Normalize the input names
+        norm_first = self._normalize_name(first_name)
+        norm_last = self._normalize_name(last_name)
+
+        best_match = None
+        best_score = 0
+
+        for entry in roster:
+            roster_first = entry["first_name"].lower()
+            roster_last = entry["last_name"].lower()
+
+            # Score first name match (most important)
+            first_score = fuzz.ratio(norm_first, roster_first)
+
+            # If first name is a strong match, check last name
+            if first_score >= threshold:
+                # Last name matching strategies:
+                # 1. Exact match
+                # 2. Fuzzy match
+                # 3. Initial match (e.g., "R" matches "Reisman")
+                # 4. Last name is empty (just first name in Zoom)
+
+                last_score = 0
+
+                if not norm_last:
+                    # No last name provided - rely on first name only
+                    last_score = 50  # Partial credit
+                elif len(norm_last) == 1:
+                    # Single character - treat as initial
+                    if roster_last and roster_last[0] == norm_last:
+                        last_score = 90
+                else:
+                    # Full last name - fuzzy match
+                    last_score = fuzz.ratio(norm_last, roster_last)
+
+                # Combined score (weighted toward first name)
+                combined_score = (first_score * 0.6) + (last_score * 0.4)
+
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_match = entry
+
+        # Only return if we have a good enough match
+        if best_score >= threshold:
+            print(f"[ROSTER] Matched '{first_name} {last_name}' -> '{best_match['first_name']} {best_match['last_name']}' (score: {best_score:.0f})", flush=True)
+            return best_match
+
+        return None
 
     def get_profiles(self, session_code: str) -> List[Dict[str, Any]]:
         """
@@ -449,17 +611,33 @@ class SheetsService:
                 body={"values": [headers]}
             ).execute()
 
-        # Step 4: Categorize participants as new or existing
+        # Step 4: Load roster for canonical name matching
+        roster = self.get_roster(session_code)
+        roster_matched_names = {}  # Track which roster entries we've already matched to existing profiles
+
+        # Step 5: Categorize participants as new or existing
         new_profiles = []
         existing_updates = []
-        results = {"new_profiles": 0, "updated_profiles": 0, "profiles": []}
+        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "unmatched": 0, "profiles": []}
         next_row = len(data) + 1  # Next available row
 
         for p in participants:
-            first_name = p["first_name"].strip()
-            last_name = p["last_name"].strip()
+            zoom_first = p["first_name"].strip()
+            zoom_last = p["last_name"].strip()
             email = p.get("email", "").strip()
             attendance_minutes = p["total_duration"] // 60
+
+            # Use canonical name from roster if we can match
+            first_name = zoom_first
+            last_name = zoom_last
+            roster_match = None
+
+            if roster:
+                roster_match = self.match_to_roster(zoom_first, zoom_last, roster)
+                if roster_match:
+                    first_name = roster_match["first_name"]
+                    last_name = roster_match["last_name"]
+                    results["roster_matched"] += 1
 
             # Try to find existing profile
             row_number = None
@@ -468,11 +646,17 @@ class SheetsService:
             if email and email.lower() in email_index:
                 row_number = email_index[email.lower()]
 
-            # Then by name
+            # Then by canonical name (from roster or original)
             if row_number is None:
                 name_key = (first_name.lower(), last_name.lower())
                 if name_key in profile_index:
                     row_number = profile_index[name_key]
+
+            # Also try original Zoom name if different from canonical
+            if row_number is None and roster_match:
+                orig_key = (zoom_first.lower(), zoom_last.lower())
+                if orig_key in profile_index:
+                    row_number = profile_index[orig_key]
 
             if row_number:
                 # Existing profile - queue for update
@@ -485,13 +669,19 @@ class SheetsService:
                 results["profiles"].append({
                     "row": row_number,
                     "name": f"{first_name} {last_name}",
+                    "zoom_name": f"{zoom_first} {zoom_last}" if roster_match else None,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
-                    "is_new": False
+                    "is_new": False,
+                    "roster_matched": roster_match is not None
                 })
             else:
-                # New profile - queue for batch add
+                # New profile - use canonical name from roster
                 new_profiles.append([first_name, last_name, email])
+
+                # Track for duplicate detection
+                name_key = (first_name.lower(), last_name.lower())
+                profile_index[name_key] = next_row
 
                 # Track the row number for this new profile
                 row_number = next_row
@@ -505,15 +695,19 @@ class SheetsService:
                 })
 
                 results["new_profiles"] += 1
+                if not roster_match:
+                    results["unmatched"] += 1
                 results["profiles"].append({
                     "row": row_number,
                     "name": f"{first_name} {last_name}",
+                    "zoom_name": f"{zoom_first} {zoom_last}" if roster_match else None,
                     "email": email,
                     "attendance_minutes": attendance_minutes,
-                    "is_new": True
+                    "is_new": True,
+                    "roster_matched": roster_match is not None
                 })
 
-        # Step 5: Batch add all new profiles (ONE API call)
+        # Step 6: Batch add all new profiles (ONE API call)
         if new_profiles:
             print(f"[SHEETS] Adding {len(new_profiles)} new profiles in batch", flush=True)
             self.sheets.spreadsheets().values().append(
@@ -524,7 +718,7 @@ class SheetsService:
                 body={"values": new_profiles}
             ).execute()
 
-        # Step 6: Batch update all attendance values (ONE API call)
+        # Step 7: Batch update all attendance values (ONE API call)
         if existing_updates:
             print(f"[SHEETS] Updating {len(existing_updates)} attendance values in batch", flush=True)
             batch_data = []
@@ -543,7 +737,7 @@ class SheetsService:
         # Invalidate cache since we modified data
         self.invalidate_cache(session_code)
 
-        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated", flush=True)
+        print(f"[SHEETS] Batch complete: {results['new_profiles']} new, {results['updated_profiles']} updated, {results['roster_matched']} roster-matched, {results['unmatched']} unmatched", flush=True)
         return results
 
     def merge_profiles(self, session_code: str, keep_row: int, merge_row: int) -> None:
