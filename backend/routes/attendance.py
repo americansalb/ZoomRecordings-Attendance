@@ -56,14 +56,26 @@ async def process_attendance(request: ProcessAttendanceRequest):
 
         # Get meeting details to find scheduled start time and duration
         zoom_start_time = None
+        zoom_end_time = None
         zoom_duration_minutes = None
         try:
             meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
+            print(f"[ATTENDANCE] Meeting details from Zoom: {meeting_details}", flush=True)
             zoom_start_time = meeting_details.get("start_time")
+            zoom_end_time = meeting_details.get("end_time")
             zoom_duration_minutes = meeting_details.get("duration")  # Zoom returns duration in minutes
-            print(f"[ATTENDANCE] Meeting from Zoom: start={zoom_start_time}, duration={zoom_duration_minutes} min", flush=True)
+            print(f"[ATTENDANCE] Meeting from Zoom: start={zoom_start_time}, end={zoom_end_time}, duration={zoom_duration_minutes} min", flush=True)
+
+            # If duration not provided, calculate from start/end times
+            if (not zoom_duration_minutes or zoom_duration_minutes <= 0) and zoom_start_time and zoom_end_time:
+                start_dt = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(zoom_end_time.replace("Z", "+00:00"))
+                zoom_duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+                print(f"[ATTENDANCE] Calculated duration from start/end: {zoom_duration_minutes} min", flush=True)
         except Exception as e:
             print(f"[ATTENDANCE] Could not get meeting details: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
         # Determine meeting duration (use Zoom's actual duration if available, otherwise use provided value)
         if zoom_duration_minutes and zoom_duration_minutes > 0:
@@ -71,7 +83,7 @@ async def process_attendance(request: ProcessAttendanceRequest):
             print(f"[ATTENDANCE] Using Zoom's meeting duration: {meeting_duration} min", flush=True)
         else:
             meeting_duration = request.meeting_duration_minutes
-            print(f"[ATTENDANCE] Using provided meeting duration: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Using provided meeting duration: {meeting_duration} min (default)", flush=True)
 
         # Determine scheduled window
         if request.meeting_start_time:
