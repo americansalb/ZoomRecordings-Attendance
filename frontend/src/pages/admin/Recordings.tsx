@@ -10,6 +10,7 @@ export default function RecordingsPage() {
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
   )
   const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(180)
+  const [scheduledStartTime, setScheduledStartTime] = useState<string>('19:00') // Default 7 PM
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
@@ -39,12 +40,25 @@ export default function RecordingsPage() {
   const processMutation = useMutation({
     mutationFn: async () => {
       if (!selectedRecording) return
+
+      // Build ISO timestamp from date + scheduled start time, convert to UTC
+      // meetingDate is MM/DD, scheduledStartTime is HH:MM (local time)
+      let startTimeISO: string | undefined
+      if (scheduledStartTime && meetingDate) {
+        const [month, day] = meetingDate.split('/')
+        const year = new Date().getFullYear()
+        // Create local date, then convert to ISO (which gives UTC)
+        const localDate = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${scheduledStartTime}:00`)
+        startTimeISO = localDate.toISOString() // Converts to UTC with Z suffix
+      }
+
       // Use recording.id (UUID) not meeting_id for recurring meetings
       return attendanceApi.process(
         selectedRecording.id,
         selectedRecording.topic,
         meetingDate,
-        meetingDurationMinutes
+        meetingDurationMinutes,
+        startTimeISO
       )
     },
     onSuccess: (data) => {
@@ -166,6 +180,22 @@ export default function RecordingsPage() {
                 />
               </div>
 
+              {/* Scheduled Start Time Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Scheduled Start Time
+                </label>
+                <input
+                  type="time"
+                  className="input"
+                  value={scheduledStartTime}
+                  onChange={(e) => setScheduledStartTime(e.target.value)}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  When the meeting was SCHEDULED to start (e.g., 7:00 PM). Attendance only counts within this window.
+                </p>
+              </div>
+
               {/* Meeting Duration Input */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -179,7 +209,7 @@ export default function RecordingsPage() {
                   placeholder="e.g., 180 for 3 hours"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Leave blank to use Zoom's actual duration. Set to scheduled time (e.g., 180) to cap attendance to scheduled window.
+                  Meeting length in minutes. Attendance window = Start Time + Duration.
                 </p>
               </div>
 

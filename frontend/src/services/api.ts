@@ -120,12 +120,13 @@ export const attendanceApi = {
     }
   },
 
-  process: async (meetingId: string, recordingTitle: string, meetingDate: string, meetingDurationMinutes?: number) => {
+  process: async (meetingId: string, recordingTitle: string, meetingDate: string, meetingDurationMinutes?: number, meetingStartTime?: string) => {
     const { data } = await api.post('/attendance/process', {
       meeting_id: meetingId,
       recording_title: recordingTitle,
       meeting_date: meetingDate,
       meeting_duration_minutes: meetingDurationMinutes || undefined,
+      meeting_start_time: meetingStartTime || undefined,
     })
     return data
   },
