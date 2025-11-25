@@ -60,38 +60,77 @@ async def process_attendance(request: ProcessAttendanceRequest):
 
         print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
 
-        # Try to get scheduled meeting details from Zoom API (requires meeting:read:past_meeting:admin scope)
+        # Try to get meeting details from Zoom API
         zoom_start_time = None
         zoom_duration_minutes = None
-        try:
-            meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
-            zoom_start_time = meeting_details.get("start_time")
-            zoom_duration_minutes = meeting_details.get("duration")
-            print(f"[ATTENDANCE] Zoom API: start={zoom_start_time}, duration={zoom_duration_minutes} min", flush=True)
-        except Exception as e:
-            print(f"[ATTENDANCE] Could not get meeting details (add meeting:read:past_meeting:admin scope): {e}", flush=True)
+        zoom_scheduled_start = None  # The SCHEDULED start time (what we really want)
 
-        # Determine meeting duration: user-provided > Zoom API (user knows scheduled time, Zoom gives actual time)
+        # First try past_meetings endpoint (actual meeting instance data)
+        try:
+            print(f"[ATTENDANCE] Fetching past_meetings for {request.meeting_id}...", flush=True)
+            meeting_details = await zoom_service.get_past_meeting_details(request.meeting_id)
+            zoom_start_time = meeting_details.get("start_time")  # ACTUAL start
+            zoom_duration_minutes = meeting_details.get("duration")  # ACTUAL duration
+            print(f"[ATTENDANCE] past_meetings: ACTUAL start={zoom_start_time}, ACTUAL duration={zoom_duration_minutes} min", flush=True)
+
+            # Check if there's a scheduled_start_time or other fields we missed
+            for key in ['scheduled_start_time', 'schedule_time', 'occurrence_start_time', 'settings']:
+                if key in meeting_details:
+                    print(f"[ATTENDANCE] past_meetings['{key}']: {meeting_details[key]}", flush=True)
+
+            # Log ALL keys in the response
+            print(f"[ATTENDANCE] past_meetings ALL KEYS: {list(meeting_details.keys())}", flush=True)
+        except Exception as e:
+            print(f"[ATTENDANCE] past_meetings FAILED: {e}", flush=True)
+
+        # Try meetings endpoint (scheduled meeting series data)
+        zoom_scheduled_duration = None
+        try:
+            print(f"[ATTENDANCE] Fetching meetings (schedule) for {request.meeting_id}...", flush=True)
+            schedule_details = await zoom_service.get_meeting_schedule(request.meeting_id)
+            zoom_scheduled_start = schedule_details.get("start_time")  # SCHEDULED start
+            zoom_scheduled_duration = schedule_details.get("duration")  # SCHEDULED duration
+            print(f"[ATTENDANCE] meetings: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
+
+            # Check for occurrences (recurring meeting instances)
+            occurrences = schedule_details.get("occurrences", [])
+            if occurrences:
+                print(f"[ATTENDANCE] Found {len(occurrences)} occurrences:", flush=True)
+                for occ in occurrences[:5]:  # Log first 5
+                    print(f"[ATTENDANCE]   occurrence: {occ}", flush=True)
+
+            # Log ALL keys
+            print(f"[ATTENDANCE] meetings ALL KEYS: {list(schedule_details.keys())}", flush=True)
+        except Exception as e:
+            print(f"[ATTENDANCE] meetings (schedule) FAILED: {e}", flush=True)
+
+        # Determine meeting duration: user-provided > Zoom SCHEDULED > Zoom ACTUAL > default
         if request.meeting_duration_minutes and request.meeting_duration_minutes > 0:
             meeting_duration = request.meeting_duration_minutes
-            print(f"[ATTENDANCE] Using user-provided SCHEDULED duration: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Duration: Using user-provided: {meeting_duration} min", flush=True)
+        elif zoom_scheduled_duration and zoom_scheduled_duration > 0:
+            meeting_duration = zoom_scheduled_duration
+            print(f"[ATTENDANCE] Duration: Using Zoom SCHEDULED: {meeting_duration} min", flush=True)
         elif zoom_duration_minutes and zoom_duration_minutes > 0:
             meeting_duration = zoom_duration_minutes
-            print(f"[ATTENDANCE] Using Zoom ACTUAL duration: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Duration: Using Zoom ACTUAL: {meeting_duration} min (WARNING: this is actual, not scheduled!)", flush=True)
         else:
             meeting_duration = 180  # Default 3 hours for typical sessions
-            print(f"[ATTENDANCE] Using default duration: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Duration: Using default: {meeting_duration} min", flush=True)
 
-        # Determine scheduled window start time: Zoom API > user-provided (NO earliest_join fallback)
+        # Determine scheduled window start time: user-provided > Zoom SCHEDULED > Zoom ACTUAL
         if request.meeting_start_time:
             scheduled_start = datetime.fromisoformat(request.meeting_start_time.replace("Z", "+00:00"))
-            print(f"[ATTENDANCE] Using user-provided start time: {scheduled_start}", flush=True)
+            print(f"[ATTENDANCE] Start time: Using user-provided: {scheduled_start}", flush=True)
+        elif zoom_scheduled_start:
+            scheduled_start = datetime.fromisoformat(zoom_scheduled_start.replace("Z", "+00:00"))
+            print(f"[ATTENDANCE] Start time: Using Zoom SCHEDULED: {scheduled_start}", flush=True)
         elif zoom_start_time:
             scheduled_start = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
-            print(f"[ATTENDANCE] Using Zoom API start time: {scheduled_start}", flush=True)
+            print(f"[ATTENDANCE] Start time: Using Zoom ACTUAL: {scheduled_start} (WARNING: this is when host clicked start, not scheduled time!)", flush=True)
         else:
             scheduled_start = None
-            print(f"[ATTENDANCE] WARNING: No scheduled start time available", flush=True)
+            print(f"[ATTENDANCE] Start time: NONE AVAILABLE - will fall back to raw durations", flush=True)
 
         if scheduled_start:
             scheduled_end = scheduled_start + timedelta(minutes=meeting_duration)

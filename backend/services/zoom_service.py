@@ -214,11 +214,24 @@ class ZoomService:
         return await self._make_request("GET", f"/meetings/{clean_meeting_id}")
 
     async def get_past_meeting_details(self, meeting_id: str) -> dict:
-        """Get details about a past meeting instance"""
+        """Get details about a past meeting instance - includes actual start/end times"""
         clean_meeting_id = str(meeting_id)
         if "/" in clean_meeting_id or "=" in clean_meeting_id:
             clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-        return await self._make_request("GET", f"/past_meetings/{clean_meeting_id}")
+        result = await self._make_request("GET", f"/past_meetings/{clean_meeting_id}")
+        print(f"[ZOOM] past_meetings response: {result}", flush=True)
+        return result
+
+    async def get_meeting_schedule(self, meeting_id: str) -> dict:
+        """Get scheduled meeting details - for recurring meetings, this has the scheduled times"""
+        # Extract numeric meeting ID from UUID if needed (UUIDs are for instances, numeric IDs for the series)
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+
+        result = await self._make_request("GET", f"/meetings/{clean_meeting_id}")
+        print(f"[ZOOM] meetings (schedule) response: {result}", flush=True)
+        return result
 
     @staticmethod
     def extract_session_code(title: str) -> Optional[str]:
