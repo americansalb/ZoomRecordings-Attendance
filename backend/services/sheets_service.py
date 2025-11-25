@@ -1,8 +1,11 @@
 import os
+import logging
 from typing import Optional, List, Dict, Any
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+logger = logging.getLogger(__name__)
 
 
 class SheetsService:
@@ -17,10 +20,11 @@ class SheetsService:
     ]
 
     def __init__(self):
-        # The single spreadsheet ID that contains all session tabs
-        self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID")
+        # The single spreadsheet ID that contains all session tabs (check both env var names)
+        self.spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
         self._sheets_service = None
         self._sheet_id_cache = {}  # Cache tab name -> sheet ID mapping
+        logger.info(f"SheetsService initialized - Spreadsheet ID: {'SET' if self.spreadsheet_id else 'MISSING'}")
 
     def _get_credentials(self):
         """Get Google API credentials from environment variables or file"""

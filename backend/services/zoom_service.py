@@ -77,7 +77,7 @@ class ZoomService:
         token = await self._get_access_token()
 
         url = f"{self.BASE_URL}{endpoint}"
-        logger.debug(f"Zoom API request: {method} {url}")
+        logger.info(f"Zoom API request: {method} {url}")
 
         async with httpx.AsyncClient() as client:
             try:
@@ -143,7 +143,7 @@ class ZoomService:
             try:
                 recordings = await self.list_recordings(user["id"], from_date, to_date)
                 meetings = recordings.get("meetings", [])
-                logger.debug(f"User {user.get('email', user['id'])}: {len(meetings)} recordings")
+                logger.info(f"User {user.get('email', user['id'])}: {len(meetings)} recordings")
                 for meeting in meetings:
                     meeting["host_email"] = user.get("email", "")
                     meeting["host_name"] = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
