@@ -83,24 +83,29 @@ async def process_attendance(request: ProcessAttendanceRequest):
         except Exception as e:
             print(f"[ATTENDANCE] past_meetings FAILED: {e}", flush=True)
 
-        # Try meetings endpoint (scheduled meeting series data)
+        # Try meetings endpoint using the NUMERIC meeting ID (not UUID) to get scheduled time
         zoom_scheduled_duration = None
         try:
-            print(f"[ATTENDANCE] Fetching meetings (schedule) for {request.meeting_id}...", flush=True)
-            schedule_details = await zoom_service.get_meeting_schedule(request.meeting_id)
-            zoom_scheduled_start = schedule_details.get("start_time")  # SCHEDULED start
-            zoom_scheduled_duration = schedule_details.get("duration")  # SCHEDULED duration
-            print(f"[ATTENDANCE] meetings: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
+            # The past_meetings response has numeric 'id' which is the meeting series ID
+            numeric_meeting_id = meeting_details.get("id") if meeting_details else None
+            if numeric_meeting_id:
+                print(f"[ATTENDANCE] Fetching meetings (schedule) using numeric ID {numeric_meeting_id}...", flush=True)
+                schedule_details = await zoom_service.get_meeting_schedule(str(numeric_meeting_id))
+                zoom_scheduled_start = schedule_details.get("start_time")  # SCHEDULED start
+                zoom_scheduled_duration = schedule_details.get("duration")  # SCHEDULED duration
+                print(f"[ATTENDANCE] meetings: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
 
-            # Check for occurrences (recurring meeting instances)
-            occurrences = schedule_details.get("occurrences", [])
-            if occurrences:
-                print(f"[ATTENDANCE] Found {len(occurrences)} occurrences:", flush=True)
-                for occ in occurrences[:5]:  # Log first 5
-                    print(f"[ATTENDANCE]   occurrence: {occ}", flush=True)
+                # Check for occurrences (recurring meeting instances)
+                occurrences = schedule_details.get("occurrences", [])
+                if occurrences:
+                    print(f"[ATTENDANCE] Found {len(occurrences)} occurrences:", flush=True)
+                    for occ in occurrences[:5]:  # Log first 5
+                        print(f"[ATTENDANCE]   occurrence: {occ}", flush=True)
 
-            # Log ALL keys
-            print(f"[ATTENDANCE] meetings ALL KEYS: {list(schedule_details.keys())}", flush=True)
+                # Log ALL keys
+                print(f"[ATTENDANCE] meetings ALL KEYS: {list(schedule_details.keys())}", flush=True)
+            else:
+                print(f"[ATTENDANCE] No numeric meeting ID found in past_meetings response", flush=True)
         except Exception as e:
             print(f"[ATTENDANCE] meetings (schedule) FAILED: {e}", flush=True)
 
