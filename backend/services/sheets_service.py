@@ -15,15 +15,35 @@ class SheetsService:
     ]
 
     def __init__(self):
-        self.credentials_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
         self.shared_drive_id = os.getenv("GOOGLE_SHARED_DRIVE_ID")
         self._sheets_service = None
         self._drive_service = None
 
     def _get_credentials(self):
-        """Get Google API credentials from service account file"""
+        """Get Google API credentials from environment variables or file"""
+        # Try environment variables first (for Render/production)
+        client_email = os.getenv("GOOGLE_CLIENT_EMAIL")
+        private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+
+        if client_email and private_key:
+            # Handle escaped newlines in private key
+            private_key = private_key.replace("\\n", "\n")
+
+            credentials_info = {
+                "type": "service_account",
+                "client_email": client_email,
+                "private_key": private_key,
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+            return service_account.Credentials.from_service_account_info(
+                credentials_info,
+                scopes=self.SCOPES
+            )
+
+        # Fallback to credentials file (for local development)
+        credentials_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
         return service_account.Credentials.from_service_account_file(
-            self.credentials_file,
+            credentials_file,
             scopes=self.SCOPES
         )
 
