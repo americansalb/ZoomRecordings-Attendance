@@ -85,22 +85,36 @@ async def process_attendance(request: ProcessAttendanceRequest):
 
         # Try meetings endpoint using the NUMERIC meeting ID (not UUID) to get scheduled time
         zoom_scheduled_duration = None
+        zoom_scheduled_time_pattern = None  # Just the time part (HH:MM) from occurrences
         try:
             # The past_meetings response has numeric 'id' which is the meeting series ID
             numeric_meeting_id = meeting_details.get("id") if meeting_details else None
             if numeric_meeting_id:
                 print(f"[ATTENDANCE] Fetching meetings (schedule) using numeric ID {numeric_meeting_id}...", flush=True)
                 schedule_details = await zoom_service.get_meeting_schedule(str(numeric_meeting_id))
-                zoom_scheduled_start = schedule_details.get("start_time")  # SCHEDULED start
-                zoom_scheduled_duration = schedule_details.get("duration")  # SCHEDULED duration
-                print(f"[ATTENDANCE] meetings: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
 
-                # Check for occurrences (recurring meeting instances)
+                # For recurring meetings, start_time/duration are in occurrences, not top level
                 occurrences = schedule_details.get("occurrences", [])
                 if occurrences:
                     print(f"[ATTENDANCE] Found {len(occurrences)} occurrences:", flush=True)
-                    for occ in occurrences[:5]:  # Log first 5
+                    for occ in occurrences[:3]:  # Log first 3
                         print(f"[ATTENDANCE]   occurrence: {occ}", flush=True)
+
+                    # Extract the scheduled time pattern from the first occurrence
+                    # All occurrences have the same time, just different dates
+                    first_occ = occurrences[0]
+                    zoom_scheduled_duration = first_occ.get("duration")  # e.g., 180
+                    occ_start = first_occ.get("start_time")  # e.g., "2025-11-27T01:00:00Z"
+                    if occ_start:
+                        # Parse the time pattern (hour:minute in UTC)
+                        occ_dt = datetime.fromisoformat(occ_start.replace("Z", "+00:00"))
+                        zoom_scheduled_time_pattern = (occ_dt.hour, occ_dt.minute)
+                        print(f"[ATTENDANCE] Extracted scheduled time pattern: {zoom_scheduled_time_pattern[0]:02d}:{zoom_scheduled_time_pattern[1]:02d} UTC, duration={zoom_scheduled_duration} min", flush=True)
+                else:
+                    # Non-recurring meeting - use top level start_time
+                    zoom_scheduled_start = schedule_details.get("start_time")
+                    zoom_scheduled_duration = schedule_details.get("duration")
+                    print(f"[ATTENDANCE] meetings: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
 
                 # Log ALL keys
                 print(f"[ATTENDANCE] meetings ALL KEYS: {list(schedule_details.keys())}", flush=True)
@@ -109,13 +123,13 @@ async def process_attendance(request: ProcessAttendanceRequest):
         except Exception as e:
             print(f"[ATTENDANCE] meetings (schedule) FAILED: {e}", flush=True)
 
-        # Determine meeting duration: user-provided > Zoom SCHEDULED > Zoom ACTUAL > default
+        # Determine meeting duration: user-provided > Zoom SCHEDULED (from occurrences) > Zoom ACTUAL > default
         if request.meeting_duration_minutes and request.meeting_duration_minutes > 0:
             meeting_duration = request.meeting_duration_minutes
             print(f"[ATTENDANCE] Duration: Using user-provided: {meeting_duration} min", flush=True)
         elif zoom_scheduled_duration and zoom_scheduled_duration > 0:
             meeting_duration = zoom_scheduled_duration
-            print(f"[ATTENDANCE] Duration: Using Zoom SCHEDULED: {meeting_duration} min", flush=True)
+            print(f"[ATTENDANCE] Duration: Using Zoom SCHEDULED (from occurrences): {meeting_duration} min", flush=True)
         elif zoom_duration_minutes and zoom_duration_minutes > 0:
             meeting_duration = zoom_duration_minutes
             print(f"[ATTENDANCE] Duration: Using Zoom ACTUAL: {meeting_duration} min (WARNING: this is actual, not scheduled!)", flush=True)
@@ -123,10 +137,21 @@ async def process_attendance(request: ProcessAttendanceRequest):
             meeting_duration = 180  # Default 3 hours for typical sessions
             print(f"[ATTENDANCE] Duration: Using default: {meeting_duration} min", flush=True)
 
-        # Determine scheduled window start time: user-provided > Zoom SCHEDULED > Zoom ACTUAL
+        # Determine scheduled window start time
+        # Priority: user-provided > Zoom pattern (apply to actual date) > Zoom ACTUAL
         if request.meeting_start_time:
             scheduled_start = datetime.fromisoformat(request.meeting_start_time.replace("Z", "+00:00"))
             print(f"[ATTENDANCE] Start time: Using user-provided: {scheduled_start}", flush=True)
+        elif zoom_scheduled_time_pattern and zoom_start_time:
+            # Apply the scheduled time pattern to the actual meeting date
+            actual_start = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
+            scheduled_start = actual_start.replace(
+                hour=zoom_scheduled_time_pattern[0],
+                minute=zoom_scheduled_time_pattern[1],
+                second=0,
+                microsecond=0
+            )
+            print(f"[ATTENDANCE] Start time: Using Zoom SCHEDULED pattern ({zoom_scheduled_time_pattern[0]:02d}:{zoom_scheduled_time_pattern[1]:02d} UTC) on actual date: {scheduled_start}", flush=True)
         elif zoom_scheduled_start:
             scheduled_start = datetime.fromisoformat(zoom_scheduled_start.replace("Z", "+00:00"))
             print(f"[ATTENDANCE] Start time: Using Zoom SCHEDULED: {scheduled_start}", flush=True)
