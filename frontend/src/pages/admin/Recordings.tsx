@@ -27,7 +27,8 @@ export default function RecordingsPage() {
 
   const previewMutation = useMutation({
     mutationFn: async (recording: Recording) => {
-      return attendanceApi.preview(String(recording.meeting_id), recording.topic)
+      // Use recording.id (UUID) not meeting_id for recurring meetings
+      return attendanceApi.preview(recording.id, recording.topic)
     },
     onSuccess: (data) => {
       setPreviewData(data)
@@ -37,8 +38,9 @@ export default function RecordingsPage() {
   const processMutation = useMutation({
     mutationFn: async () => {
       if (!selectedRecording) return
+      // Use recording.id (UUID) not meeting_id for recurring meetings
       return attendanceApi.process(
-        String(selectedRecording.meeting_id),
+        selectedRecording.id,
         selectedRecording.topic,
         meetingDate
       )

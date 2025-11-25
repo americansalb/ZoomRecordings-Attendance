@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import base64
 import re
+from urllib.parse import quote
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -171,8 +172,13 @@ class ZoomService:
         Note: This endpoint requires the meeting to have ended and
         reports are available ~15 minutes after the meeting ends
         """
-        # Clean the meeting ID (remove any URL encoding)
-        clean_meeting_id = str(meeting_id).replace("/", "").replace("\\", "")
+        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
+        # e.g., "abc/def==" -> "abc%2Fdef%3D%3D" -> "abc%252Fdef%253D%253D"
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            # Double URL encode for Zoom API
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+            print(f"[ZOOM] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
 
         all_participants = []
         next_page_token = None
@@ -202,12 +208,16 @@ class ZoomService:
 
     async def get_meeting_details(self, meeting_id: str) -> dict:
         """Get details about a specific meeting"""
-        clean_meeting_id = str(meeting_id).replace("/", "").replace("\\", "")
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
         return await self._make_request("GET", f"/meetings/{clean_meeting_id}")
 
     async def get_past_meeting_details(self, meeting_id: str) -> dict:
         """Get details about a past meeting instance"""
-        clean_meeting_id = str(meeting_id).replace("/", "").replace("\\", "")
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
         return await self._make_request("GET", f"/past_meetings/{clean_meeting_id}")
 
     @staticmethod
