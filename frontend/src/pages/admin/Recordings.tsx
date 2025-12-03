@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { accountsApi, recordingsApi, attendanceApi, Recording, Participant, ZoomAccount } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, Recording, Participant, ZoomUser } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
 
-  const [selectedAccount, setSelectedAccount] = useState<string | null>(null)
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null)
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
@@ -23,24 +23,24 @@ export default function RecordingsPage() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
 
-  // Fetch accounts
-  const { data: accountsData } = useQuery({
-    queryKey: ['accounts'],
-    queryFn: () => accountsApi.list(),
+  // Fetch users from Zoom account
+  const { data: usersData } = useQuery({
+    queryKey: ['zoom-users'],
+    queryFn: () => accountsApi.listUsers(),
   })
 
-  // Set default account when accounts are loaded
-  if (!selectedAccount && accountsData && accountsData.accounts.length > 0) {
-    setSelectedAccount(accountsData.accounts[0].id)
+  // Set default user (first user) when users are loaded
+  if (!selectedUserId && usersData && usersData.users.length > 0) {
+    setSelectedUserId(usersData.users[0].id)
   }
 
   const { data: recordingsData, isLoading } = useQuery({
-    queryKey: ['recordings', searchTerm, selectedAccount],
+    queryKey: ['recordings', searchTerm, selectedUserId],
     queryFn: () => recordingsApi.list({
       search: searchTerm || undefined,
-      account_id: selectedAccount || undefined
+      user_id: selectedUserId || undefined
     }),
-    enabled: !!selectedAccount, // Only fetch when account is selected
+    enabled: !!selectedUserId, // Only fetch when user is selected
   })
 
   const previewMutation = useMutation({
@@ -111,32 +111,50 @@ export default function RecordingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Zoom Recordings</h1>
-        <p className="mt-1 text-gray-600">Select a recording to process attendance</p>
+        <p className="mt-1 text-gray-600">Select a user and recording to process attendance</p>
       </div>
 
-      {/* Account Tabs */}
-      {accountsData && accountsData.accounts.length > 1 && (
+      {/* User Tabs */}
+      {usersData && usersData.users.length > 0 && (
         <div className="border-b border-gray-200">
-          <nav className="-mb-px flex space-x-8" aria-label="Tabs">
-            {accountsData.accounts.map((account) => (
+          <nav className="-mb-px flex space-x-4 overflow-x-auto" aria-label="Tabs">
+            <button
+              onClick={() => {
+                setSelectedUserId(null)
+                setSelectedRecording(null)
+                setPreviewData(null)
+                setProcessResult(null)
+              }}
+              className={`
+                whitespace-nowrap py-4 px-3 border-b-2 font-medium text-sm
+                ${
+                  selectedUserId === null
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }
+              `}
+            >
+              All Users
+            </button>
+            {usersData.users.map((user) => (
               <button
-                key={account.id}
+                key={user.id}
                 onClick={() => {
-                  setSelectedAccount(account.id)
+                  setSelectedUserId(user.id)
                   setSelectedRecording(null)
                   setPreviewData(null)
                   setProcessResult(null)
                 }}
                 className={`
-                  whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+                  whitespace-nowrap py-4 px-3 border-b-2 font-medium text-sm
                   ${
-                    selectedAccount === account.id
+                    selectedUserId === user.id
                       ? 'border-blue-500 text-blue-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                   }
                 `}
               >
-                {account.name}
+                {user.display_name}
               </button>
             ))}
           </nav>

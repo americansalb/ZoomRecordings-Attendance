@@ -13,6 +13,16 @@ export interface ZoomAccount {
   name: string
 }
 
+export interface ZoomUser {
+  id: string
+  email: string
+  first_name: string
+  last_name: string
+  display_name: string
+  type: number
+  status: string
+}
+
 export interface Recording {
   id: string
   meeting_id: string
@@ -103,11 +113,18 @@ export const accountsApi = {
     const { data } = await api.get('/accounts')
     return data as { accounts: ZoomAccount[]; total: number }
   },
+
+  listUsers: async (account_id?: string) => {
+    const { data } = await api.get('/accounts/users', {
+      params: account_id ? { account_id } : undefined
+    })
+    return data as { users: ZoomUser[]; total: number }
+  },
 }
 
 // Recordings API
 export const recordingsApi = {
-  list: async (params?: { from_date?: string; to_date?: string; search?: string; account_id?: string }) => {
+  list: async (params?: { from_date?: string; to_date?: string; search?: string; account_id?: string; user_id?: string }) => {
     const { data } = await api.get('/recordings', { params })
     return data as { recordings: Recording[]; total: number }
   },

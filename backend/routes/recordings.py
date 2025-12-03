@@ -15,12 +15,14 @@ async def list_recordings(
     from_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     to_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     search: Optional[str] = Query(None, description="Search term for recording title"),
-    account_id: Optional[str] = Query(None, description="Zoom account ID to filter by")
+    account_id: Optional[str] = Query(None, description="Zoom account ID to filter by"),
+    user_id: Optional[str] = Query(None, description="Zoom user ID to filter by (shows only that user's recordings)")
 ):
     """
     List all Zoom cloud recordings
 
     Returns recordings with session code extracted from title
+    Can filter by user_id to show recordings from a specific user
     """
     try:
         # Default to last 30 days if no dates provided
@@ -29,9 +31,22 @@ async def list_recordings(
         if not to_date:
             to_date = datetime.now().strftime("%Y-%m-%d")
 
-        print(f"[RECORDINGS] Fetching from {from_date} to {to_date} (account: {account_id or 'default'})", flush=True)
-        logger.info(f"GET /api/recordings - Fetching recordings from {from_date} to {to_date} (account: {account_id or 'default'})")
-        recordings = await zoom_service.list_all_recordings(from_date, to_date, account_id)
+        print(f"[RECORDINGS] Fetching from {from_date} to {to_date} (user: {user_id or 'all'}, account: {account_id or 'default'})", flush=True)
+        logger.info(f"GET /api/recordings - Fetching recordings from {from_date} to {to_date} (user: {user_id or 'all'}, account: {account_id or 'default'})")
+
+        # If user_id is specified, fetch recordings only for that user
+        if user_id:
+            recordings_data = await zoom_service.list_recordings(user_id, from_date, to_date, account_id)
+            recordings = recordings_data.get("meetings", [])
+            # Need to add host info since single-user endpoint doesn't include it
+            users = await zoom_service.list_users(account_id)
+            user_info = next((u for u in users if u["id"] == user_id), None)
+            if user_info:
+                for recording in recordings:
+                    recording["host_email"] = user_info.get("email", "")
+                    recording["host_name"] = user_info.get("display_name", "")
+        else:
+            recordings = await zoom_service.list_all_recordings(from_date, to_date, account_id)
         print(f"[RECORDINGS] Found {len(recordings)} recordings", flush=True)
         logger.info(f"GET /api/recordings - Found {len(recordings)} recordings")
 

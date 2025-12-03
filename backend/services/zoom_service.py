@@ -92,6 +92,45 @@ class ZoomService:
             for account in self.accounts.values()
         ]
 
+    async def list_users(self, account_id: Optional[str] = None) -> list:
+        """
+        Get list of all users in the Zoom account
+
+        Args:
+            account_id: Zoom account ID to use (optional, defaults to first account)
+
+        Returns:
+            List of users with id, email, first_name, last_name, type
+        """
+        account = self._get_account(account_id)
+        print(f"[ZOOM] Fetching users for {account.name}...", flush=True)
+        logger.info(f"Fetching users for {account.name}")
+
+        try:
+            users_response = await self._make_request("GET", "/users", account, params={"page_size": 300})
+            users = users_response.get("users", [])
+            print(f"[ZOOM] Found {len(users)} users in {account.name}", flush=True)
+            logger.info(f"Found {len(users)} users in {account.name}")
+
+            # Format user data
+            formatted_users = []
+            for user in users:
+                formatted_users.append({
+                    "id": user.get("id"),
+                    "email": user.get("email", ""),
+                    "first_name": user.get("first_name", ""),
+                    "last_name": user.get("last_name", ""),
+                    "display_name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("email", ""),
+                    "type": user.get("type", 1),  # 1=Basic, 2=Licensed, 3=On-prem
+                    "status": user.get("status", ""),
+                })
+
+            return formatted_users
+        except Exception as e:
+            print(f"[ZOOM] Failed to fetch users for {account.name}: {str(e)}", flush=True)
+            logger.error(f"Failed to fetch users list for {account.name}: {str(e)}")
+            raise
+
     def _get_account(self, account_id: Optional[str] = None) -> ZoomAccount:
         """Get account by ID, or return first account if not specified"""
         if account_id:
