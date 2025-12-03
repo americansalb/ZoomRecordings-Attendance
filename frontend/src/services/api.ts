@@ -8,6 +8,11 @@ const api = axios.create({
 })
 
 // Types
+export interface ZoomAccount {
+  id: string
+  name: string
+}
+
 export interface Recording {
   id: string
   meeting_id: string
@@ -92,9 +97,17 @@ export interface SummaryStudent {
   attendance: Record<string, number>
 }
 
+// Accounts API
+export const accountsApi = {
+  list: async () => {
+    const { data } = await api.get('/accounts')
+    return data as { accounts: ZoomAccount[]; total: number }
+  },
+}
+
 // Recordings API
 export const recordingsApi = {
-  list: async (params?: { from_date?: string; to_date?: string; search?: string }) => {
+  list: async (params?: { from_date?: string; to_date?: string; search?: string; account_id?: string }) => {
     const { data } = await api.get('/recordings', { params })
     return data as { recordings: Recording[]; total: number }
   },

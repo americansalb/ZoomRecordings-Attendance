@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, Recording, Participant, ZoomAccount } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
 
+  const [selectedAccount, setSelectedAccount] = useState<string | null>(null)
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null)
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
@@ -22,9 +23,24 @@ export default function RecordingsPage() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
 
+  // Fetch accounts
+  const { data: accountsData } = useQuery({
+    queryKey: ['accounts'],
+    queryFn: () => accountsApi.list(),
+  })
+
+  // Set default account when accounts are loaded
+  if (!selectedAccount && accountsData && accountsData.accounts.length > 0) {
+    setSelectedAccount(accountsData.accounts[0].id)
+  }
+
   const { data: recordingsData, isLoading } = useQuery({
-    queryKey: ['recordings', searchTerm],
-    queryFn: () => recordingsApi.list({ search: searchTerm || undefined }),
+    queryKey: ['recordings', searchTerm, selectedAccount],
+    queryFn: () => recordingsApi.list({
+      search: searchTerm || undefined,
+      account_id: selectedAccount || undefined
+    }),
+    enabled: !!selectedAccount, // Only fetch when account is selected
   })
 
   const previewMutation = useMutation({
@@ -97,6 +113,35 @@ export default function RecordingsPage() {
         <h1 className="text-2xl font-bold text-gray-900">Zoom Recordings</h1>
         <p className="mt-1 text-gray-600">Select a recording to process attendance</p>
       </div>
+
+      {/* Account Tabs */}
+      {accountsData && accountsData.accounts.length > 1 && (
+        <div className="border-b border-gray-200">
+          <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+            {accountsData.accounts.map((account) => (
+              <button
+                key={account.id}
+                onClick={() => {
+                  setSelectedAccount(account.id)
+                  setSelectedRecording(null)
+                  setPreviewData(null)
+                  setProcessResult(null)
+                }}
+                className={`
+                  whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+                  ${
+                    selectedAccount === account.id
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }
+                `}
+              >
+                {account.name}
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recordings List */}

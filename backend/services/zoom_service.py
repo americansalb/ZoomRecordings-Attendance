@@ -2,7 +2,7 @@ import httpx
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 import base64
 import re
 from urllib.parse import quote
@@ -11,39 +11,110 @@ from urllib.parse import quote
 logger = logging.getLogger(__name__)
 
 
+class ZoomAccount:
+    """Represents a single Zoom account configuration"""
+
+    def __init__(self, account_id: str, name: str, zoom_account_id: str, client_id: str, client_secret: str):
+        self.account_id = account_id
+        self.name = name
+        self.zoom_account_id = zoom_account_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._access_token: Optional[str] = None
+        self._token_expiry: Optional[datetime] = None
+
+
 class ZoomService:
-    """Service for interacting with Zoom API"""
+    """Service for interacting with Zoom API with multi-account support"""
 
     BASE_URL = "https://api.zoom.us/v2"
     TOKEN_URL = "https://zoom.us/oauth/token"
 
     def __init__(self):
-        self.account_id = os.getenv("ZOOM_ACCOUNT_ID")
-        self.client_id = os.getenv("ZOOM_CLIENT_ID")
-        self.client_secret = os.getenv("ZOOM_CLIENT_SECRET")
-        self._access_token: Optional[str] = None
-        self._token_expiry: Optional[datetime] = None
+        self.accounts: Dict[str, ZoomAccount] = {}
+        self._load_accounts_from_env()
 
         # Log configuration status on init
-        logger.info(f"ZoomService initialized - Account ID: {'SET' if self.account_id else 'MISSING'}, "
-                   f"Client ID: {'SET' if self.client_id else 'MISSING'}, "
-                   f"Client Secret: {'SET' if self.client_secret else 'MISSING'}")
+        logger.info(f"ZoomService initialized with {len(self.accounts)} account(s)")
+        for account_id, account in self.accounts.items():
+            logger.info(f"  - {account_id}: {account.name}")
 
-    async def _get_access_token(self) -> str:
+    def _load_accounts_from_env(self):
+        """Load all Zoom accounts from environment variables"""
+        # Check for legacy single account (backwards compatibility)
+        legacy_account_id = os.getenv("ZOOM_ACCOUNT_ID")
+        legacy_client_id = os.getenv("ZOOM_CLIENT_ID")
+        legacy_client_secret = os.getenv("ZOOM_CLIENT_SECRET")
+
+        if legacy_account_id and legacy_client_id and legacy_client_secret:
+            logger.info("Found legacy single account configuration")
+            self.accounts["default"] = ZoomAccount(
+                account_id="default",
+                name="Default Account",
+                zoom_account_id=legacy_account_id,
+                client_id=legacy_client_id,
+                client_secret=legacy_client_secret
+            )
+
+        # Load numbered accounts (ZOOM_ACCOUNT_1_ID, ZOOM_ACCOUNT_2_ID, etc.)
+        account_number = 1
+        while True:
+            zoom_account_id = os.getenv(f"ZOOM_ACCOUNT_{account_number}_ID")
+            client_id = os.getenv(f"ZOOM_ACCOUNT_{account_number}_CLIENT_ID")
+            client_secret = os.getenv(f"ZOOM_ACCOUNT_{account_number}_CLIENT_SECRET")
+            name = os.getenv(f"ZOOM_ACCOUNT_{account_number}_NAME", f"Account {account_number}")
+
+            if not zoom_account_id or not client_id or not client_secret:
+                break
+
+            account_id = f"account-{account_number}"
+            self.accounts[account_id] = ZoomAccount(
+                account_id=account_id,
+                name=name,
+                zoom_account_id=zoom_account_id,
+                client_id=client_id,
+                client_secret=client_secret
+            )
+
+            logger.info(f"Loaded account {account_number}: {name}")
+            account_number += 1
+
+        if not self.accounts:
+            logger.warning("No Zoom accounts configured!")
+
+    def get_accounts(self) -> List[Dict[str, str]]:
+        """Get list of all configured accounts"""
+        return [
+            {
+                "id": account.account_id,
+                "name": account.name
+            }
+            for account in self.accounts.values()
+        ]
+
+    def _get_account(self, account_id: Optional[str] = None) -> ZoomAccount:
+        """Get account by ID, or return first account if not specified"""
+        if account_id:
+            if account_id not in self.accounts:
+                raise ValueError(f"Account '{account_id}' not found")
+            return self.accounts[account_id]
+
+        # Return first account if none specified
+        if not self.accounts:
+            raise ValueError("No Zoom accounts configured")
+
+        return list(self.accounts.values())[0]
+
+    async def _get_access_token(self, account: ZoomAccount) -> str:
         """Get or refresh the OAuth access token using Server-to-Server OAuth"""
-        if self._access_token and self._token_expiry and datetime.now() < self._token_expiry:
-            return self._access_token
+        if account._access_token and account._token_expiry and datetime.now() < account._token_expiry:
+            return account._access_token
 
-        print("[ZOOM] Requesting new access token...", flush=True)
-        logger.info("Requesting new Zoom access token...")
-
-        if not self.client_id or not self.client_secret or not self.account_id:
-            print(f"[ZOOM] ERROR: Missing credentials! account_id={bool(self.account_id)}, client_id={bool(self.client_id)}, client_secret={bool(self.client_secret)}", flush=True)
-            logger.error("Missing Zoom credentials - cannot authenticate")
-            raise ValueError("Missing Zoom credentials: ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, or ZOOM_CLIENT_SECRET not set")
+        print(f"[ZOOM] Requesting new access token for {account.name}...", flush=True)
+        logger.info(f"Requesting new Zoom access token for {account.name}...")
 
         # Create Basic Auth header
-        credentials = f"{self.client_id}:{self.client_secret}"
+        credentials = f"{account.client_id}:{account.client_secret}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
 
         async with httpx.AsyncClient() as client:
@@ -56,34 +127,34 @@ class ZoomService:
                     },
                     data={
                         "grant_type": "account_credentials",
-                        "account_id": self.account_id
+                        "account_id": account.zoom_account_id
                     }
                 )
                 response.raise_for_status()
                 data = response.json()
 
-                self._access_token = data["access_token"]
+                account._access_token = data["access_token"]
                 # Token expires in 1 hour, refresh 5 minutes early
-                self._token_expiry = datetime.now() + timedelta(seconds=data.get("expires_in", 3600) - 300)
+                account._token_expiry = datetime.now() + timedelta(seconds=data.get("expires_in", 3600) - 300)
 
-                print("[ZOOM] Successfully obtained access token", flush=True)
-                logger.info("Successfully obtained Zoom access token")
-                return self._access_token
+                print(f"[ZOOM] Successfully obtained access token for {account.name}", flush=True)
+                logger.info(f"Successfully obtained Zoom access token for {account.name}")
+                return account._access_token
             except httpx.HTTPStatusError as e:
-                print(f"[ZOOM] Token request FAILED: {e.response.status_code} - {e.response.text}", flush=True)
-                logger.error(f"Zoom token request failed: {e.response.status_code} - {e.response.text}")
+                print(f"[ZOOM] Token request FAILED for {account.name}: {e.response.status_code} - {e.response.text}", flush=True)
+                logger.error(f"Zoom token request failed for {account.name}: {e.response.status_code} - {e.response.text}")
                 raise
             except Exception as e:
-                print(f"[ZOOM] Token request ERROR: {str(e)}", flush=True)
-                logger.error(f"Zoom token request error: {str(e)}")
+                print(f"[ZOOM] Token request ERROR for {account.name}: {str(e)}", flush=True)
+                logger.error(f"Zoom token request error for {account.name}: {str(e)}")
                 raise
 
-    async def _make_request(self, method: str, endpoint: str, **kwargs) -> dict:
+    async def _make_request(self, method: str, endpoint: str, account: ZoomAccount, **kwargs) -> dict:
         """Make an authenticated request to Zoom API"""
-        token = await self._get_access_token()
+        token = await self._get_access_token(account)
 
         url = f"{self.BASE_URL}{endpoint}"
-        logger.info(f"Zoom API request: {method} {url}")
+        logger.info(f"Zoom API request ({account.name}): {method} {url}")
 
         async with httpx.AsyncClient() as client:
             try:
@@ -99,13 +170,13 @@ class ZoomService:
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"Zoom API error: {method} {endpoint} -> {e.response.status_code}: {e.response.text}")
+                logger.error(f"Zoom API error ({account.name}): {method} {endpoint} -> {e.response.status_code}: {e.response.text}")
                 raise
             except Exception as e:
-                logger.error(f"Zoom API request failed: {method} {endpoint} -> {str(e)}")
+                logger.error(f"Zoom API request failed ({account.name}): {method} {endpoint} -> {str(e)}")
                 raise
 
-    async def list_recordings(self, user_id: str = "me", from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    async def list_recordings(self, user_id: str = "me", from_date: Optional[str] = None, to_date: Optional[str] = None, account_id: Optional[str] = None) -> dict:
         """
         List cloud recordings for a user
 
@@ -113,7 +184,9 @@ class ZoomService:
             user_id: User ID or 'me' for the authenticated user
             from_date: Start date (YYYY-MM-DD)
             to_date: End date (YYYY-MM-DD)
+            account_id: Zoom account ID to use (optional, defaults to first account)
         """
+        account = self._get_account(account_id)
         params = {"page_size": 100}
 
         if from_date:
@@ -127,51 +200,63 @@ class ZoomService:
         else:
             params["to"] = datetime.now().strftime("%Y-%m-%d")
 
-        return await self._make_request("GET", f"/users/{user_id}/recordings", params=params)
+        return await self._make_request("GET", f"/users/{user_id}/recordings", account, params=params)
 
-    async def list_all_recordings(self, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
+    async def list_all_recordings(self, from_date: Optional[str] = None, to_date: Optional[str] = None, account_id: Optional[str] = None) -> list:
         """
         List all cloud recordings across all users in the account
+
+        Args:
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            account_id: Zoom account ID to use (optional, defaults to first account)
         """
-        print(f"[ZOOM] list_all_recordings called: {from_date} to {to_date}", flush=True)
-        logger.info(f"Fetching all recordings from {from_date} to {to_date}")
+        account = self._get_account(account_id)
+        print(f"[ZOOM] list_all_recordings called for {account.name}: {from_date} to {to_date}", flush=True)
+        logger.info(f"Fetching all recordings for {account.name} from {from_date} to {to_date}")
 
         # First get list of users
         try:
-            print("[ZOOM] Fetching users list...", flush=True)
-            users_response = await self._make_request("GET", "/users", params={"page_size": 300})
+            print(f"[ZOOM] Fetching users list for {account.name}...", flush=True)
+            users_response = await self._make_request("GET", "/users", account, params={"page_size": 300})
             users = users_response.get("users", [])
-            print(f"[ZOOM] Found {len(users)} users", flush=True)
-            logger.info(f"Found {len(users)} users in Zoom account")
+            print(f"[ZOOM] Found {len(users)} users in {account.name}", flush=True)
+            logger.info(f"Found {len(users)} users in {account.name}")
         except Exception as e:
-            print(f"[ZOOM] Failed to fetch users: {str(e)}", flush=True)
-            logger.error(f"Failed to fetch users list: {str(e)}")
+            print(f"[ZOOM] Failed to fetch users for {account.name}: {str(e)}", flush=True)
+            logger.error(f"Failed to fetch users list for {account.name}: {str(e)}")
             raise
 
         all_recordings = []
         for user in users:
             try:
-                recordings = await self.list_recordings(user["id"], from_date, to_date)
+                recordings = await self.list_recordings(user["id"], from_date, to_date, account_id)
                 meetings = recordings.get("meetings", [])
-                logger.info(f"User {user.get('email', user['id'])}: {len(meetings)} recordings")
+                logger.info(f"User {user.get('email', user['id'])} ({account.name}): {len(meetings)} recordings")
                 for meeting in meetings:
                     meeting["host_email"] = user.get("email", "")
                     meeting["host_name"] = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
                 all_recordings.extend(meetings)
             except Exception as e:
-                logger.warning(f"Error fetching recordings for user {user.get('email', user['id'])}: {e}")
+                logger.warning(f"Error fetching recordings for user {user.get('email', user['id'])} in {account.name}: {e}")
                 continue
 
-        logger.info(f"Total recordings found: {len(all_recordings)}")
+        logger.info(f"Total recordings found for {account.name}: {len(all_recordings)}")
         return all_recordings
 
-    async def get_meeting_participants(self, meeting_id: str) -> dict:
+    async def get_meeting_participants(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """
         Get participant report for a past meeting
+
+        Args:
+            meeting_id: Meeting UUID or ID
+            account_id: Zoom account ID to use (optional, defaults to first account)
 
         Note: This endpoint requires the meeting to have ended and
         reports are available ~15 minutes after the meeting ends
         """
+        account = self._get_account(account_id)
+
         # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
         # e.g., "abc/def==" -> "abc%2Fdef%3D%3D" -> "abc%252Fdef%253D%253D"
         clean_meeting_id = str(meeting_id)
@@ -191,6 +276,7 @@ class ZoomService:
             response = await self._make_request(
                 "GET",
                 f"/report/meetings/{clean_meeting_id}/participants",
+                account,
                 params=params
             )
 
@@ -206,30 +292,33 @@ class ZoomService:
             "total_records": len(all_participants)
         }
 
-    async def get_meeting_details(self, meeting_id: str) -> dict:
+    async def get_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get details about a specific meeting"""
+        account = self._get_account(account_id)
         clean_meeting_id = str(meeting_id)
         if "/" in clean_meeting_id or "=" in clean_meeting_id:
             clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-        return await self._make_request("GET", f"/meetings/{clean_meeting_id}")
+        return await self._make_request("GET", f"/meetings/{clean_meeting_id}", account)
 
-    async def get_past_meeting_details(self, meeting_id: str) -> dict:
+    async def get_past_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get details about a past meeting instance - includes actual start/end times"""
+        account = self._get_account(account_id)
         clean_meeting_id = str(meeting_id)
         if "/" in clean_meeting_id or "=" in clean_meeting_id:
             clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-        result = await self._make_request("GET", f"/past_meetings/{clean_meeting_id}")
+        result = await self._make_request("GET", f"/past_meetings/{clean_meeting_id}", account)
         print(f"[ZOOM] past_meetings response: {result}", flush=True)
         return result
 
-    async def get_meeting_schedule(self, meeting_id: str) -> dict:
+    async def get_meeting_schedule(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get scheduled meeting details - for recurring meetings, this has the scheduled times"""
+        account = self._get_account(account_id)
         # Extract numeric meeting ID from UUID if needed (UUIDs are for instances, numeric IDs for the series)
         clean_meeting_id = str(meeting_id)
         if "/" in clean_meeting_id or "=" in clean_meeting_id:
             clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
 
-        result = await self._make_request("GET", f"/meetings/{clean_meeting_id}")
+        result = await self._make_request("GET", f"/meetings/{clean_meeting_id}", account)
         print(f"[ZOOM] meetings (schedule) response: {result}", flush=True)
         return result
 
