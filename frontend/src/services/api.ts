@@ -149,6 +149,9 @@ export const attendanceApi = {
       participants: Participant[]
       new_count: number
       existing_count: number
+      detected_start_time: string | null
+      detected_duration: number | null
+      detection_source: string | null
     }
   },
 

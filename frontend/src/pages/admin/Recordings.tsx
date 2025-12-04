@@ -19,6 +19,9 @@ export default function RecordingsPage() {
     participants: Participant[]
     new_count: number
     existing_count: number
+    detected_start_time: string | null
+    detected_duration: number | null
+    detection_source: string | null
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
@@ -48,6 +51,19 @@ export default function RecordingsPage() {
     },
     onSuccess: (data) => {
       setPreviewData(data)
+
+      // Pre-fill detected duration
+      if (data.detected_duration) {
+        setMeetingDurationMinutes(data.detected_duration)
+      }
+
+      // Pre-fill detected start time (convert from ISO to local HH:MM)
+      if (data.detected_start_time) {
+        const detectedDate = new Date(data.detected_start_time)
+        const hours = String(detectedDate.getHours()).padStart(2, '0')
+        const minutes = String(detectedDate.getMinutes()).padStart(2, '0')
+        setScheduledStartTime(`${hours}:${minutes}`)
+      }
     },
   })
 
@@ -259,39 +275,87 @@ export default function RecordingsPage() {
                 />
               </div>
 
-              {/* Scheduled Start Time Input (Optional - auto-detected from Zoom) */}
+              {/* Scheduled Start Time Input (Auto-filled, editable) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Start Time <span className="text-gray-400 font-normal">(optional)</span>
+                  Scheduled Start Time
+                  {previewData?.detected_start_time && (
+                    <span className="text-green-600 font-normal text-xs ml-1">✓ Auto-filled</span>
+                  )}
                 </label>
                 <input
                   type="time"
                   className="input"
                   value={scheduledStartTime}
                   onChange={(e) => setScheduledStartTime(e.target.value)}
-                  placeholder="Auto-detected"
+                  placeholder="HH:MM"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Leave empty to use Zoom's scheduled time. Only override if auto-detection fails.
+                  Your local time. Edit to override auto-detected value.
                 </p>
               </div>
 
-              {/* Meeting Duration Input (Optional - auto-detected from Zoom) */}
+              {/* Meeting Duration Input (Auto-filled, editable) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Duration <span className="text-gray-400 font-normal">(optional)</span>
+                  Scheduled Duration (minutes)
+                  {previewData?.detected_duration && (
+                    <span className="text-green-600 font-normal text-xs ml-1">✓ Auto-filled</span>
+                  )}
                 </label>
                 <input
                   type="number"
                   className="input"
                   value={meetingDurationMinutes ?? ''}
                   onChange={(e) => setMeetingDurationMinutes(e.target.value ? parseInt(e.target.value) : undefined)}
-                  placeholder="Auto-detected from Zoom"
+                  placeholder="e.g., 180"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Leave empty to use Zoom's scheduled duration. Only override if needed.
+                  Edit to override auto-detected duration.
                 </p>
               </div>
+
+              {/* Detected Time Info */}
+              {previewData && (previewData.detected_start_time || previewData.detected_duration) && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-blue-900">Auto-Detected Schedule</h3>
+                    {previewData.detection_source && (
+                      <span className="text-xs text-blue-600">({previewData.detection_source})</span>
+                    )}
+                  </div>
+                  {previewData.detected_start_time && (
+                    <p className="text-sm text-blue-800 mb-1">
+                      <strong>Start Time:</strong>{' '}
+                      {new Date(previewData.detected_start_time).toLocaleString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true,
+                        timeZoneName: 'short'
+                      })}
+                      {' '}
+                      <span className="text-xs text-blue-600">
+                        ({Intl.DateTimeFormat().resolvedOptions().timeZone})
+                      </span>
+                    </p>
+                  )}
+                  {previewData.detected_duration && (
+                    <p className="text-sm text-blue-800">
+                      <strong>Duration:</strong> {previewData.detected_duration} minutes
+                      {' '}
+                      <span className="text-xs text-blue-600">
+                        (with ±5 min grace period)
+                      </span>
+                    </p>
+                  )}
+                  <p className="text-xs text-blue-700 mt-2">
+                    💡 Values above have been pre-filled. You can edit them if needed.
+                  </p>
+                </div>
+              )}
 
               {/* Session Info */}
               {previewData && (

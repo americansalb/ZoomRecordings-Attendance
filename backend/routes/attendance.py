@@ -325,6 +325,75 @@ async def preview_attendance(meeting_id: str, recording_title: str):
         participant_data = await zoom_service.get_meeting_participants(meeting_id)
         participants = participant_data.get("participants", [])
 
+        # Detect scheduled time and duration (same logic as process_attendance)
+        zoom_start_time = None
+        zoom_duration_minutes = None
+        zoom_scheduled_start = None
+        zoom_scheduled_duration = None
+        zoom_scheduled_time_pattern = None
+        detected_start_time = None
+        detected_duration = None
+        detection_source = None
+
+        # Try to get meeting details from Zoom API
+        try:
+            meeting_details = await zoom_service.get_past_meeting_details(meeting_id)
+            zoom_start_time = meeting_details.get("start_time")  # ACTUAL start
+            zoom_duration_minutes = meeting_details.get("duration")  # ACTUAL duration
+
+            # Try to get scheduled time from meetings endpoint
+            numeric_meeting_id = meeting_details.get("id")
+            if numeric_meeting_id:
+                try:
+                    schedule_details = await zoom_service.get_meeting_schedule(str(numeric_meeting_id))
+                    occurrences = schedule_details.get("occurrences", [])
+
+                    if occurrences:
+                        # Recurring meeting - extract scheduled pattern
+                        first_occ = occurrences[0]
+                        zoom_scheduled_duration = first_occ.get("duration")
+                        occ_start = first_occ.get("start_time")
+                        if occ_start:
+                            occ_dt = datetime.fromisoformat(occ_start.replace("Z", "+00:00"))
+                            zoom_scheduled_time_pattern = (occ_dt.hour, occ_dt.minute)
+                    else:
+                        # Non-recurring meeting
+                        zoom_scheduled_start = schedule_details.get("start_time")
+                        zoom_scheduled_duration = schedule_details.get("duration")
+                except:
+                    pass
+        except:
+            pass
+
+        # Determine best detected duration
+        if zoom_scheduled_duration and zoom_scheduled_duration > 0:
+            detected_duration = zoom_scheduled_duration
+            detection_source = "Zoom scheduled duration"
+        elif zoom_duration_minutes and zoom_duration_minutes > 0:
+            detected_duration = zoom_duration_minutes
+            detection_source = "Zoom actual duration"
+        else:
+            detected_duration = 180  # Default
+            detection_source = "Default (180 min)"
+
+        # Determine best detected start time
+        if zoom_scheduled_time_pattern and zoom_start_time:
+            # Apply scheduled time pattern to actual date
+            actual_start = datetime.fromisoformat(zoom_start_time.replace("Z", "+00:00"))
+            detected_start_time = actual_start.replace(
+                hour=zoom_scheduled_time_pattern[0],
+                minute=zoom_scheduled_time_pattern[1],
+                second=0,
+                microsecond=0
+            ).isoformat()
+            detection_source = "Zoom scheduled pattern"
+        elif zoom_scheduled_start:
+            detected_start_time = zoom_scheduled_start
+            detection_source = "Zoom scheduled time"
+        elif zoom_start_time:
+            detected_start_time = zoom_start_time
+            detection_source = "Zoom actual start time"
+
         existing_tab = None
         if session_code:
             existing_tab = sheets_service.find_session_tab(session_code)
@@ -383,7 +452,10 @@ async def preview_attendance(meeting_id: str, recording_title: str):
             "existing_tab": existing_tab,
             "participants": preview,
             "new_count": sum(1 for p in preview if p["is_new"]),
-            "existing_count": sum(1 for p in preview if not p["is_new"])
+            "existing_count": sum(1 for p in preview if not p["is_new"]),
+            "detected_start_time": detected_start_time,
+            "detected_duration": detected_duration,
+            "detection_source": detection_source
         }
 
     except Exception as e:
