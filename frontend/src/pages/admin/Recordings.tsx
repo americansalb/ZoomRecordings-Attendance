@@ -29,10 +29,8 @@ export default function RecordingsPage() {
     queryFn: () => accountsApi.listUsers(),
   })
 
-  // Set default user (first user) when users are loaded
-  if (!selectedUserId && usersData && usersData.users.length > 0) {
-    setSelectedUserId(usersData.users[0].id)
-  }
+  // Default to "All Users" (null) when page loads
+  // User can select specific users via tabs
 
   const { data: recordingsData, isLoading } = useQuery({
     queryKey: ['recordings', searchTerm, selectedUserId],
@@ -40,7 +38,7 @@ export default function RecordingsPage() {
       search: searchTerm || undefined,
       user_id: selectedUserId || undefined
     }),
-    enabled: !!selectedUserId, // Only fetch when user is selected
+    // Always fetch - when selectedUserId is null, it fetches all users' recordings
   })
 
   const previewMutation = useMutation({
@@ -169,9 +167,9 @@ export default function RecordingsPage() {
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
                     selectedUserId === user.id ? 'bg-blue-500' : 'bg-gray-300 text-gray-700'
                   }`}>
-                    {user.first_name?.[0]}{user.last_name?.[0]}
+                    {user.email?.[0]?.toUpperCase()}
                   </div>
-                  {user.display_name}
+                  {user.email}
                 </span>
               </button>
             ))}

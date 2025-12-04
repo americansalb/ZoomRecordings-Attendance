@@ -138,7 +138,9 @@ export const recordingsApi = {
 // Attendance API
 export const attendanceApi = {
   preview: async (meetingId: string, recordingTitle: string) => {
-    const { data } = await api.get(`/attendance/preview/${meetingId}`, {
+    // Double URL encode meeting ID to handle UUIDs with / and == characters
+    const encodedMeetingId = encodeURIComponent(encodeURIComponent(meetingId))
+    const { data } = await api.get(`/attendance/preview/${encodedMeetingId}`, {
       params: { recording_title: recordingTitle },
     })
     return data as {
