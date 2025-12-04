@@ -334,36 +334,48 @@ async def preview_attendance(meeting_id: str, recording_title: str):
         detected_start_time = None
         detected_duration = None
         detection_source = None
+        detection_warnings = []
 
         # Try to get meeting details from Zoom API
         try:
+            print(f"[PREVIEW] Fetching past_meetings for {meeting_id}...", flush=True)
             meeting_details = await zoom_service.get_past_meeting_details(meeting_id)
             zoom_start_time = meeting_details.get("start_time")  # ACTUAL start
             zoom_duration_minutes = meeting_details.get("duration")  # ACTUAL duration
+            print(f"[PREVIEW] past_meetings: ACTUAL start={zoom_start_time}, ACTUAL duration={zoom_duration_minutes} min", flush=True)
 
             # Try to get scheduled time from meetings endpoint
             numeric_meeting_id = meeting_details.get("id")
             if numeric_meeting_id:
                 try:
+                    print(f"[PREVIEW] Fetching meetings (schedule) using numeric ID {numeric_meeting_id}...", flush=True)
                     schedule_details = await zoom_service.get_meeting_schedule(str(numeric_meeting_id))
                     occurrences = schedule_details.get("occurrences", [])
 
                     if occurrences:
                         # Recurring meeting - extract scheduled pattern
+                        print(f"[PREVIEW] Found {len(occurrences)} occurrences for recurring meeting", flush=True)
                         first_occ = occurrences[0]
                         zoom_scheduled_duration = first_occ.get("duration")
                         occ_start = first_occ.get("start_time")
                         if occ_start:
                             occ_dt = datetime.fromisoformat(occ_start.replace("Z", "+00:00"))
                             zoom_scheduled_time_pattern = (occ_dt.hour, occ_dt.minute)
+                            print(f"[PREVIEW] Extracted scheduled time pattern: {zoom_scheduled_time_pattern[0]:02d}:{zoom_scheduled_time_pattern[1]:02d} UTC, duration={zoom_scheduled_duration} min", flush=True)
                     else:
                         # Non-recurring meeting
                         zoom_scheduled_start = schedule_details.get("start_time")
                         zoom_scheduled_duration = schedule_details.get("duration")
-                except:
-                    pass
-        except:
-            pass
+                        print(f"[PREVIEW] Non-recurring meeting: SCHEDULED start={zoom_scheduled_start}, SCHEDULED duration={zoom_scheduled_duration} min", flush=True)
+                except Exception as e:
+                    print(f"[PREVIEW] meetings (schedule) FAILED: {e}", flush=True)
+                    detection_warnings.append(f"Could not fetch meeting schedule: {str(e)}")
+            else:
+                print(f"[PREVIEW] No numeric meeting ID found in past_meetings response", flush=True)
+                detection_warnings.append("No numeric meeting ID found - cannot fetch scheduled time")
+        except Exception as e:
+            print(f"[PREVIEW] past_meetings FAILED: {e}", flush=True)
+            detection_warnings.append(f"Could not fetch meeting details: {str(e)}")
 
         # Determine best detected duration
         if zoom_scheduled_duration and zoom_scheduled_duration > 0:
@@ -455,7 +467,8 @@ async def preview_attendance(meeting_id: str, recording_title: str):
             "existing_count": sum(1 for p in preview if not p["is_new"]),
             "detected_start_time": detected_start_time,
             "detected_duration": detected_duration,
-            "detection_source": detection_source
+            "detection_source": detection_source,
+            "detection_warnings": detection_warnings
         }
 
     except Exception as e:

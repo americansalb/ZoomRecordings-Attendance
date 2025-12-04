@@ -152,6 +152,7 @@ export const attendanceApi = {
       detected_start_time: string | null
       detected_duration: number | null
       detection_source: string | null
+      detection_warnings: string[]
     }
   },
 

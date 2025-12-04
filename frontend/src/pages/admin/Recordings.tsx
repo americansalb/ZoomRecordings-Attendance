@@ -22,6 +22,7 @@ export default function RecordingsPage() {
     detected_start_time: string | null
     detected_duration: number | null
     detection_source: string | null
+    detection_warnings: string[]
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
@@ -314,6 +315,26 @@ export default function RecordingsPage() {
                   Edit to override auto-detected duration.
                 </p>
               </div>
+
+              {/* Detection Warnings */}
+              {previewData && previewData.detection_warnings && previewData.detection_warnings.length > 0 && (
+                <div className="p-3 bg-yellow-50 border border-yellow-300 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-4 h-4 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-yellow-900">Detection Issues</h3>
+                  </div>
+                  <ul className="text-sm text-yellow-800 list-disc list-inside space-y-1">
+                    {previewData.detection_warnings.map((warning, idx) => (
+                      <li key={idx}>{warning}</li>
+                    ))}
+                  </ul>
+                  <p className="text-xs text-yellow-700 mt-2">
+                    ⚠️ Please manually enter the scheduled time and duration below.
+                  </p>
+                </div>
+              )}
 
               {/* Detected Time Info */}
               {previewData && (previewData.detected_start_time || previewData.detected_duration) && (
