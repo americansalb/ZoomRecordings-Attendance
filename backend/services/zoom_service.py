@@ -310,6 +310,7 @@ class ZoomService:
         while True:
             params = {
                 "page_size": 300,
+                "type": "unique",  # Get unique users with aggregated data instead of individual sessions
                 "include_fields": "registrant_id"  # Request all available fields
             }
             if next_page_token:
