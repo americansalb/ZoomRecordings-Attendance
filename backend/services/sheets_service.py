@@ -1001,7 +1001,8 @@ class SheetsService:
                 existing_updates.append({
                     "row": row_number,
                     "col": attendance_col,
-                    "value": attendance_minutes
+                    "value": attendance_minutes,
+                    "participant_name": zoom_full_name  # Track for debugging
                 })
                 # Also update Roster Match column if we have new match info
                 if roster_match_str:
@@ -1021,6 +1022,7 @@ class SheetsService:
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
+                print(f"[SHEETS] ✓ Matched '{zoom_full_name}' ({attendance_minutes} min) to existing row {row_number}", flush=True)
             else:
                 # New profile - use ORIGINAL Zoom name (not roster name)
                 new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
@@ -1047,7 +1049,8 @@ class SheetsService:
                 existing_updates.append({
                     "row": row_number,
                     "col": attendance_col,
-                    "value": attendance_minutes
+                    "value": attendance_minutes,
+                    "participant_name": zoom_full_name  # Track for debugging
                 })
 
                 results["new_profiles"] += 1
@@ -1064,6 +1067,7 @@ class SheetsService:
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
+                print(f"[SHEETS] + Adding new profile '{zoom_full_name}' ({attendance_minutes} min) at row {row_number}", flush=True)
 
         # Step 6: Batch add all new profiles (ONE API call) - now with 4 columns including Roster Match
         if new_profiles:
@@ -1079,13 +1083,39 @@ class SheetsService:
         # Step 7: Batch update all attendance values and roster matches (ONE API call)
         batch_data = []
 
-        # Add attendance updates
+        # CRITICAL BUG FIX: Detect duplicate row assignments and consolidate them
+        # Multiple participants might match to the same row (e.g., "Jose Rafael ramirez" and "Jose Rafael Ramirez SPANISH")
+        # If we write both values, the last one overwrites the first, causing incorrect attendance
+        row_attendance = {}  # row -> total_attendance
+        row_participants = {}  # row -> list of participant names (for debugging)
+
         for update in existing_updates:
-            col_letter = self._col_index_to_letter(update["col"])
+            row = update["row"]
+            value = update["value"]
+            participant_name = update.get("participant_name", "Unknown")
+
+            if row in row_attendance:
+                # DUPLICATE ROW DETECTED - this is the bug!
+                print(f"[SHEETS] ⚠️ DUPLICATE ROW DETECTED: Row {row} has multiple participants!", flush=True)
+                print(f"[SHEETS]   Existing participants: {row_participants[row]}", flush=True)
+                print(f"[SHEETS]   New participant: '{participant_name}' with {value} minutes", flush=True)
+                print(f"[SHEETS]   Previous total: {row_attendance[row]} minutes", flush=True)
+                # Sum the values (these are likely the same person joining multiple times with different names)
+                row_attendance[row] += value
+                row_participants[row].append(participant_name)
+                print(f"[SHEETS]   Consolidated value: {row_attendance[row]} minutes", flush=True)
+            else:
+                row_attendance[row] = value
+                row_participants[row] = [participant_name]
+
+        # Add consolidated attendance updates
+        for row, total_value in row_attendance.items():
+            col_letter = self._col_index_to_letter(attendance_col)
             batch_data.append({
-                "range": f"'{tab_name}'!{col_letter}{update['row']}",
-                "values": [[update["value"]]]
+                "range": f"'{tab_name}'!{col_letter}{row}",
+                "values": [[total_value]]
             })
+            print(f"[SHEETS] Writing row {row}: {total_value} minutes (participants: {', '.join(row_participants[row])})", flush=True)
 
         # Add roster match updates (column D = index 3)
         for update in roster_match_updates:
@@ -1095,7 +1125,7 @@ class SheetsService:
             })
 
         if batch_data:
-            print(f"[SHEETS] Updating {len(existing_updates)} attendance values and {len(roster_match_updates)} roster matches in batch", flush=True)
+            print(f"[SHEETS] Updating {len(row_attendance)} unique rows (consolidated from {len(existing_updates)} participant updates) and {len(roster_match_updates)} roster matches in batch", flush=True)
             self.sheets.spreadsheets().values().batchUpdate(
                 spreadsheetId=self.spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": batch_data}
