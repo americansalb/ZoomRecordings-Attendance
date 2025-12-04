@@ -339,6 +339,56 @@ class ZoomService:
             "total_records": len(all_participants)
         }
 
+    async def get_meeting_participants_dashboard(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
+        """
+        Get participant data from Dashboard API (requires qss:read:meeting_participant_data:admin scope)
+
+        This endpoint may provide more complete/aggregated participant data than the Reports API.
+        Uses: /v2/metrics/meetings/{meetingId}/participants
+        """
+        account = self._get_account(account_id)
+
+        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+            print(f"[ZOOM DASHBOARD] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
+
+        all_participants = []
+        next_page_token = None
+
+        while True:
+            params = {
+                "page_size": 300,
+                "type": "past"  # Get past meeting participants
+            }
+            if next_page_token:
+                params["next_page_token"] = next_page_token
+
+            print(f"[ZOOM DASHBOARD] Fetching from /metrics/meetings/{clean_meeting_id}/participants", flush=True)
+            response = await self._make_request(
+                "GET",
+                f"/metrics/meetings/{clean_meeting_id}/participants",
+                account,
+                params=params
+            )
+
+            participants = response.get("participants", [])
+            all_participants.extend(participants)
+
+            print(f"[ZOOM DASHBOARD] Fetched {len(participants)} participants in this page, total so far: {len(all_participants)}", flush=True)
+            print(f"[ZOOM DASHBOARD] Response keys: {response.keys()}", flush=True)
+
+            next_page_token = response.get("next_page_token")
+            if not next_page_token:
+                break
+
+        print(f"[ZOOM DASHBOARD] Final total participants: {len(all_participants)} records", flush=True)
+        return {
+            "participants": all_participants,
+            "total_records": len(all_participants)
+        }
+
     async def get_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get details about a specific meeting"""
         account = self._get_account(account_id)

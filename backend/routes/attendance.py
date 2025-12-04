@@ -55,11 +55,29 @@ async def process_attendance(request: ProcessAttendanceRequest):
         # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
-        # Get participants from Zoom
-        participant_data = await zoom_service.get_meeting_participants(request.meeting_id)
-        participants = participant_data.get("participants", [])
+        # Get participants from Zoom - try BOTH Reports API and Dashboard API
+        print(f"[ATTENDANCE] === FETCHING PARTICIPANTS FROM REPORTS API ===", flush=True)
+        participant_data_reports = await zoom_service.get_meeting_participants(request.meeting_id)
+        participants_reports = participant_data_reports.get("participants", [])
+        print(f"[ATTENDANCE] Reports API returned {len(participants_reports)} participant records", flush=True)
 
-        print(f"[ATTENDANCE] Found {len(participants)} participant records from Zoom", flush=True)
+        # Try Dashboard API (requires qss:read:meeting_participant_data:admin scope)
+        participants_dashboard = []
+        try:
+            print(f"[ATTENDANCE] === FETCHING PARTICIPANTS FROM DASHBOARD API ===", flush=True)
+            participant_data_dashboard = await zoom_service.get_meeting_participants_dashboard(request.meeting_id)
+            participants_dashboard = participant_data_dashboard.get("participants", [])
+            print(f"[ATTENDANCE] Dashboard API returned {len(participants_dashboard)} participant records", flush=True)
+        except Exception as e:
+            print(f"[ATTENDANCE] Dashboard API failed (might not have scope): {e}", flush=True)
+
+        # Use Dashboard API data if available and has more records, otherwise use Reports API
+        if participants_dashboard and len(participants_dashboard) >= len(participants_reports):
+            participants = participants_dashboard
+            print(f"[ATTENDANCE] Using Dashboard API data ({len(participants)} records)", flush=True)
+        else:
+            participants = participants_reports
+            print(f"[ATTENDANCE] Using Reports API data ({len(participants)} records)", flush=True)
 
         # Try to get meeting details from Zoom API
         zoom_start_time = None
