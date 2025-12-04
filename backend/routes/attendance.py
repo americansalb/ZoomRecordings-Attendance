@@ -121,6 +121,14 @@ async def process_attendance(request: ProcessAttendanceRequest):
         print(f"[ATTENDANCE] Using {api_name} data ({record_count} records) - had most complete data", flush=True)
         print(f"[ATTENDANCE] Comparison: Reports={len(participants_reports)}, Dashboard={len(participants_dashboard)}, PastMeetings={len(participants_past_meetings)}", flush=True)
 
+        # DEBUG: Dump ALL participant names and join times to find name variants
+        print(f"\n[ATTENDANCE DEBUG] === DUMPING ALL {len(participants)} PARTICIPANT RECORDS ===", flush=True)
+        for i, p in enumerate(participants, 1):
+            name = p.get("name", "UNKNOWN")
+            join_time = format_time_eastern(p.get("join_time"))
+            print(f"[ATTENDANCE DEBUG] {i:3d}. '{name}' joined at {join_time}", flush=True)
+        print(f"[ATTENDANCE DEBUG] === END OF ALL PARTICIPANT RECORDS ===\n", flush=True)
+
         # DEBUG: Compare participants across APIs to see if one has data the other doesn't
         test_names = ["Karla", "Tania", "Naidelin"]
         for test_name in test_names:
