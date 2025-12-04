@@ -325,13 +325,26 @@ class ZoomService:
             participants = response.get("participants", [])
             all_participants.extend(participants)
 
-            # Debug: Log pagination info
-            print(f"[ZOOM] Fetched {len(participants)} participants in this page, total so far: {len(all_participants)}", flush=True)
-            print(f"[ZOOM] Response keys: {response.keys()}", flush=True)
-
+            # Debug: Log pagination info with actual values
+            page_count = response.get("page_count", "N/A")
+            page_size = response.get("page_size", "N/A")
+            total_records = response.get("total_records", "N/A")
             next_page_token = response.get("next_page_token")
+
+            print(f"[ZOOM REPORTS API] === PAGINATION DEBUG ===", flush=True)
+            print(f"[ZOOM REPORTS API] Fetched {len(participants)} participants in this page", flush=True)
+            print(f"[ZOOM REPORTS API] Total so far: {len(all_participants)}", flush=True)
+            print(f"[ZOOM REPORTS API] page_count: {page_count}", flush=True)
+            print(f"[ZOOM REPORTS API] page_size: {page_size}", flush=True)
+            print(f"[ZOOM REPORTS API] total_records: {total_records}", flush=True)
+            print(f"[ZOOM REPORTS API] next_page_token: {'<present>' if next_page_token else 'None'}", flush=True)
+            print(f"[ZOOM REPORTS API] Response keys: {list(response.keys())}", flush=True)
+
             if not next_page_token:
+                print(f"[ZOOM REPORTS API] No next_page_token - stopping pagination", flush=True)
                 break
+            else:
+                print(f"[ZOOM REPORTS API] Continuing to next page with token: {next_page_token[:20]}...", flush=True)
 
         print(f"[ZOOM] Final total participants: {len(all_participants)} records", flush=True)
         return {
@@ -376,12 +389,26 @@ class ZoomService:
             participants = response.get("participants", [])
             all_participants.extend(participants)
 
-            print(f"[ZOOM DASHBOARD] Fetched {len(participants)} participants in this page, total so far: {len(all_participants)}", flush=True)
-            print(f"[ZOOM DASHBOARD] Response keys: {response.keys()}", flush=True)
-
+            # Debug: Log pagination info with actual values
+            page_count = response.get("page_count", "N/A")
+            page_size = response.get("page_size", "N/A")
+            total_records = response.get("total_records", "N/A")
             next_page_token = response.get("next_page_token")
+
+            print(f"[ZOOM DASHBOARD] === PAGINATION DEBUG ===", flush=True)
+            print(f"[ZOOM DASHBOARD] Fetched {len(participants)} participants in this page", flush=True)
+            print(f"[ZOOM DASHBOARD] Total so far: {len(all_participants)}", flush=True)
+            print(f"[ZOOM DASHBOARD] page_count: {page_count}", flush=True)
+            print(f"[ZOOM DASHBOARD] page_size: {page_size}", flush=True)
+            print(f"[ZOOM DASHBOARD] total_records: {total_records}", flush=True)
+            print(f"[ZOOM DASHBOARD] next_page_token: {'<present>' if next_page_token else 'None'}", flush=True)
+            print(f"[ZOOM DASHBOARD] Response keys: {list(response.keys())}", flush=True)
+
             if not next_page_token:
+                print(f"[ZOOM DASHBOARD] No next_page_token - stopping pagination", flush=True)
                 break
+            else:
+                print(f"[ZOOM DASHBOARD] Continuing to next page with token: {next_page_token[:20]}...", flush=True)
 
         print(f"[ZOOM DASHBOARD] Final total participants: {len(all_participants)} records", flush=True)
 
