@@ -121,6 +121,29 @@ async def process_attendance(request: ProcessAttendanceRequest):
         print(f"[ATTENDANCE] Using {api_name} data ({record_count} records) - had most complete data", flush=True)
         print(f"[ATTENDANCE] Comparison: Reports={len(participants_reports)}, Dashboard={len(participants_dashboard)}, PastMeetings={len(participants_past_meetings)}", flush=True)
 
+        # DEBUG: Compare participants across APIs to see if one has data the other doesn't
+        test_names = ["Karla", "Tania", "Naidelin"]
+        for test_name in test_names:
+            print(f"\n[ATTENDANCE DEBUG] === Comparing sessions for '{test_name}' across all APIs ===", flush=True)
+
+            # Check Reports API
+            reports_sessions = [p for p in participants_reports if test_name.lower() in p.get("name", "").lower()]
+            print(f"[ATTENDANCE DEBUG] Reports API: {len(reports_sessions)} sessions for {test_name}", flush=True)
+            for i, session in enumerate(reports_sessions, 1):
+                print(f"[ATTENDANCE DEBUG]   Session {i}: {format_time_eastern(session.get('join_time'))} - {format_time_eastern(session.get('leave_time'))} (duration: {session.get('duration', 0)}s)", flush=True)
+
+            # Check Dashboard API
+            dashboard_sessions = [p for p in participants_dashboard if test_name.lower() in p.get("name", "").lower()]
+            print(f"[ATTENDANCE DEBUG] Dashboard API: {len(dashboard_sessions)} sessions for {test_name}", flush=True)
+            for i, session in enumerate(dashboard_sessions, 1):
+                print(f"[ATTENDANCE DEBUG]   Session {i}: {format_time_eastern(session.get('join_time'))} - {format_time_eastern(session.get('leave_time'))} (duration: {session.get('duration', 0)}s)", flush=True)
+
+            # Check if Dashboard has sessions that Reports doesn't (or vice versa)
+            if len(dashboard_sessions) != len(reports_sessions):
+                print(f"[ATTENDANCE DEBUG] ⚠️  MISMATCH: Dashboard has {len(dashboard_sessions)} sessions, Reports has {len(reports_sessions)} sessions for {test_name}", flush=True)
+
+        print(f"\n[ATTENDANCE DEBUG] === End API comparison ===\n", flush=True)
+
         # Try to get meeting details from Zoom API
         zoom_start_time = None
         zoom_duration_minutes = None
