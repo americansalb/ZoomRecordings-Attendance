@@ -308,7 +308,10 @@ class ZoomService:
         next_page_token = None
 
         while True:
-            params = {"page_size": 300}
+            params = {
+                "page_size": 300,
+                "include_fields": "registrant_id"  # Request all available fields
+            }
             if next_page_token:
                 params["next_page_token"] = next_page_token
 
@@ -322,10 +325,15 @@ class ZoomService:
             participants = response.get("participants", [])
             all_participants.extend(participants)
 
+            # Debug: Log pagination info
+            print(f"[ZOOM] Fetched {len(participants)} participants in this page, total so far: {len(all_participants)}", flush=True)
+            print(f"[ZOOM] Response keys: {response.keys()}", flush=True)
+
             next_page_token = response.get("next_page_token")
             if not next_page_token:
                 break
 
+        print(f"[ZOOM] Final total participants: {len(all_participants)} records", flush=True)
         return {
             "participants": all_participants,
             "total_records": len(all_participants)
