@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { accountsApi, recordingsApi, attendanceApi, Recording, Participant, ZoomUser } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
