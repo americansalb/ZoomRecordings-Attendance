@@ -82,13 +82,13 @@ async def process_attendance(request: ProcessAttendanceRequest):
         # Get or create session tab (1 API call)
         sheets_service.get_or_create_session_tab(session_code)
 
-        # Get participants from Zoom - try BOTH Reports API and Dashboard API
+        # Get participants from Zoom - try ALL THREE APIs to find which has most complete data
         print(f"[ATTENDANCE] === FETCHING PARTICIPANTS FROM REPORTS API ===", flush=True)
         participant_data_reports = await zoom_service.get_meeting_participants(request.meeting_id)
         participants_reports = participant_data_reports.get("participants", [])
         print(f"[ATTENDANCE] Reports API returned {len(participants_reports)} participant records", flush=True)
 
-        # Try Dashboard API (requires qss:read:meeting_participant_data:admin scope)
+        # Try Dashboard API
         participants_dashboard = []
         try:
             print(f"[ATTENDANCE] === FETCHING PARTICIPANTS FROM DASHBOARD API ===", flush=True)
@@ -98,13 +98,28 @@ async def process_attendance(request: ProcessAttendanceRequest):
         except Exception as e:
             print(f"[ATTENDANCE] Dashboard API failed (might not have scope): {e}", flush=True)
 
-        # Use Dashboard API data if available and has more records, otherwise use Reports API
-        if participants_dashboard and len(participants_dashboard) >= len(participants_reports):
-            participants = participants_dashboard
-            print(f"[ATTENDANCE] Using Dashboard API data ({len(participants)} records)", flush=True)
-        else:
-            participants = participants_reports
-            print(f"[ATTENDANCE] Using Reports API data ({len(participants)} records)", flush=True)
+        # Try Past Meetings API (third option)
+        participants_past_meetings = []
+        try:
+            print(f"[ATTENDANCE] === FETCHING PARTICIPANTS FROM PAST_MEETINGS API ===", flush=True)
+            participant_data_past = await zoom_service.get_past_meeting_participants(request.meeting_id)
+            participants_past_meetings = participant_data_past.get("participants", [])
+            print(f"[ATTENDANCE] Past Meetings API returned {len(participants_past_meetings)} participant records", flush=True)
+        except Exception as e:
+            print(f"[ATTENDANCE] Past Meetings API failed: {e}", flush=True)
+
+        # Use whichever API returned the MOST records (most complete data)
+        api_results = [
+            (len(participants_reports), "Reports API", participants_reports),
+            (len(participants_dashboard), "Dashboard API", participants_dashboard),
+            (len(participants_past_meetings), "Past Meetings API", participants_past_meetings)
+        ]
+        # Sort by count descending
+        api_results.sort(key=lambda x: x[0], reverse=True)
+
+        record_count, api_name, participants = api_results[0]
+        print(f"[ATTENDANCE] Using {api_name} data ({record_count} records) - had most complete data", flush=True)
+        print(f"[ATTENDANCE] Comparison: Reports={len(participants_reports)}, Dashboard={len(participants_dashboard)}, PastMeetings={len(participants_past_meetings)}", flush=True)
 
         # Try to get meeting details from Zoom API
         zoom_start_time = None

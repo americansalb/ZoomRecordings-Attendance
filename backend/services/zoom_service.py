@@ -455,6 +455,79 @@ class ZoomService:
         print(f"[ZOOM] past_meetings response: {result}", flush=True)
         return result
 
+    async def get_past_meeting_participants(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
+        """
+        Get participant data from Past Meetings API endpoint
+        This is a third option, different from both Reports API and Dashboard API
+        Uses: /v2/past_meetings/{meetingId}/participants
+        """
+        account = self._get_account(account_id)
+
+        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
+        clean_meeting_id = str(meeting_id)
+        if "/" in clean_meeting_id or "=" in clean_meeting_id:
+            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+            print(f"[ZOOM PAST_MEETINGS] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
+
+        all_participants = []
+        next_page_token = None
+
+        while True:
+            params = {
+                "page_size": 300
+            }
+            if next_page_token:
+                params["next_page_token"] = next_page_token
+
+            print(f"[ZOOM PAST_MEETINGS] Fetching from /past_meetings/{clean_meeting_id}/participants", flush=True)
+
+            try:
+                response = await self._make_request(
+                    "GET",
+                    f"/past_meetings/{clean_meeting_id}/participants",
+                    account,
+                    params=params
+                )
+
+                participants = response.get("participants", [])
+                all_participants.extend(participants)
+
+                # Debug: Log pagination info with actual values
+                page_count = response.get("page_count", "N/A")
+                page_size = response.get("page_size", "N/A")
+                total_records = response.get("total_records", "N/A")
+                next_page_token = response.get("next_page_token")
+
+                print(f"[ZOOM PAST_MEETINGS] === PAGINATION DEBUG ===", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] Fetched {len(participants)} participants in this page", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] Total so far: {len(all_participants)}", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] page_count: {page_count}", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] page_size: {page_size}", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] total_records: {total_records}", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] next_page_token: {'<present>' if next_page_token else 'None'}", flush=True)
+                print(f"[ZOOM PAST_MEETINGS] Response keys: {list(response.keys())}", flush=True)
+
+                if not next_page_token:
+                    print(f"[ZOOM PAST_MEETINGS] No next_page_token - stopping pagination", flush=True)
+                    break
+                else:
+                    print(f"[ZOOM PAST_MEETINGS] Continuing to next page with token: {next_page_token[:20]}...", flush=True)
+            except Exception as e:
+                print(f"[ZOOM PAST_MEETINGS] Failed: {e}", flush=True)
+                break
+
+        print(f"[ZOOM PAST_MEETINGS] Final total participants: {len(all_participants)} records", flush=True)
+
+        # DEBUG: Log first participant to see field structure
+        if all_participants:
+            print(f"[ZOOM PAST_MEETINGS] Sample participant fields: {list(all_participants[0].keys())}", flush=True)
+            print(f"[ZOOM PAST_MEETINGS] Sample participant: {all_participants[0]}", flush=True)
+
+        return {
+            "participants": all_participants,
+            "total_records": len(all_participants)
+        }
+
     async def get_meeting_schedule(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get scheduled meeting details - for recurring meetings, this has the scheduled times"""
         account = self._get_account(account_id)
