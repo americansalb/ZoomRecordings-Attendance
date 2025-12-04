@@ -184,6 +184,7 @@ async def process_attendance(request: ProcessAttendanceRequest):
 
         # Aggregate participants by unique user, calculating ONLY time within scheduled window
         unique_participants = {}
+        print(f"[ATTENDANCE] === PARTICIPANT CALCULATION DEBUG ===", flush=True)
         for p in participants:
             key = p.get("user_email") or p.get("name", "Unknown")
 
@@ -201,15 +202,25 @@ async def process_attendance(request: ProcessAttendanceRequest):
             join_time = p.get("join_time")
             leave_time = p.get("leave_time")
 
+            print(f"[ATTENDANCE] Participant: {key}", flush=True)
+            print(f"[ATTENDANCE]   Join:  {join_time}", flush=True)
+            print(f"[ATTENDANCE]   Leave: {leave_time}", flush=True)
+            print(f"[ATTENDANCE]   Zoom reported duration: {p.get('duration', 0)} seconds", flush=True)
+
             if join_time and leave_time and window_start and window_end:
                 # Use the helper function to calculate overlap with extended window (includes grace period)
                 session_minutes = zoom_service.calculate_attendance_minutes(
                     join_time, leave_time, window_start, window_end
                 )
+                print(f"[ATTENDANCE]   Calculated minutes (with window clamp): {session_minutes}", flush=True)
                 unique_participants[key]["total_duration"] += session_minutes * 60  # Convert to seconds
             else:
                 # Fallback: use Zoom's reported duration
-                unique_participants[key]["total_duration"] += p.get("duration", 0)
+                fallback_duration = p.get("duration", 0)
+                print(f"[ATTENDANCE]   Using fallback duration: {fallback_duration} seconds (window not set)", flush=True)
+                unique_participants[key]["total_duration"] += fallback_duration
+
+            print(f"[ATTENDANCE]   Running total: {unique_participants[key]['total_duration']} seconds", flush=True)
 
         print(f"[ATTENDANCE] Aggregated to {len(unique_participants)} unique participants", flush=True)
 
@@ -219,6 +230,12 @@ async def process_attendance(request: ProcessAttendanceRequest):
             if unique_participants[key]["total_duration"] > max_duration_seconds:
                 print(f"[ATTENDANCE] Final cap {key}: {unique_participants[key]['total_duration']}s -> {max_duration_seconds}s", flush=True)
                 unique_participants[key]["total_duration"] = max_duration_seconds
+
+        # Log final attendance for each participant
+        print(f"[ATTENDANCE] === FINAL ATTENDANCE SUMMARY ===", flush=True)
+        for key, data in unique_participants.items():
+            minutes = data["total_duration"] // 60
+            print(f"[ATTENDANCE] {key}: {minutes} minutes ({data['total_duration']} seconds)", flush=True)
 
         # Use the new batch processing method (minimizes API calls)
         participant_list = list(unique_participants.values())
