@@ -384,9 +384,30 @@ class ZoomService:
                 break
 
         print(f"[ZOOM DASHBOARD] Final total participants: {len(all_participants)} records", flush=True)
+
+        # DEBUG: Log first participant to see field structure
+        if all_participants:
+            print(f"[ZOOM DASHBOARD] Sample participant fields: {list(all_participants[0].keys())}", flush=True)
+            print(f"[ZOOM DASHBOARD] Sample participant: {all_participants[0]}", flush=True)
+
+        # Normalize Dashboard API format to match Reports API format
+        # Dashboard API uses different field names, so map them to Reports API format
+        normalized_participants = []
+        for p in all_participants:
+            normalized = {
+                "name": p.get("name", p.get("user_name", "")),
+                "user_email": p.get("email", p.get("user_email", "")),
+                "join_time": p.get("join_time"),
+                "leave_time": p.get("leave_time"),
+                "duration": p.get("duration", 0),
+                "id": p.get("id", p.get("user_id", ""))
+            }
+            normalized_participants.append(normalized)
+
+        print(f"[ZOOM DASHBOARD] Normalized {len(normalized_participants)} participants", flush=True)
         return {
-            "participants": all_participants,
-            "total_records": len(all_participants)
+            "participants": normalized_participants,
+            "total_records": len(normalized_participants)
         }
 
     async def get_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
