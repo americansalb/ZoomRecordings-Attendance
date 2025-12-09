@@ -43,6 +43,7 @@ class ProcessAttendanceRequest(BaseModel):
     meeting_duration_minutes: Optional[int] = None  # Scheduled meeting duration (if not provided, uses Zoom's actual duration)
     meeting_start_time: Optional[str] = None  # ISO format, if not provided will use Zoom's start time
     grace_period_minutes: Optional[int] = 5  # Buffer time before/after scheduled window (default 5 min)
+    number_of_segments: Optional[int] = None  # Divide meeting into N time segments (e.g., 3 for hour-by-hour tracking)
 
 
 class UpdateAttendanceRequest(BaseModel):
@@ -330,12 +331,64 @@ async def process_attendance(request: ProcessAttendanceRequest):
             minutes = data["total_duration"] // 60
             print(f"[ATTENDANCE] {key}: {minutes} minutes ({data['total_duration']} seconds)", flush=True)
 
+        # Calculate segment attendance if requested
+        segments_data = None
+        if request.number_of_segments and request.number_of_segments > 0 and scheduled_start and scheduled_end:
+            print(f"\n[ATTENDANCE] === CALCULATING {request.number_of_segments} TIME SEGMENTS ===", flush=True)
+            segment_duration_minutes = meeting_duration / request.number_of_segments
+            segments_data = []
+
+            for seg_num in range(1, request.number_of_segments + 1):
+                seg_start = scheduled_start + timedelta(minutes=(seg_num - 1) * segment_duration_minutes)
+                seg_end = seg_start + timedelta(minutes=segment_duration_minutes)
+
+                # Format time ranges in Eastern time
+                seg_start_et = seg_start.astimezone(ZoneInfo("America/New_York"))
+                seg_end_et = seg_end.astimezone(ZoneInfo("America/New_York"))
+                time_range = f"{seg_start_et.strftime('%I:%M %p')}-{seg_end_et.strftime('%I:%M %p')} EST"
+
+                print(f"[ATTENDANCE] Segment {seg_num}: {time_range}", flush=True)
+
+                # Calculate attendance for each participant in this segment
+                segment_attendance = {}
+                for key in unique_participants.keys():
+                    segment_attendance[key] = 0
+
+                # Process each participant session
+                for p in participants:
+                    key = p.get("user_email") or p.get("name", "Unknown")
+                    join_time = p.get("join_time")
+                    leave_time = p.get("leave_time")
+
+                    if join_time and leave_time:
+                        # Calculate overlap with this segment
+                        session_minutes = zoom_service.calculate_attendance_minutes(
+                            join_time, leave_time, seg_start, seg_end
+                        )
+                        if session_minutes > 0:
+                            segment_attendance[key] += session_minutes
+
+                segments_data.append({
+                    "segment_num": seg_num,
+                    "time_range": time_range,
+                    "attendance": segment_attendance
+                })
+
+                # Log segment attendance
+                print(f"[ATTENDANCE] Segment {seg_num} attendance:", flush=True)
+                for key, mins in segment_attendance.items():
+                    if mins > 0:
+                        print(f"[ATTENDANCE]   {key}: {mins} min", flush=True)
+
+            print(f"[ATTENDANCE] === END SEGMENT CALCULATION ===\n", flush=True)
+
         # Use the new batch processing method (minimizes API calls)
         participant_list = list(unique_participants.values())
         results = sheets_service.process_attendance_batch(
             session_code,
             request.meeting_date,
-            participant_list
+            participant_list,
+            segments_data=segments_data
         )
 
         # Auto-generate the Summary tab with aggregated data
