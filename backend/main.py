@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings
+from routes import recordings, attendance, students, sheets, mappings, accounts
 
 load_dotenv()
 
@@ -70,6 +70,7 @@ app.add_middleware(
 )
 
 # Include API routers
+app.include_router(accounts.router, prefix="/api/accounts", tags=["Accounts"])
 app.include_router(recordings.router, prefix="/api/recordings", tags=["Recordings"])
 app.include_router(attendance.router, prefix="/api/attendance", tags=["Attendance"])
 app.include_router(students.router, prefix="/api/students", tags=["Students"])

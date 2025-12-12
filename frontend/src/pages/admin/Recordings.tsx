@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
 
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null)
   const [meetingDate, setMeetingDate] = useState(
     new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' })
@@ -18,13 +19,30 @@ export default function RecordingsPage() {
     participants: Participant[]
     new_count: number
     existing_count: number
+    detected_start_time: string | null
+    detected_duration: number | null
+    detection_source: string | null
+    detection_warnings: string[]
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
 
+  // Fetch users from Zoom account
+  const { data: usersData } = useQuery({
+    queryKey: ['zoom-users'],
+    queryFn: () => accountsApi.listUsers(),
+  })
+
+  // Default to "All Users" (null) when page loads
+  // User can select specific users via tabs
+
   const { data: recordingsData, isLoading } = useQuery({
-    queryKey: ['recordings', searchTerm],
-    queryFn: () => recordingsApi.list({ search: searchTerm || undefined }),
+    queryKey: ['recordings', searchTerm, selectedUserId],
+    queryFn: () => recordingsApi.list({
+      search: searchTerm || undefined,
+      user_id: selectedUserId || undefined
+    }),
+    // Always fetch - when selectedUserId is null, it fetches all users' recordings
   })
 
   const previewMutation = useMutation({
@@ -34,6 +52,19 @@ export default function RecordingsPage() {
     },
     onSuccess: (data) => {
       setPreviewData(data)
+
+      // Pre-fill detected duration
+      if (data.detected_duration) {
+        setMeetingDurationMinutes(data.detected_duration)
+      }
+
+      // Pre-fill detected start time (convert from ISO to local HH:MM)
+      if (data.detected_start_time) {
+        const detectedDate = new Date(data.detected_start_time)
+        const hours = String(detectedDate.getHours()).padStart(2, '0')
+        const minutes = String(detectedDate.getMinutes()).padStart(2, '0')
+        setScheduledStartTime(`${hours}:${minutes}`)
+      }
     },
   })
 
@@ -95,8 +126,73 @@ export default function RecordingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Zoom Recordings</h1>
-        <p className="mt-1 text-gray-600">Select a recording to process attendance</p>
+        <p className="mt-1 text-gray-600">Select a user and recording to process attendance</p>
       </div>
+
+      {/* User Tabs */}
+      {usersData && usersData.users.length > 0 && (
+        <div className="bg-white rounded-lg shadow-sm p-2 mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
+            <h2 className="text-sm font-semibold text-gray-700">Filter by User</h2>
+          </div>
+          <nav className="flex space-x-2 overflow-x-auto pb-2" aria-label="User Filter">
+            <button
+              onClick={() => {
+                setSelectedUserId(null)
+                setSelectedRecording(null)
+                setPreviewData(null)
+                setProcessResult(null)
+              }}
+              className={`
+                whitespace-nowrap px-4 py-2 rounded-lg font-medium text-sm transition-all
+                ${
+                  selectedUserId === null
+                    ? 'bg-blue-600 text-white shadow-md transform scale-105'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:shadow'
+                }
+              `}
+            >
+              <span className="flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                All Users
+              </span>
+            </button>
+            {usersData.users.map((user) => (
+              <button
+                key={user.id}
+                onClick={() => {
+                  setSelectedUserId(user.id)
+                  setSelectedRecording(null)
+                  setPreviewData(null)
+                  setProcessResult(null)
+                }}
+                className={`
+                  whitespace-nowrap px-4 py-2 rounded-lg font-medium text-sm transition-all
+                  ${
+                    selectedUserId === user.id
+                      ? 'bg-blue-600 text-white shadow-md transform scale-105'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:shadow'
+                  }
+                `}
+              >
+                <span className="flex items-center gap-2">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                    selectedUserId === user.id ? 'bg-blue-500' : 'bg-gray-300 text-gray-700'
+                  }`}>
+                    {user.email?.[0]?.toUpperCase()}
+                  </div>
+                  {user.email}
+                </span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recordings List */}
@@ -180,39 +276,107 @@ export default function RecordingsPage() {
                 />
               </div>
 
-              {/* Scheduled Start Time Input (Optional - auto-detected from Zoom) */}
+              {/* Scheduled Start Time Input (Auto-filled, editable) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Start Time <span className="text-gray-400 font-normal">(optional)</span>
+                  Scheduled Start Time
+                  {previewData?.detected_start_time && (
+                    <span className="text-green-600 font-normal text-xs ml-1">✓ Auto-filled</span>
+                  )}
                 </label>
                 <input
                   type="time"
                   className="input"
                   value={scheduledStartTime}
                   onChange={(e) => setScheduledStartTime(e.target.value)}
-                  placeholder="Auto-detected"
+                  placeholder="HH:MM"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Leave empty to use Zoom's scheduled time. Only override if auto-detection fails.
+                  Your local time. Edit to override auto-detected value.
                 </p>
               </div>
 
-              {/* Meeting Duration Input (Optional - auto-detected from Zoom) */}
+              {/* Meeting Duration Input (Auto-filled, editable) */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Duration <span className="text-gray-400 font-normal">(optional)</span>
+                  Scheduled Duration (minutes)
+                  {previewData?.detected_duration && (
+                    <span className="text-green-600 font-normal text-xs ml-1">✓ Auto-filled</span>
+                  )}
                 </label>
                 <input
                   type="number"
                   className="input"
                   value={meetingDurationMinutes ?? ''}
                   onChange={(e) => setMeetingDurationMinutes(e.target.value ? parseInt(e.target.value) : undefined)}
-                  placeholder="Auto-detected from Zoom"
+                  placeholder="e.g., 180"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Leave empty to use Zoom's scheduled duration. Only override if needed.
+                  Edit to override auto-detected duration.
                 </p>
               </div>
+
+              {/* Detection Warnings */}
+              {previewData && previewData.detection_warnings && previewData.detection_warnings.length > 0 && (
+                <div className="p-3 bg-yellow-50 border border-yellow-300 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-4 h-4 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-yellow-900">Detection Issues</h3>
+                  </div>
+                  <ul className="text-sm text-yellow-800 list-disc list-inside space-y-1">
+                    {previewData.detection_warnings.map((warning, idx) => (
+                      <li key={idx}>{warning}</li>
+                    ))}
+                  </ul>
+                  <p className="text-xs text-yellow-700 mt-2">
+                    ⚠️ Please manually enter the scheduled time and duration below.
+                  </p>
+                </div>
+              )}
+
+              {/* Detected Time Info */}
+              {previewData && (previewData.detected_start_time || previewData.detected_duration) && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-blue-900">Auto-Detected Schedule</h3>
+                    {previewData.detection_source && (
+                      <span className="text-xs text-blue-600">({previewData.detection_source})</span>
+                    )}
+                  </div>
+                  {previewData.detected_start_time && (
+                    <p className="text-sm text-blue-800 mb-1">
+                      <strong>Start Time:</strong>{' '}
+                      {new Date(previewData.detected_start_time).toLocaleString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true,
+                        timeZoneName: 'short'
+                      })}
+                      {' '}
+                      <span className="text-xs text-blue-600">
+                        ({Intl.DateTimeFormat().resolvedOptions().timeZone})
+                      </span>
+                    </p>
+                  )}
+                  {previewData.detected_duration && (
+                    <p className="text-sm text-blue-800">
+                      <strong>Duration:</strong> {previewData.detected_duration} minutes
+                      {' '}
+                      <span className="text-xs text-blue-600">
+                        (with ±5 min grace period)
+                      </span>
+                    </p>
+                  )}
+                  <p className="text-xs text-blue-700 mt-2">
+                    💡 Values above have been pre-filled. You can edit them if needed.
+                  </p>
+                </div>
+              )}
 
               {/* Session Info */}
               {previewData && (

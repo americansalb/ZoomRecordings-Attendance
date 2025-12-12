@@ -786,7 +786,7 @@ class SheetsService:
             ).execute()
 
     def process_attendance_batch(self, session_code: str, date_str: str,
-                                  participants: List[Dict]) -> Dict[str, Any]:
+                                  participants: List[Dict], segments_data: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Process attendance for multiple participants in an efficient batch operation.
 
@@ -800,6 +800,7 @@ class SheetsService:
             session_code: The session code (e.g., "126")
             date_str: The date string (e.g., "11/25")
             participants: List of {"first_name", "last_name", "email", "total_duration"}
+            segments_data: Optional list of segment data with time ranges and attendance per segment
 
         Returns:
             {"new_profiles": count, "updated_profiles": count, "profiles": [...]}
@@ -860,18 +861,25 @@ class SheetsService:
             if email:
                 email_index[email] = row_idx
 
-        # Step 3: Find or add date columns
+        # Step 3: Find or add date columns (including segment columns if provided)
         attendance_header = f"{date_str} Attendance"
         participation_header = f"{date_str} Participation"
 
         attendance_col = None
         participation_col = None
+        segment_cols = {}  # segment_num -> column_index
 
         for idx, header in enumerate(headers):
             if header == attendance_header:
                 attendance_col = idx
             elif header == participation_header:
                 participation_col = idx
+            # Check for existing segment columns
+            elif segments_data:
+                for seg in segments_data:
+                    seg_header = f"{date_str} Seg{seg['segment_num']} ({seg['time_range']})"
+                    if header == seg_header:
+                        segment_cols[seg['segment_num']] = idx
 
         headers_changed = False
         if attendance_col is None:
@@ -884,9 +892,23 @@ class SheetsService:
             headers.append(participation_header)
             headers_changed = True
 
+        # Add segment columns if provided
+        if segments_data:
+            for seg in segments_data:
+                seg_num = seg['segment_num']
+                if seg_num not in segment_cols:
+                    seg_header = f"{date_str} Seg{seg_num} ({seg['time_range']})"
+                    segment_cols[seg_num] = len(headers)
+                    headers.append(seg_header)
+                    headers_changed = True
+
         # Update headers if needed (ONE API call)
         if headers_changed:
-            print(f"[SHEETS] Adding date columns: {attendance_header}, {participation_header}", flush=True)
+            cols_to_add = [attendance_header, participation_header]
+            if segments_data:
+                for seg in segments_data:
+                    cols_to_add.append(f"{date_str} Seg{seg['segment_num']} ({seg['time_range']})")
+            print(f"[SHEETS] Adding date columns: {', '.join(cols_to_add)}", flush=True)
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=self.spreadsheet_id,
                 range=f"'{tab_name}'!1:1",
@@ -1001,7 +1023,8 @@ class SheetsService:
                 existing_updates.append({
                     "row": row_number,
                     "col": attendance_col,
-                    "value": attendance_minutes
+                    "value": attendance_minutes,
+                    "participant_name": zoom_full_name  # Track for debugging
                 })
                 # Also update Roster Match column if we have new match info
                 if roster_match_str:
@@ -1021,6 +1044,7 @@ class SheetsService:
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
+                print(f"[SHEETS] ✓ Matched '{zoom_full_name}' ({attendance_minutes} min) to existing row {row_number}", flush=True)
             else:
                 # New profile - use ORIGINAL Zoom name (not roster name)
                 new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
@@ -1047,7 +1071,8 @@ class SheetsService:
                 existing_updates.append({
                     "row": row_number,
                     "col": attendance_col,
-                    "value": attendance_minutes
+                    "value": attendance_minutes,
+                    "participant_name": zoom_full_name  # Track for debugging
                 })
 
                 results["new_profiles"] += 1
@@ -1064,6 +1089,7 @@ class SheetsService:
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
+                print(f"[SHEETS] + Adding new profile '{zoom_full_name}' ({attendance_minutes} min) at row {row_number}", flush=True)
 
         # Step 6: Batch add all new profiles (ONE API call) - now with 4 columns including Roster Match
         if new_profiles:
@@ -1079,13 +1105,78 @@ class SheetsService:
         # Step 7: Batch update all attendance values and roster matches (ONE API call)
         batch_data = []
 
-        # Add attendance updates
+        # CRITICAL BUG FIX: Detect duplicate row assignments and consolidate them
+        # Multiple participants might match to the same row (e.g., "Jose Rafael ramirez" and "Jose Rafael Ramirez SPANISH")
+        # If we write both values, the last one overwrites the first, causing incorrect attendance
+        row_attendance = {}  # row -> total_attendance
+        row_participants = {}  # row -> list of participant names (for debugging)
+        row_segments = {}  # row -> {segment_num -> attendance_minutes}
+
         for update in existing_updates:
-            col_letter = self._col_index_to_letter(update["col"])
+            row = update["row"]
+            value = update["value"]
+            participant_name = update.get("participant_name", "Unknown")
+
+            if row in row_attendance:
+                # DUPLICATE ROW DETECTED - this is the bug!
+                print(f"[SHEETS] ⚠️ DUPLICATE ROW DETECTED: Row {row} has multiple participants!", flush=True)
+                print(f"[SHEETS]   Existing participants: {row_participants[row]}", flush=True)
+                print(f"[SHEETS]   New participant: '{participant_name}' with {value} minutes", flush=True)
+                print(f"[SHEETS]   Previous total: {row_attendance[row]} minutes", flush=True)
+                # Sum the values (these are likely the same person joining multiple times with different names)
+                row_attendance[row] += value
+                row_participants[row].append(participant_name)
+                print(f"[SHEETS]   Consolidated value: {row_attendance[row]} minutes", flush=True)
+            else:
+                row_attendance[row] = value
+                row_participants[row] = [participant_name]
+
+            # Initialize segment attendance for this row if needed
+            if segments_data and row not in row_segments:
+                row_segments[row] = {seg['segment_num']: 0 for seg in segments_data}
+
+        # Calculate segment attendance for each row
+        if segments_data:
+            for update in existing_updates:
+                row = update["row"]
+                participant_name = update.get("participant_name", "Unknown")
+
+                # Find the participant key from the attendance data
+                participant_key = None
+                for p in participants:
+                    zoom_full_name = f"{p['first_name']} {p['last_name']}".strip()
+                    if zoom_full_name == participant_name:
+                        participant_key = p.get("email") or zoom_full_name
+                        break
+
+                # Add segment attendance for this participant
+                if participant_key:
+                    for seg in segments_data:
+                        seg_mins = seg['attendance'].get(participant_key, 0)
+                        if seg_mins > 0:
+                            row_segments[row][seg['segment_num']] += seg_mins
+
+        # Add consolidated attendance updates
+        for row, total_value in row_attendance.items():
+            col_letter = self._col_index_to_letter(attendance_col)
             batch_data.append({
-                "range": f"'{tab_name}'!{col_letter}{update['row']}",
-                "values": [[update["value"]]]
+                "range": f"'{tab_name}'!{col_letter}{row}",
+                "values": [[total_value]]
             })
+            print(f"[SHEETS] Writing row {row}: {total_value} minutes (participants: {', '.join(row_participants[row])})", flush=True)
+
+        # Add segment attendance updates
+        if segments_data:
+            for row in row_attendance.keys():
+                for seg_num, seg_mins in row_segments.get(row, {}).items():
+                    col_idx = segment_cols.get(seg_num)
+                    if col_idx is not None:
+                        col_letter = self._col_index_to_letter(col_idx)
+                        batch_data.append({
+                            "range": f"'{tab_name}'!{col_letter}{row}",
+                            "values": [[seg_mins]]
+                        })
+                        print(f"[SHEETS] Writing row {row} segment {seg_num}: {seg_mins} minutes", flush=True)
 
         # Add roster match updates (column D = index 3)
         for update in roster_match_updates:
@@ -1095,7 +1186,7 @@ class SheetsService:
             })
 
         if batch_data:
-            print(f"[SHEETS] Updating {len(existing_updates)} attendance values and {len(roster_match_updates)} roster matches in batch", flush=True)
+            print(f"[SHEETS] Updating {len(row_attendance)} unique rows (consolidated from {len(existing_updates)} participant updates) and {len(roster_match_updates)} roster matches in batch", flush=True)
             self.sheets.spreadsheets().values().batchUpdate(
                 spreadsheetId=self.spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": batch_data}

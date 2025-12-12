@@ -8,6 +8,21 @@ const api = axios.create({
 })
 
 // Types
+export interface ZoomAccount {
+  id: string
+  name: string
+}
+
+export interface ZoomUser {
+  id: string
+  email: string
+  first_name: string
+  last_name: string
+  display_name: string
+  type: number
+  status: string
+}
+
 export interface Recording {
   id: string
   meeting_id: string
@@ -92,9 +107,24 @@ export interface SummaryStudent {
   attendance: Record<string, number>
 }
 
+// Accounts API
+export const accountsApi = {
+  list: async () => {
+    const { data } = await api.get('/accounts')
+    return data as { accounts: ZoomAccount[]; total: number }
+  },
+
+  listUsers: async (account_id?: string) => {
+    const { data } = await api.get('/accounts/users', {
+      params: account_id ? { account_id } : undefined
+    })
+    return data as { users: ZoomUser[]; total: number }
+  },
+}
+
 // Recordings API
 export const recordingsApi = {
-  list: async (params?: { from_date?: string; to_date?: string; search?: string }) => {
+  list: async (params?: { from_date?: string; to_date?: string; search?: string; account_id?: string; user_id?: string }) => {
     const { data } = await api.get('/recordings', { params })
     return data as { recordings: Recording[]; total: number }
   },
@@ -108,7 +138,9 @@ export const recordingsApi = {
 // Attendance API
 export const attendanceApi = {
   preview: async (meetingId: string, recordingTitle: string) => {
-    const { data } = await api.get(`/attendance/preview/${meetingId}`, {
+    // Double URL encode meeting ID to handle UUIDs with / and == characters
+    const encodedMeetingId = encodeURIComponent(encodeURIComponent(meetingId))
+    const { data } = await api.get(`/attendance/preview/${encodedMeetingId}`, {
       params: { recording_title: recordingTitle },
     })
     return data as {
@@ -117,6 +149,10 @@ export const attendanceApi = {
       participants: Participant[]
       new_count: number
       existing_count: number
+      detected_start_time: string | null
+      detected_duration: number | null
+      detection_source: string | null
+      detection_warnings: string[]
     }
   },
 
