@@ -309,6 +309,82 @@ class SheetsService:
 
         return name.strip()
 
+    # Common nickname mappings (normalized lowercase)
+    NICKNAME_MAP = {
+        "gaby": "gabriela",
+        "gabby": "gabriela",
+        "lisbety": "lisbet",
+        "lisbeth": "lisbet",
+        "beth": "lisbet",
+        "chris": "christine",
+        "christy": "christine",
+        "mike": "michael",
+        "mikey": "michael",
+        "nick": "nicholas",
+        "nicky": "nicholas",
+        "alex": "alexander",
+        "alex": "alexandra",
+        "will": "william",
+        "bill": "william",
+        "bob": "robert",
+        "rob": "robert",
+        "bobby": "robert",
+        "joe": "joseph",
+        "joey": "joseph",
+        "tony": "anthony",
+        "dan": "daniel",
+        "danny": "daniel",
+        "dave": "david",
+        "davey": "david",
+        "jim": "james",
+        "jimmy": "james",
+        "jen": "jennifer",
+        "jenny": "jennifer",
+        "kate": "katherine",
+        "katie": "katherine",
+        "kathy": "katherine",
+        "liz": "elizabeth",
+        "lizzy": "elizabeth",
+        "beth": "elizabeth",
+        "matt": "matthew",
+        "matty": "matthew",
+        "sam": "samuel",
+        "sammy": "samuel",
+        "tom": "thomas",
+        "tommy": "thomas",
+        "ed": "edward",
+        "eddie": "edward",
+        "ted": "theodore",
+        "teddy": "theodore",
+        "andy": "andrew",
+        "drew": "andrew",
+        "steve": "steven",
+        "stevie": "steven",
+        "pat": "patricia",
+        "patty": "patricia",
+        "trish": "patricia",
+        "sue": "susan",
+        "susie": "susan",
+        "vicky": "victoria",
+        "vic": "victoria",
+    }
+
+    def _get_nickname_variants(self, name: str) -> List[str]:
+        """Get all nickname variants for a name (including the original)."""
+        name_lower = name.lower().strip()
+        variants = [name_lower]
+
+        # Check if this name is a nickname, get the full name
+        if name_lower in self.NICKNAME_MAP:
+            variants.append(self.NICKNAME_MAP[name_lower])
+
+        # Check if this name has nicknames (reverse lookup)
+        for nick, full in self.NICKNAME_MAP.items():
+            if full == name_lower:
+                variants.append(nick)
+
+        return variants
+
     def match_to_roster(self, first_name: str, last_name: str, roster: List[Dict],
                         threshold: int = 80) -> Optional[Dict]:
         """
@@ -332,15 +408,27 @@ class SheetsService:
         # Combined name for two-word first name matching (e.g., "Van Daisy")
         combined_zoom = f"{norm_first} {norm_last}".strip()
 
+        # Get nickname variants for matching
+        first_variants = self._get_nickname_variants(norm_first)
+
         best_match = None
         best_score = 0
 
         for entry in roster:
             roster_first = entry["first_name"].lower().strip()
             roster_last = entry["last_name"].lower().strip()
+            roster_full = f"{roster_first} {roster_last}".strip()
 
-            # Strategy 1: Direct first name match
-            first_score = fuzz.ratio(norm_first, roster_first)
+            # Get nickname variants for roster name too
+            roster_first_variants = self._get_nickname_variants(roster_first)
+
+            first_score = 0
+
+            # Strategy 1: Direct first name match (including nickname variants)
+            for zoom_variant in first_variants:
+                for roster_variant in roster_first_variants:
+                    score = fuzz.ratio(zoom_variant, roster_variant)
+                    first_score = max(first_score, score)
 
             # Strategy 2: Zoom first name is prefix of roster first name (e.g., "Selene" vs "Selene Lizeth")
             if first_score < threshold and roster_first.startswith(norm_first + " "):
@@ -351,18 +439,34 @@ class SheetsService:
                 first_score = 85
 
             # Strategy 4: Two-word first name - Zoom split "Van Daisy" as first="Van", last="Daisy ..."
-            # Check if combined Zoom name starts with roster first name
-            if first_score < threshold and combined_zoom.startswith(roster_first):
-                first_score = 90  # Strong match for two-word first names
+            # Check if combined Zoom name starts with roster first name (handles "Van Daisy" in roster)
+            if first_score < threshold:
+                # Try matching combined_zoom to roster_first (two-word first names)
+                if roster_first and len(roster_first) > 3:
+                    # Check if combined zoom name matches roster first name
+                    combined_score = fuzz.ratio(combined_zoom.split()[0] if combined_zoom else "", roster_first.split()[0] if roster_first else "")
+                    if combined_score >= 80:
+                        # Check if the rest matches too
+                        if len(combined_zoom.split()) > 1 and len(roster_first.split()) > 1:
+                            rest_score = fuzz.ratio(" ".join(combined_zoom.split()[1:]), " ".join(roster_first.split()[1:]))
+                            if rest_score >= 70:
+                                first_score = 90
+
+                # Direct comparison of combined zoom to roster full name
+                full_match_score = fuzz.ratio(combined_zoom, roster_full)
+                if full_match_score >= threshold:
+                    first_score = max(first_score, full_match_score)
+
+            # Strategy 5: Check if roster first name is multi-word and matches combined zoom
+            if first_score < threshold and " " in roster_first:
+                # Roster has two-word first name like "Van Daisy"
+                roster_first_score = fuzz.ratio(combined_zoom, roster_first)
+                if roster_first_score >= threshold:
+                    first_score = roster_first_score
 
             # If first name is a strong match, check last name
             if first_score >= threshold:
-                # Last name matching strategies:
-                # 1. Exact match
-                # 2. Fuzzy match
-                # 3. Initial match (e.g., "R" matches "Reisman")
-                # 4. Last name is empty (just first name in Zoom)
-
+                # Last name matching strategies
                 last_score = 0
 
                 if not norm_last:
@@ -387,9 +491,28 @@ class SheetsService:
                     best_score = combined_score
                     best_match = entry
 
+            # Strategy 6: FALLBACK - try to match just first name if roster has multi-word first name
+            # This handles cases where "Van Daisy" appears but normalized differently
+            if best_score < threshold and " " in roster_first:
+                # Check if any part of the roster first name matches norm_first or combined_zoom
+                roster_parts = roster_first.split()
+                for part in roster_parts:
+                    if part == norm_first or fuzz.ratio(part, norm_first) >= 90:
+                        # First name part matches, give high score
+                        fallback_score = 75
+                        if fallback_score > best_score:
+                            best_score = fallback_score
+                            best_match = entry
+                            break
+
         # Only return if we have a good enough match
         if best_score >= threshold:
             print(f"[ROSTER] ✓ Matched '{first_name} {last_name}' -> '{best_match['first_name']} {best_match['last_name']}' (score: {best_score:.0f})", flush=True)
+            return best_match
+
+        # Lower threshold fallback for nickname matches
+        if best_score >= 70 and best_match:
+            print(f"[ROSTER] ✓ Matched '{first_name} {last_name}' -> '{best_match['first_name']} {best_match['last_name']}' (score: {best_score:.0f}, nickname fallback)", flush=True)
             return best_match
 
         print(f"[ROSTER] ✗ No match for '{first_name} {last_name}' (best score: {best_score:.0f})", flush=True)
@@ -1379,35 +1502,25 @@ class SheetsService:
         """
         Generate/update the Summary tab for a session.
 
-        This aggregates data from the raw "Session XXX" tab into a clean view:
-        - Groups Zoom entries by their Roster Match
-        - Shows canonical student names from roster
-        - Lists all known Zoom name variations
-        - Aggregates attendance minutes per date
+        IMPORTANT: Uses ROSTER as the base truth - ALL roster students appear.
+        Then matches attendance data from raw tab to roster students.
+        Unmatched Zoom names appear at the bottom for review.
 
         Returns:
             {"students": count, "dates": [...], "summary_tab": tab_info}
         """
         print(f"[SUMMARY] Generating summary for session {session_code}", flush=True)
 
-        # Step 1: Read raw attendance data
-        raw_data = self.get_tab_data(session_code, use_cache=False)
-        if not raw_data or len(raw_data) < 2:
-            print(f"[SUMMARY] No raw data found for session {session_code}", flush=True)
-            return {"students": 0, "dates": [], "summary_tab": None}
-
-        raw_headers = raw_data[0]
-        raw_rows = raw_data[1:]
-
-        # Step 2: Load roster for canonical student info
+        # Step 1: Load roster FIRST - this is the source of truth
         roster = self.get_roster(session_code)
-        roster_by_name = {}
-        for entry in roster:
-            key = f"{entry['first_name']} {entry['last_name']}".lower().strip()
-            roster_by_name[key] = entry
+        print(f"[SUMMARY] Loaded {len(roster)} students from roster", flush=True)
+
+        # Step 2: Read raw attendance data
+        raw_data = self.get_tab_data(session_code, use_cache=False)
+        raw_headers = raw_data[0] if raw_data else ["First Name", "Last Name", "Email", "Roster Match"]
+        raw_rows = raw_data[1:] if len(raw_data) > 1 else []
 
         # Step 3: Extract date columns from raw headers
-        # Headers are: First Name, Last Name, Email, Roster Match, [Date Attendance], [Date Participation], ...
         date_columns = []
         for idx, header in enumerate(raw_headers):
             if header.endswith(" Attendance"):
@@ -1416,11 +1529,21 @@ class SheetsService:
 
         print(f"[SUMMARY] Found {len(date_columns)} attendance dates", flush=True)
 
-        # Step 4: Group raw rows by roster match OR by Zoom name if no match
-        # Include ALL students - matched ones group by roster name, unmatched show individually
-        # Structure: {group_key: {"roster_info": {...}, "zoom_names": set(), "attendance": {date: max_minutes}, "is_matched": bool}}
+        # Step 4: Initialize summary data with ALL roster students (even those with no attendance)
+        # Key = "first_name last_name" lowercase
         summary_data = {}
-        unmatched_count = 0
+        for entry in roster:
+            key = f"{entry['first_name']} {entry['last_name']}".lower().strip()
+            summary_data[key] = {
+                "roster_info": entry,
+                "canonical_name": f"{entry['first_name']} {entry['last_name']}",
+                "zoom_names": set(),
+                "attendance": {dc["date"]: 0 for dc in date_columns},  # Initialize all dates to 0
+                "is_roster": True
+            }
+
+        # Step 5: Process raw attendance data and match to roster
+        unmatched_entries = {}  # For Zoom names that don't match any roster student
 
         for row in raw_rows:
             if not row or not any(row[:3]):
@@ -1435,85 +1558,116 @@ class SheetsService:
             if not zoom_full or zoom_full.lower() in ["zoom user", "zoom", "user", "guest"]:
                 continue
 
-            # Determine grouping key: use roster match if available, otherwise use Zoom name
+            # Determine if this row has a valid roster match
             is_matched = bool(roster_match and not roster_match.startswith("⚠️"))
+
             if is_matched:
-                group_key = roster_match.lower()
-            else:
-                # Unmatched - use Zoom name as key (won't group with roster)
-                group_key = f"__unmatched__{zoom_full.lower()}"
-                unmatched_count += 1
+                # Find the roster student by name
+                roster_key = roster_match.lower().strip()
 
-            # Initialize group if needed
-            if group_key not in summary_data:
-                # Try to find roster info
-                roster_info = roster_by_name.get(group_key.replace("__unmatched__", ""), {})
-                canonical_name = roster_match if is_matched else zoom_full
-                summary_data[group_key] = {
-                    "roster_info": roster_info,
-                    "canonical_name": canonical_name,
-                    "zoom_names": set(),
-                    "attendance": {},
-                    "is_matched": is_matched
-                }
+                # If exact key not found, try to find by first+last name
+                if roster_key not in summary_data:
+                    # Try parsing the roster_match as "First Last"
+                    for key in summary_data.keys():
+                        if key == roster_key or summary_data[key]["canonical_name"].lower() == roster_key:
+                            roster_key = key
+                            break
 
-            # Add Zoom name to known names
-            summary_data[group_key]["zoom_names"].add(zoom_full)
+                if roster_key in summary_data:
+                    # Add Zoom name to known names
+                    summary_data[roster_key]["zoom_names"].add(zoom_full)
 
-            # Aggregate attendance (take max for each date)
-            for date_col in date_columns:
-                date_str = date_col["date"]
-                col_idx = date_col["col_idx"]
-                if col_idx < len(row) and row[col_idx]:
-                    try:
-                        minutes = int(float(row[col_idx]))
-                        current_max = summary_data[group_key]["attendance"].get(date_str, 0)
-                        summary_data[group_key]["attendance"][date_str] = max(current_max, minutes)
-                    except ValueError:
-                        pass
+                    # Aggregate attendance (take max for each date)
+                    for date_col in date_columns:
+                        date_str = date_col["date"]
+                        col_idx = date_col["col_idx"]
+                        if col_idx < len(row) and row[col_idx]:
+                            try:
+                                minutes = int(float(row[col_idx]))
+                                current_max = summary_data[roster_key]["attendance"].get(date_str, 0)
+                                summary_data[roster_key]["attendance"][date_str] = max(current_max, minutes)
+                            except ValueError:
+                                pass
+                else:
+                    print(f"[SUMMARY] ⚠️ Roster match '{roster_match}' not found in roster!", flush=True)
+                    # Treat as unmatched
+                    is_matched = False
 
-        matched_count = sum(1 for d in summary_data.values() if d.get("is_matched", False))
-        print(f"[SUMMARY] Grouped into {len(summary_data)} students ({matched_count} roster-matched, {unmatched_count} unmatched)", flush=True)
+            if not is_matched:
+                # Unmatched entry - track separately
+                unmatched_key = f"__unmatched__{zoom_full.lower()}"
+                if unmatched_key not in unmatched_entries:
+                    unmatched_entries[unmatched_key] = {
+                        "roster_info": {},
+                        "canonical_name": zoom_full,
+                        "zoom_names": set(),
+                        "attendance": {dc["date"]: 0 for dc in date_columns},
+                        "is_roster": False
+                    }
 
-        # Step 5: Get or create summary tab
+                unmatched_entries[unmatched_key]["zoom_names"].add(zoom_full)
+
+                # Aggregate attendance
+                for date_col in date_columns:
+                    date_str = date_col["date"]
+                    col_idx = date_col["col_idx"]
+                    if col_idx < len(row) and row[col_idx]:
+                        try:
+                            minutes = int(float(row[col_idx]))
+                            current_max = unmatched_entries[unmatched_key]["attendance"].get(date_str, 0)
+                            unmatched_entries[unmatched_key]["attendance"][date_str] = max(current_max, minutes)
+                        except ValueError:
+                            pass
+
+        roster_with_attendance = sum(1 for d in summary_data.values() if any(v > 0 for v in d["attendance"].values()))
+        print(f"[SUMMARY] {len(summary_data)} roster students ({roster_with_attendance} with attendance), {len(unmatched_entries)} unmatched", flush=True)
+
+        # Step 6: Get or create summary tab
         summary_tab = self.get_or_create_summary_tab(session_code)
         tab_name = summary_tab["name"]
 
-        # Step 6: Build summary headers and rows
+        # Step 7: Build summary headers and rows
         summary_headers = ["Student ID", "First Name", "Last Name", "Known Zoom Names"]
         for date_col in date_columns:
             summary_headers.append(f"{date_col['date']} Attendance")
 
         summary_rows = [summary_headers]
 
-        # Sort: matched students first (alphabetically), then unmatched (alphabetically)
-        sorted_keys = sorted(summary_data.keys(), key=lambda k: (not summary_data[k].get("is_matched", False), k))
+        # Add ALL roster students first (sorted by student ID)
+        sorted_roster_keys = sorted(summary_data.keys(), key=lambda k: summary_data[k]["roster_info"].get("student_id", "zzz"))
 
-        for group_key in sorted_keys:
-            data = summary_data[group_key]
-            canonical_name = data["canonical_name"]
+        for key in sorted_roster_keys:
+            data = summary_data[key]
             roster_info = data["roster_info"]
             zoom_names = sorted(data["zoom_names"])
-            is_matched = data.get("is_matched", False)
 
-            # Parse canonical name
+            student_id = roster_info.get("student_id", "")
+            first_name = roster_info.get("first_name", "")
+            last_name = roster_info.get("last_name", "")
+
+            # Build row
+            row = [student_id, first_name, last_name, ", ".join(zoom_names)]
+            for date_col in date_columns:
+                date_str = date_col["date"]
+                row.append(data["attendance"].get(date_str, 0))
+
+            summary_rows.append(row)
+
+        # Add unmatched entries at the bottom (sorted alphabetically)
+        sorted_unmatched_keys = sorted(unmatched_entries.keys())
+
+        for key in sorted_unmatched_keys:
+            data = unmatched_entries[key]
+            zoom_names = sorted(data["zoom_names"])
+            canonical_name = data["canonical_name"]
+
+            # Parse name
             name_parts = canonical_name.split(" ", 1)
             first_name = name_parts[0] if name_parts else ""
             last_name = name_parts[1] if len(name_parts) > 1 else ""
 
-            # Use roster info if available (preferred over parsed name)
-            student_id = roster_info.get("student_id", "")
-            if roster_info.get("first_name"):
-                first_name = roster_info["first_name"]
-            if roster_info.get("last_name"):
-                last_name = roster_info["last_name"]
-
-            # Mark unmatched students for review
-            if not is_matched:
-                student_id = "UNMATCHED"
-
-            # Build row
-            row = [student_id, first_name, last_name, ", ".join(zoom_names)]
+            # Build row with UNMATCHED marker
+            row = ["UNMATCHED", first_name, last_name, ", ".join(zoom_names)]
             for date_col in date_columns:
                 date_str = date_col["date"]
                 row.append(data["attendance"].get(date_str, 0))
