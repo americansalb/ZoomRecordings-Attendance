@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { accountsApi, recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, proctorApi, Recording, Participant, RecordingFile, ProctorJobStatus, ProctorResult } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
@@ -27,6 +27,15 @@ export default function RecordingsPage() {
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
+
+  // Proctoring state
+  const [activeMode, setActiveMode] = useState<'attendance' | 'proctoring'>('attendance')
+  const [selectedVideoFile, setSelectedVideoFile] = useState<RecordingFile | null>(null)
+  const [proctorJobId, setProctorJobId] = useState<string | null>(null)
+  const [proctorJobStatus, setProctorJobStatus] = useState<ProctorJobStatus | null>(null)
+  const [proctorResult, setProctorResult] = useState<ProctorResult | null>(null)
+  const [isProctoring, setIsProctoring] = useState(false)
+  const [sampleInterval, setSampleInterval] = useState<number>(30)
 
   // Fetch users from Zoom account
   const { data: usersData } = useQuery({
@@ -104,6 +113,10 @@ export default function RecordingsPage() {
     setSelectedRecording(recording)
     setPreviewData(null)
     setProcessResult(null)
+    setSelectedVideoFile(null)
+    setProctorJobId(null)
+    setProctorJobStatus(null)
+    setProctorResult(null)
 
     // Extract date from recording start time for default
     const recordingDate = new Date(recording.start_time)
@@ -113,6 +126,80 @@ export default function RecordingsPage() {
 
     // Auto-preview
     previewMutation.mutate(recording)
+
+    // Auto-select gallery view video if available
+    if (recording.recording_files) {
+      const galleryView = recording.recording_files.find(
+        f => f.recording_type === 'gallery_view' || f.recording_type === 'shared_screen_with_gallery_view'
+      )
+      if (galleryView) {
+        setSelectedVideoFile(galleryView)
+      } else {
+        // Fallback to first MP4 file
+        const mp4File = recording.recording_files.find(f => f.file_type === 'MP4')
+        if (mp4File) setSelectedVideoFile(mp4File)
+      }
+    }
+  }
+
+  // Poll for proctor job status
+  useEffect(() => {
+    if (!proctorJobId || proctorJobStatus?.status === 'completed' || proctorJobStatus?.status === 'failed') {
+      return
+    }
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await proctorApi.getJobStatus(proctorJobId)
+        setProctorJobStatus(status)
+
+        if (status.status === 'completed' && status.result) {
+          setProctorResult(status.result)
+          setIsProctoring(false)
+        } else if (status.status === 'failed') {
+          setIsProctoring(false)
+        }
+      } catch (error) {
+        console.error('Error polling proctor status:', error)
+      }
+    }, 2000) // Poll every 2 seconds
+
+    return () => clearInterval(pollInterval)
+  }, [proctorJobId, proctorJobStatus?.status])
+
+  const handleStartProctoring = async () => {
+    if (!selectedRecording || !selectedVideoFile || !previewData?.session_code) return
+
+    setIsProctoring(true)
+    setProctorResult(null)
+    setProctorJobStatus(null)
+
+    try {
+      // Get participant names from preview
+      const participantNames = previewData.participants.map(p => p.name)
+
+      const response = await proctorApi.startProcessing(
+        selectedRecording.id,
+        selectedRecording.topic,
+        previewData.session_code,
+        meetingDate,
+        selectedVideoFile.download_url,
+        participantNames,
+        undefined, // auto-detect grid
+        sampleInterval
+      )
+
+      setProctorJobId(response.job_id)
+      setProctorJobStatus({
+        job_id: response.job_id,
+        status: 'pending',
+        progress: 0,
+        message: response.message
+      })
+    } catch (error) {
+      console.error('Error starting proctoring:', error)
+      setIsProctoring(false)
+    }
   }
 
   const handleProcess = async () => {
@@ -264,6 +351,33 @@ export default function RecordingsPage() {
                 </p>
               </div>
 
+              {/* Mode Switcher */}
+              <div className="flex border-b border-gray-200">
+                <button
+                  onClick={() => setActiveMode('attendance')}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeMode === 'attendance'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Attendance
+                </button>
+                <button
+                  onClick={() => setActiveMode('proctoring')}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeMode === 'proctoring'
+                      ? 'border-purple-500 text-purple-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Video Proctoring
+                </button>
+              </div>
+
+              {/* ATTENDANCE MODE */}
+              {activeMode === 'attendance' && (
+                <>
               {/* Meeting Date Input */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -520,6 +634,203 @@ export default function RecordingsPage() {
                     Open Google Sheet
                   </a>
                 </div>
+              )}
+                </>
+              )}
+
+              {/* PROCTORING MODE */}
+              {activeMode === 'proctoring' && (
+                <>
+                  {/* Video File Selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Select Video File
+                    </label>
+                    {selectedRecording.recording_files && selectedRecording.recording_files.length > 0 ? (
+                      <select
+                        className="input"
+                        value={selectedVideoFile?.id || ''}
+                        onChange={(e) => {
+                          const file = selectedRecording.recording_files?.find(f => f.id === e.target.value)
+                          setSelectedVideoFile(file || null)
+                        }}
+                      >
+                        <option value="">Select a video file...</option>
+                        {selectedRecording.recording_files
+                          .filter(f => f.file_type === 'MP4')
+                          .map((file) => (
+                            <option key={file.id} value={file.id}>
+                              {file.recording_type.replace(/_/g, ' ')} ({(file.file_size / 1024 / 1024).toFixed(1)} MB)
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <p className="text-sm text-gray-500">No video files available</p>
+                    )}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Select "gallery view" for best face detection results
+                    </p>
+                  </div>
+
+                  {/* Sample Interval */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Sample Interval (seconds)
+                    </label>
+                    <select
+                      className="input"
+                      value={sampleInterval}
+                      onChange={(e) => setSampleInterval(parseInt(e.target.value))}
+                    >
+                      <option value="15">15 seconds (more detailed)</option>
+                      <option value="30">30 seconds (recommended)</option>
+                      <option value="60">60 seconds (faster)</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      How often to check for face visibility
+                    </p>
+                  </div>
+
+                  {/* Session Info */}
+                  {previewData && (
+                    <div className="p-3 bg-purple-50 rounded-lg">
+                      <p className="text-sm">
+                        <strong>Session:</strong>{' '}
+                        {previewData.session_code ? `Session ${previewData.session_code}` : 'No session code found'}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Participants:</strong> {previewData.participants.length}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Date:</strong> {meetingDate}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Start Proctoring Button */}
+                  {!proctorResult && !isProctoring && (
+                    <button
+                      onClick={handleStartProctoring}
+                      disabled={!selectedVideoFile || !previewData?.session_code || previewMutation.isPending}
+                      className="w-full btn bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50"
+                    >
+                      Start Video Proctoring
+                    </button>
+                  )}
+
+                  {!selectedVideoFile && (
+                    <p className="text-sm text-red-600">
+                      Please select a video file to proctor
+                    </p>
+                  )}
+
+                  {/* Proctoring Progress */}
+                  {proctorJobStatus && proctorJobStatus.status !== 'completed' && (
+                    <div className="p-4 bg-purple-50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-purple-900">
+                          {proctorJobStatus.message}
+                        </span>
+                        <span className="text-sm text-purple-600">
+                          {Math.round(proctorJobStatus.progress * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-purple-200 rounded-full h-2">
+                        <div
+                          className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${proctorJobStatus.progress * 100}%` }}
+                        />
+                      </div>
+                      {proctorJobStatus.status === 'failed' && proctorJobStatus.error && (
+                        <p className="text-sm text-red-600 mt-2">
+                          Error: {proctorJobStatus.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Proctoring Results */}
+                  {proctorResult && (
+                    <div className="space-y-4">
+                      <div className="p-4 bg-green-50 rounded-lg">
+                        <h3 className="font-medium text-green-800 mb-2">Proctoring Complete!</h3>
+                        <p className="text-sm text-green-700">
+                          Duration: {proctorResult.total_duration_minutes.toFixed(0)} minutes
+                        </p>
+                        <p className="text-sm text-green-700">
+                          Frames analyzed: {proctorResult.frames_analyzed}
+                        </p>
+                      </div>
+
+                      {/* Participant Results */}
+                      <div>
+                        <h3 className="font-medium text-gray-900 mb-2">
+                          Participant Visibility
+                        </h3>
+                        <div className="max-h-64 overflow-y-auto border rounded-lg">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Name</th>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Visibility</th>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Violations</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-200">
+                              {proctorResult.participants.map((p, idx) => (
+                                <tr
+                                  key={idx}
+                                  className={p.visibility_percentage < 80 ? 'bg-red-50' : p.visibility_percentage < 95 ? 'bg-yellow-50' : ''}
+                                >
+                                  <td className="px-3 py-2 text-sm">{p.name}</td>
+                                  <td className="px-3 py-2 text-sm">
+                                    <span className={`font-medium ${
+                                      p.visibility_percentage >= 95 ? 'text-green-600' :
+                                      p.visibility_percentage >= 80 ? 'text-yellow-600' : 'text-red-600'
+                                    }`}>
+                                      {p.visibility_percentage.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-sm">
+                                    {p.violation_count > 0 ? (
+                                      <span className="text-red-600">
+                                        {p.violation_count} ({p.total_violation_minutes.toFixed(1)} min)
+                                      </span>
+                                    ) : (
+                                      <span className="text-green-600">None</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Summary Stats */}
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="p-2 bg-green-100 rounded">
+                          <p className="text-2xl font-bold text-green-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage >= 95).length}
+                          </p>
+                          <p className="text-xs text-green-600">95%+ visible</p>
+                        </div>
+                        <div className="p-2 bg-yellow-100 rounded">
+                          <p className="text-2xl font-bold text-yellow-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage >= 80 && p.visibility_percentage < 95).length}
+                          </p>
+                          <p className="text-xs text-yellow-600">80-95% visible</p>
+                        </div>
+                        <div className="p-2 bg-red-100 rounded">
+                          <p className="text-2xl font-bold text-red-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage < 80).length}
+                          </p>
+                          <p className="text-xs text-red-600">&lt;80% visible</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

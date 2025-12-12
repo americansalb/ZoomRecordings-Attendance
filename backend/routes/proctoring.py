@@ -203,17 +203,79 @@ def update_video_participation_sheet(
 
     Creates/updates a "Video Participation" tab with visibility percentages.
     """
-    # Get or create Video Participation tab
     tab_name = f"Video Participation {session_code}"
+    logger.info(f"[PROCTOR] Updating sheet '{tab_name}' for {meeting_date}")
 
-    # For now, just log - full implementation would update sheets
-    logger.info(f"[PROCTOR] Would update sheet '{tab_name}' for {meeting_date}")
+    try:
+        # Get or create Video Participation tab
+        video_tab = sheets_service.get_or_create_video_participation_tab(session_code)
 
-    for p in report.participants:
-        logger.info(
-            f"[PROCTOR]   {p.name}: {p.visibility_percentage:.1f}% visible, "
-            f"{len(p.violations)} violations"
-        )
+        if not video_tab:
+            logger.error(f"[PROCTOR] Failed to get/create video participation tab")
+            return
+
+        # Read existing data to check for date column
+        existing_data = sheets_service.get_video_participation_data(session_code)
+        headers = existing_data[0] if existing_data else ["Student Name"]
+        rows = existing_data[1:] if len(existing_data) > 1 else []
+
+        # Check if date column already exists
+        date_header = f"{meeting_date} Visibility %"
+        violation_header = f"{meeting_date} Violations"
+
+        date_col_idx = None
+        violation_col_idx = None
+
+        for idx, header in enumerate(headers):
+            if header == date_header:
+                date_col_idx = idx
+            elif header == violation_header:
+                violation_col_idx = idx
+
+        # Add new columns if needed
+        if date_col_idx is None:
+            headers.append(date_header)
+            date_col_idx = len(headers) - 1
+            headers.append(violation_header)
+            violation_col_idx = len(headers) - 1
+
+        # Build name to row mapping
+        name_to_row = {}
+        for idx, row in enumerate(rows):
+            if row and len(row) > 0:
+                name_to_row[row[0].lower().strip()] = idx
+
+        # Update or add rows for each participant
+        for p in report.participants:
+            name_key = p.name.lower().strip()
+
+            if name_key in name_to_row:
+                # Update existing row
+                row_idx = name_to_row[name_key]
+                row = rows[row_idx]
+
+                # Extend row if needed
+                while len(row) < len(headers):
+                    row.append("")
+
+                row[date_col_idx] = f"{p.visibility_percentage:.1f}"
+                row[violation_col_idx] = str(len(p.violations))
+            else:
+                # Add new row
+                new_row = [p.name] + [""] * (len(headers) - 1)
+                new_row[date_col_idx] = f"{p.visibility_percentage:.1f}"
+                new_row[violation_col_idx] = str(len(p.violations))
+                rows.append(new_row)
+                name_to_row[name_key] = len(rows) - 1
+
+        # Write back to sheet
+        all_data = [headers] + rows
+        sheets_service.write_video_participation_data(session_code, all_data)
+
+        logger.info(f"[PROCTOR] Updated {len(report.participants)} participants in sheet")
+
+    except Exception as e:
+        logger.error(f"[PROCTOR] Error updating sheet: {e}", exc_info=True)
 
 
 @router.get("/status/{job_id}")

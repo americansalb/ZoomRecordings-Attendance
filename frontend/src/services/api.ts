@@ -339,4 +339,118 @@ export const mappingsApi = {
   },
 }
 
+// Proctoring Types
+export interface ProctorJobStatus {
+  job_id: string
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  progress: number
+  message: string
+  result?: ProctorResult
+  error?: string
+}
+
+export interface ProctorResult {
+  recording_id: string
+  session_code: string
+  meeting_date: string
+  total_duration_minutes: number
+  frames_analyzed: number
+  report_path: string
+  screenshots_dir: string
+  participants: ProctorParticipantResult[]
+}
+
+export interface ProctorParticipantResult {
+  name: string
+  visibility_percentage: number
+  violation_count: number
+  total_violation_minutes: number
+  issues: Record<string, number>
+}
+
+export interface ProctorWarningDocument {
+  success: boolean
+  has_violations: boolean
+  participant_name: string
+  session_code?: string
+  meeting_date?: string
+  meeting_duration_minutes?: number
+  visibility_percentage?: number
+  total_violation_minutes?: number
+  violation_count?: number
+  violations?: Array<{
+    type: string
+    start_time: string
+    end_time: string
+    duration_minutes: number
+  }>
+  screenshots?: Array<{
+    timestamp: string
+    data: string
+    filename: string
+  }>
+  warning_text?: string
+  message?: string
+}
+
+// Proctoring API
+export const proctorApi = {
+  startProcessing: async (
+    meetingId: string,
+    recordingTitle: string,
+    sessionCode: string,
+    meetingDate: string,
+    videoUrl: string,
+    participantNames: string[],
+    gridLayout?: [number, number],
+    sampleInterval?: number
+  ) => {
+    const { data } = await api.post('/proctor/process', {
+      meeting_id: meetingId,
+      recording_title: recordingTitle,
+      session_code: sessionCode,
+      meeting_date: meetingDate,
+      video_url: videoUrl,
+      participant_names: participantNames,
+      grid_layout: gridLayout || null,
+      sample_interval: sampleInterval || 30.0,
+    })
+    return data as { success: boolean; job_id: string; message: string }
+  },
+
+  getJobStatus: async (jobId: string) => {
+    const { data } = await api.get(`/proctor/status/${jobId}`)
+    return data as ProctorJobStatus
+  },
+
+  getJobResults: async (jobId: string) => {
+    const { data } = await api.get(`/proctor/results/${jobId}`)
+    return data as { success: boolean; job_id: string; result: ProctorResult }
+  },
+
+  generateWarning: async (jobId: string, participantName: string, minViolationMinutes?: number) => {
+    const { data } = await api.post('/proctor/warning', {
+      job_id: jobId,
+      participant_name: participantName,
+      min_violation_minutes: minViolationMinutes || 1.0,
+    })
+    return data as ProctorWarningDocument
+  },
+
+  listJobs: async () => {
+    const { data } = await api.get('/proctor/jobs')
+    return data as {
+      jobs: Array<{
+        job_id: string
+        status: string
+        progress: number
+        message: string
+        session_code: string
+        meeting_date: string
+      }>
+      total: number
+    }
+  },
+}
+
 export default api

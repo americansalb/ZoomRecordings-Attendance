@@ -1778,6 +1778,104 @@ class SheetsService:
             print(f"[SUMMARY] Error reading summary data: {e}", flush=True)
             return {"students": [], "dates": [], "total": 0}
 
+    # ==================== VIDEO PARTICIPATION METHODS ====================
+
+    def get_or_create_video_participation_tab(self, session_code: str) -> Optional[Dict]:
+        """Get or create Video Participation tab for a session."""
+        tab_name = f"Video Participation {session_code}"
+
+        # Check if tab exists
+        tabs = self._get_all_tabs()
+        for tab in tabs:
+            if tab.get("properties", {}).get("title") == tab_name:
+                return {
+                    "name": tab_name,
+                    "sheet_id": tab["properties"]["sheetId"],
+                    "session_code": session_code
+                }
+
+        # Create new tab
+        try:
+            request = {
+                "requests": [{
+                    "addSheet": {
+                        "properties": {
+                            "title": tab_name
+                        }
+                    }
+                }]
+            }
+
+            response = self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body=request
+            ).execute()
+
+            new_sheet_id = response["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+            # Add headers
+            headers = [["Student Name"]]
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A1",
+                valueInputOption="RAW",
+                body={"values": headers}
+            ).execute()
+
+            print(f"[VIDEO] Created tab '{tab_name}'", flush=True)
+
+            return {
+                "name": tab_name,
+                "sheet_id": new_sheet_id,
+                "session_code": session_code
+            }
+
+        except HttpError as e:
+            print(f"[VIDEO] Error creating tab: {e}", flush=True)
+            return None
+
+    def get_video_participation_data(self, session_code: str) -> List[List[str]]:
+        """Get data from Video Participation tab."""
+        tab_name = f"Video Participation {session_code}"
+
+        try:
+            result = self.sheets.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A:ZZ"
+            ).execute()
+
+            return result.get("values", [["Student Name"]])
+
+        except HttpError as e:
+            print(f"[VIDEO] Error reading data: {e}", flush=True)
+            return [["Student Name"]]
+
+    def write_video_participation_data(self, session_code: str, data: List[List]) -> bool:
+        """Write data to Video Participation tab."""
+        tab_name = f"Video Participation {session_code}"
+
+        try:
+            # Clear existing data first
+            self.sheets.spreadsheets().values().clear(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A:ZZ"
+            ).execute()
+
+            # Write new data
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{tab_name}'!A1",
+                valueInputOption="RAW",
+                body={"values": data}
+            ).execute()
+
+            print(f"[VIDEO] Wrote {len(data)} rows to '{tab_name}'", flush=True)
+            return True
+
+        except HttpError as e:
+            print(f"[VIDEO] Error writing data: {e}", flush=True)
+            return False
+
 
 # Singleton instance
 sheets_service = SheetsService()
