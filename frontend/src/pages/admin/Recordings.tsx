@@ -12,6 +12,7 @@ export default function RecordingsPage() {
   )
   const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(undefined)
   const [scheduledStartTime, setScheduledStartTime] = useState<string>('') // Empty = use Zoom's scheduled time
+  const [numberOfSegments, setNumberOfSegments] = useState<number | undefined>(undefined)
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
@@ -89,7 +90,8 @@ export default function RecordingsPage() {
         selectedRecording.topic,
         meetingDate,
         meetingDurationMinutes,
-        startTimeISO
+        startTimeISO,
+        numberOfSegments
       )
     },
     onSuccess: (data) => {
@@ -313,6 +315,27 @@ export default function RecordingsPage() {
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   Edit to override auto-detected duration.
+                </p>
+              </div>
+
+              {/* Time Segments Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Time Segments (optional)
+                </label>
+                <select
+                  className="input"
+                  value={numberOfSegments ?? ''}
+                  onChange={(e) => setNumberOfSegments(e.target.value ? parseInt(e.target.value) : undefined)}
+                >
+                  <option value="">No segmentation</option>
+                  <option value="2">2 segments</option>
+                  <option value="3">3 segments (e.g., hourly for 3hr meeting)</option>
+                  <option value="4">4 segments</option>
+                  <option value="6">6 segments (e.g., 30-min for 3hr meeting)</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Divide attendance into time segments (shows hour-by-hour breakdown in sheet)
                 </p>
               </div>
 

@@ -934,6 +934,15 @@ class SheetsService:
             zoom_full_name = f"{zoom_first} {zoom_last}".strip()
             attendance_minutes = p["total_duration"] // 60
 
+            # Skip generic "Zoom User" entries unless they have an email
+            # These are users who haven't set their display name
+            if zoom_full_name.lower() in ["zoom user", "zoom", "user", "guest", "iphone", "ipad"]:
+                if not email:
+                    print(f"[SHEETS] ⚠️ SKIPPING generic participant '{zoom_full_name}' (no email, cannot identify)", flush=True)
+                    continue
+                else:
+                    print(f"[SHEETS] ⚠️ Generic name '{zoom_full_name}' but has email {email} - will try to match by email", flush=True)
+
             # Normalize Zoom name for matching (strip device suffixes, language tags, etc.)
             norm_first = self._normalize_name(zoom_first)
             norm_last = self._normalize_name(zoom_last)
@@ -1407,12 +1416,11 @@ class SheetsService:
 
         print(f"[SUMMARY] Found {len(date_columns)} attendance dates", flush=True)
 
-        # Step 4: Group raw rows by roster match
-        # ONLY include rows that have a valid roster match (Summary is roster-only)
-        # Unmatched Zoom names stay in the raw tab for manual review
-        # Structure: {roster_match_key: {"roster_info": {...}, "zoom_names": set(), "attendance": {date: max_minutes}}}
+        # Step 4: Group raw rows by roster match OR by Zoom name if no match
+        # Include ALL students - matched ones group by roster name, unmatched show individually
+        # Structure: {group_key: {"roster_info": {...}, "zoom_names": set(), "attendance": {date: max_minutes}, "is_matched": bool}}
         summary_data = {}
-        skipped_unmatched = 0
+        unmatched_count = 0
 
         for row in raw_rows:
             if not row or not any(row[:3]):
@@ -1423,24 +1431,30 @@ class SheetsService:
             roster_match = row[3].strip() if len(row) > 3 and row[3] else ""
             zoom_full = f"{zoom_first} {zoom_last}".strip()
 
-            # ONLY include entries with a valid roster match
-            # Skip unmatched entries and entries needing review (they stay in raw tab only)
-            if not roster_match or roster_match.startswith("⚠️"):
-                skipped_unmatched += 1
+            # Skip empty names or generic Zoom User entries
+            if not zoom_full or zoom_full.lower() in ["zoom user", "zoom", "user", "guest"]:
                 continue
 
-            # Use roster match as the grouping key
-            group_key = roster_match.lower()
+            # Determine grouping key: use roster match if available, otherwise use Zoom name
+            is_matched = bool(roster_match and not roster_match.startswith("⚠️"))
+            if is_matched:
+                group_key = roster_match.lower()
+            else:
+                # Unmatched - use Zoom name as key (won't group with roster)
+                group_key = f"__unmatched__{zoom_full.lower()}"
+                unmatched_count += 1
 
             # Initialize group if needed
             if group_key not in summary_data:
                 # Try to find roster info
-                roster_info = roster_by_name.get(group_key, {})
+                roster_info = roster_by_name.get(group_key.replace("__unmatched__", ""), {})
+                canonical_name = roster_match if is_matched else zoom_full
                 summary_data[group_key] = {
                     "roster_info": roster_info,
-                    "canonical_name": roster_match,
+                    "canonical_name": canonical_name,
                     "zoom_names": set(),
-                    "attendance": {}
+                    "attendance": {},
+                    "is_matched": is_matched
                 }
 
             # Add Zoom name to known names
@@ -1458,7 +1472,8 @@ class SheetsService:
                     except ValueError:
                         pass
 
-        print(f"[SUMMARY] Grouped into {len(summary_data)} roster students (skipped {skipped_unmatched} unmatched)", flush=True)
+        matched_count = sum(1 for d in summary_data.values() if d.get("is_matched", False))
+        print(f"[SUMMARY] Grouped into {len(summary_data)} students ({matched_count} roster-matched, {unmatched_count} unmatched)", flush=True)
 
         # Step 5: Get or create summary tab
         summary_tab = self.get_or_create_summary_tab(session_code)
@@ -1471,10 +1486,15 @@ class SheetsService:
 
         summary_rows = [summary_headers]
 
-        for group_key, data in sorted(summary_data.items()):
+        # Sort: matched students first (alphabetically), then unmatched (alphabetically)
+        sorted_keys = sorted(summary_data.keys(), key=lambda k: (not summary_data[k].get("is_matched", False), k))
+
+        for group_key in sorted_keys:
+            data = summary_data[group_key]
             canonical_name = data["canonical_name"]
             roster_info = data["roster_info"]
             zoom_names = sorted(data["zoom_names"])
+            is_matched = data.get("is_matched", False)
 
             # Parse canonical name
             name_parts = canonical_name.split(" ", 1)
@@ -1488,7 +1508,11 @@ class SheetsService:
             if roster_info.get("last_name"):
                 last_name = roster_info["last_name"]
 
-            # Build row (roster-matched students only, no review flags needed)
+            # Mark unmatched students for review
+            if not is_matched:
+                student_id = "UNMATCHED"
+
+            # Build row
             row = [student_id, first_name, last_name, ", ".join(zoom_names)]
             for date_col in date_columns:
                 date_str = date_col["date"]
