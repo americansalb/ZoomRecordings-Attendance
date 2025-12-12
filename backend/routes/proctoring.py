@@ -14,8 +14,8 @@ import requests
 import logging
 from datetime import datetime
 
-from ..services.proctoring import VideoProctorService
-from ..services.sheets_service import sheets_service
+from services.proctoring import VideoProctorService
+from services.sheets_service import sheets_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/proctor", tags=["proctoring"])
