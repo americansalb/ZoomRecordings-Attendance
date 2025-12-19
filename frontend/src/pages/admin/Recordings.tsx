@@ -303,11 +303,37 @@ export default function RecordingsPage() {
 
   // Apply auto-trim times based on schedule
   const handleAutoTrim = async () => {
-    if (!uploadVideoPreview || !previewData?.session_code) return
+    if (!uploadVideoPreview || !selectedRecording) return
 
+    // Use the detected schedule from Zoom (previewData) instead of external spreadsheet
+    if (previewData?.detected_start_time && previewData?.detected_duration) {
+      const scheduledStart = new Date(previewData.detected_start_time)
+      const recordingStart = new Date(selectedRecording.start_time)
+
+      // Calculate offset: how many seconds into the video does the scheduled time start?
+      const offsetSeconds = (scheduledStart.getTime() - recordingStart.getTime()) / 1000
+
+      // Start time: 1 minute before scheduled start (but not before 0)
+      const startSeconds = Math.max(0, offsetSeconds - 60)
+
+      // End time: scheduled duration + 5 minutes after (but not past video end)
+      const scheduledDurationSeconds = previewData.detected_duration * 60
+      const endSeconds = Math.min(
+        uploadVideoPreview.duration_seconds,
+        offsetSeconds + scheduledDurationSeconds + 300 // 5 min buffer
+      )
+
+      setUploadStartTime(formatSecondsToTime(startSeconds))
+      setUploadEndTime(formatSecondsToTime(endSeconds))
+
+      console.log(`Auto-trim: offset=${offsetSeconds}s, start=${startSeconds}s, end=${endSeconds}s`)
+      return
+    }
+
+    // Fallback to API (which currently doesn't work well)
     try {
       const autoTrim = await uploadApi.getAutoTrimTimes(
-        previewData.session_code,
+        previewData?.session_code || '',
         meetingDate,
         uploadVideoPreview.duration_seconds
       )
