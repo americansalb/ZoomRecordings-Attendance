@@ -12,3 +12,6 @@ rapidfuzz==3.10.0
 opencv-python-headless==4.10.0.84
 numpy>=1.24.0
 requests>=2.31.0
+
+# System dependencies (install separately):
+# - ffmpeg (for video trimming): apt-get install ffmpeg

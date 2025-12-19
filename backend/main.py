@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring
+from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload
 
 load_dotenv()
 
@@ -77,6 +77,7 @@ app.include_router(students.router, prefix="/api/students", tags=["Students"])
 app.include_router(sheets.router, prefix="/api/sheets", tags=["Sheets"])
 app.include_router(mappings.router, prefix="/api/mappings", tags=["Mappings"])
 app.include_router(proctoring.router, prefix="/api", tags=["Proctoring"])
+app.include_router(video_upload.router, prefix="/api", tags=["Video Upload"])
 
 
 @app.get("/api/health")
