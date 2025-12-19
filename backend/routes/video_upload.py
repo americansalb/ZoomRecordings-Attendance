@@ -226,8 +226,10 @@ async def start_trim_upload(
 
     This runs in the background and returns a job ID to track progress.
     """
-    # Generate job ID
-    job_id = f"upload_{request.meeting_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    # Generate job ID - sanitize meeting_id to remove special chars that break file paths/URLs
+    import re
+    safe_meeting_id = re.sub(r'[^a-zA-Z0-9]', '', request.meeting_id)[:20]
+    job_id = f"upload_{safe_meeting_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # Initialize job status
     upload_jobs[job_id] = {
@@ -460,7 +462,7 @@ async def list_upload_jobs() -> Dict:
     }
 
 
-@router.get("/day-number/{session_code}/{meeting_date}")
+@router.get("/day-number/{session_code}/{meeting_date:path}")
 async def get_day_number(session_code: str, meeting_date: str) -> Dict:
     """Get the day number for a session and date."""
     day_number = drive_service.get_day_number(session_code, meeting_date)
