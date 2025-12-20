@@ -286,12 +286,19 @@ export default function RecordingsPage() {
       // Try to get day number
       if (previewData?.session_code) {
         try {
+          console.log(`[Upload] Getting day number for Session ${previewData.session_code} on ${meetingDate}`)
           const dayInfo = await uploadApi.getDayNumber(previewData.session_code, meetingDate)
+          console.log('[Upload] Day number response:', dayInfo)
           if (dayInfo.found) {
             setUploadDayNumber(dayInfo.day_number)
+            console.log(`[Upload] Set day number to ${dayInfo.day_number}`)
+          } else {
+            console.warn('[Upload] Day number not found in schedule, defaulting to 0')
+            setUploadDayNumber(0)
           }
         } catch (e) {
-          console.warn('Could not get day number:', e)
+          console.error('[Upload] Error getting day number:', e)
+          setUploadDayNumber(0)
         }
       }
     } catch (error) {

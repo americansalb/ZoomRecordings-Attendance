@@ -93,6 +93,8 @@ class DriveService:
         if cache_key in self._schedule_cache:
             return self._schedule_cache[cache_key]
 
+        logger.info(f"[DRIVE] Looking up day number for Session {session_code} on {meeting_date}")
+
         try:
             # Read the schedule spreadsheet
             result = self.sheets.spreadsheets().values().get(
@@ -106,51 +108,97 @@ class DriveService:
                 return None
 
             headers = rows[0] if rows else []
+            logger.info(f"[DRIVE] Schedule headers (first 10): {headers[:10]}")
 
-            # Find session column and date rows
-            # The schedule likely has sessions as columns and dates as rows
-            # Or it might have a different structure - we'll try to find the pattern
+            # Try multiple matching strategies
 
-            # Look for session code in headers
+            # STRATEGY 1: Look for session code in headers (sessions as columns)
             session_col = None
             for idx, header in enumerate(headers):
-                if f"Session {session_code}" in header or header == session_code:
+                header_str = str(header).strip()
+                # Try various formats: "Session 127", "127", "Sess 127", etc.
+                if (f"Session {session_code}" in header_str or
+                    f"Sess {session_code}" in header_str or
+                    header_str == session_code or
+                    header_str == f"S{session_code}"):
                     session_col = idx
+                    logger.info(f"[DRIVE] Found session column at index {idx}: '{header_str}'")
                     break
 
             if session_col is not None:
-                # Sessions are columns - look for date in first column
+                # Sessions are columns - look for date in rows
+                # Count days for this session by finding matching dates
+                day_counter = 0
                 for row_idx, row in enumerate(rows[1:], start=1):
-                    if not row:
+                    if not row or len(row) <= session_col:
                         continue
-                    date_cell = row[0] if len(row) > 0 else ""
-                    if meeting_date in date_cell or self._dates_match(date_cell, meeting_date):
-                        # The day number is the row index (0-based from start of session)
-                        day_num = row_idx - 1  # 0-based
-                        self._schedule_cache[cache_key] = day_num
-                        logger.info(f"[DRIVE] Found day {day_num} for session {session_code} on {meeting_date}")
-                        return day_num
-            else:
-                # Alternative structure: look for session in first column
-                session_row = None
-                for row_idx, row in enumerate(rows):
-                    if not row:
-                        continue
-                    first_cell = row[0] if len(row) > 0 else ""
-                    if f"Session {session_code}" in first_cell or first_cell == session_code:
-                        session_row = row_idx
-                        break
 
-                if session_row is not None:
-                    # Session is a row - dates are in columns
-                    for col_idx, cell in enumerate(rows[session_row][1:], start=1):
-                        if meeting_date in str(cell) or self._dates_match(str(cell), meeting_date):
-                            day_num = col_idx - 1  # 0-based
-                            self._schedule_cache[cache_key] = day_num
-                            logger.info(f"[DRIVE] Found day {day_num} for session {session_code} on {meeting_date}")
-                            return day_num
+                    # Check if this row has a date that we can match
+                    date_cell = row[0] if len(row) > 0 else ""
+                    session_cell = row[session_col] if len(row) > session_col else ""
+
+                    # If the session cell is not empty, this is a scheduled day
+                    if session_cell and str(session_cell).strip():
+                        if self._dates_match(date_cell, meeting_date):
+                            self._schedule_cache[cache_key] = day_counter
+                            logger.info(f"[DRIVE] Found day {day_counter} for session {session_code} on {meeting_date} (matched '{date_cell}')")
+                            return day_counter
+                        day_counter += 1
+
+                logger.warning(f"[DRIVE] Session column found but date {meeting_date} not matched")
+
+            # STRATEGY 2: Look for session in first column (sessions as rows)
+            session_row = None
+            for row_idx, row in enumerate(rows):
+                if not row:
+                    continue
+                first_cell = str(row[0]).strip() if len(row) > 0 else ""
+                if (f"Session {session_code}" in first_cell or
+                    f"Sess {session_code}" in first_cell or
+                    first_cell == session_code or
+                    first_cell == f"S{session_code}"):
+                    session_row = row_idx
+                    logger.info(f"[DRIVE] Found session row at index {row_idx}: '{first_cell}'")
+                    break
+
+            if session_row is not None:
+                # Session is a row - dates are in columns
+                day_counter = 0
+                for col_idx, cell in enumerate(rows[session_row][1:], start=1):
+                    cell_str = str(cell).strip() if cell else ""
+                    # Check if this column header has our date
+                    header_cell = headers[col_idx] if col_idx < len(headers) else ""
+
+                    if cell_str:  # Non-empty means this is a scheduled day
+                        if self._dates_match(str(header_cell), meeting_date):
+                            self._schedule_cache[cache_key] = day_counter
+                            logger.info(f"[DRIVE] Found day {day_counter} for session {session_code} on {meeting_date}")
+                            return day_counter
+                        day_counter += 1
+
+            # STRATEGY 3: Search entire spreadsheet for session + date combination
+            logger.info(f"[DRIVE] Trying full spreadsheet search for Session {session_code}")
+            for row_idx, row in enumerate(rows):
+                for col_idx, cell in enumerate(row):
+                    cell_str = str(cell).strip()
+                    # Look for patterns like "Session 127" or just the session code
+                    if f"Session {session_code}" in cell_str or cell_str == session_code:
+                        # Found session mention - look for date in nearby cells
+                        logger.info(f"[DRIVE] Found session mention at row {row_idx}, col {col_idx}: '{cell_str}'")
+
+                        # Check if we can count days from here
+                        # Look in the same row for dates
+                        for nearby_col, nearby_cell in enumerate(row):
+                            if self._dates_match(str(nearby_cell), meeting_date):
+                                day_num = nearby_col - col_idx - 1 if nearby_col > col_idx else 0
+                                if day_num >= 0:
+                                    self._schedule_cache[cache_key] = day_num
+                                    logger.info(f"[DRIVE] Found day {day_num} via nearby date match")
+                                    return day_num
 
             logger.warning(f"[DRIVE] Could not find day number for session {session_code} on {meeting_date}")
+            logger.info(f"[DRIVE] Sample data from spreadsheet - Row 0: {rows[0][:5] if rows else 'empty'}")
+            logger.info(f"[DRIVE] Sample data from spreadsheet - Row 1: {rows[1][:5] if len(rows) > 1 else 'empty'}")
             return None
 
         except HttpError as e:
@@ -159,11 +207,13 @@ class DriveService:
 
     def _dates_match(self, cell_date: str, target_date: str) -> bool:
         """Check if two date strings represent the same date."""
-        # Normalize both dates for comparison
         import re
 
+        if not cell_date or not target_date:
+            return False
+
         # Extract month and day patterns
-        # Handle formats like: Nov10, Nov 10, 11/10, November 10
+        # Handle formats like: Nov10, Nov 10, 11/10, November 10, 12/17/2024, Wed 12/17
         months = {
             'jan': '01', 'january': '01',
             'feb': '02', 'february': '02',
@@ -180,20 +230,41 @@ class DriveService:
         }
 
         def normalize_date(d):
-            d = d.lower().strip()
-            # Try MM/DD format
-            match = re.match(r'(\d{1,2})/(\d{1,2})', d)
+            if not d:
+                return None
+            d = str(d).lower().strip()
+
+            # Try MM/DD/YYYY or MM/DD format
+            match = re.search(r'(\d{1,2})/(\d{1,2})(?:/\d{2,4})?', d)
             if match:
                 return f"{int(match.group(1)):02d}/{int(match.group(2)):02d}"
-            # Try Month Day format
+
+            # Try Month Day format (Nov10, Nov 10, November 10)
             for month_name, month_num in months.items():
                 if month_name in d:
                     day_match = re.search(r'(\d{1,2})', d)
                     if day_match:
                         return f"{month_num}/{int(day_match.group(1)):02d}"
-            return d
 
-        return normalize_date(cell_date) == normalize_date(target_date)
+            # Try to extract any MM/DD pattern from a longer string
+            # e.g., "Wed Dec 17" or "Wednesday, December 17"
+            for month_name, month_num in months.items():
+                if month_name in d:
+                    # Look for day number after month name
+                    pattern = month_name + r'[a-z]*\s*(\d{1,2})'
+                    match = re.search(pattern, d)
+                    if match:
+                        return f"{month_num}/{int(match.group(1)):02d}"
+
+            return None
+
+        norm_cell = normalize_date(cell_date)
+        norm_target = normalize_date(target_date)
+
+        if norm_cell and norm_target:
+            return norm_cell == norm_target
+
+        return False
 
     def get_or_create_session_folder(self, session_code: str) -> Optional[str]:
         """
