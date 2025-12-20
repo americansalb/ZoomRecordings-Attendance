@@ -311,17 +311,35 @@ export default function RecordingsPage() {
       const recordingStart = new Date(selectedRecording.start_time)
 
       // Calculate offset: how many seconds into the video does the scheduled time start?
+      // Positive = recording started before scheduled time
+      // Negative = recording started after scheduled time (late start)
       const offsetSeconds = (scheduledStart.getTime() - recordingStart.getTime()) / 1000
-
-      // Start time: 1 minute before scheduled start (but not before 0)
-      const startSeconds = Math.max(0, offsetSeconds - 60)
-
-      // End time: scheduled duration + 5 minutes after (but not past video end)
       const scheduledDurationSeconds = previewData.detected_duration * 60
-      const endSeconds = Math.min(
-        uploadVideoPreview.duration_seconds,
-        offsetSeconds + scheduledDurationSeconds + 300 // 5 min buffer
-      )
+
+      let startSeconds: number
+      let endSeconds: number
+
+      if (offsetSeconds >= 0) {
+        // Recording started BEFORE scheduled time
+        // Start: 1 minute before scheduled start
+        startSeconds = Math.max(0, offsetSeconds - 60)
+        // End: scheduled duration + 5 minutes after scheduled end
+        endSeconds = Math.min(
+          uploadVideoPreview.duration_seconds,
+          offsetSeconds + scheduledDurationSeconds + 300
+        )
+      } else {
+        // Recording started AFTER scheduled time (late start)
+        // Start: beginning of video (already late)
+        startSeconds = 0
+        // End: remaining scheduled time + 5 min buffer
+        // If scheduled was 180 min and we started 10 min late, we have 170 min left
+        const remainingScheduledTime = scheduledDurationSeconds + offsetSeconds // offsetSeconds is negative
+        endSeconds = Math.min(
+          uploadVideoPreview.duration_seconds,
+          Math.max(0, remainingScheduledTime) + 300
+        )
+      }
 
       setUploadStartTime(formatSecondsToTime(startSeconds))
       setUploadEndTime(formatSecondsToTime(endSeconds))
