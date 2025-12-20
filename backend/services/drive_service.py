@@ -96,10 +96,41 @@ class DriveService:
         logger.info(f"[DRIVE] Looking up day number for Session {session_code} on {meeting_date}")
 
         try:
+            # First, get spreadsheet metadata to find available sheet names
+            spreadsheet_meta = self.sheets.spreadsheets().get(
+                spreadsheetId=self.SCHEDULE_SPREADSHEET_ID,
+                fields="sheets.properties.title"
+            ).execute()
+
+            available_sheets = [s['properties']['title'] for s in spreadsheet_meta.get('sheets', [])]
+            logger.info(f"[DRIVE] Available sheets in schedule spreadsheet: {available_sheets}")
+
+            # Find the right sheet - try configured name first, then look for alternatives
+            sheet_name = None
+            if self.SCHEDULE_TAB_NAME in available_sheets:
+                sheet_name = self.SCHEDULE_TAB_NAME
+            else:
+                # Try to find a sheet that might contain schedules
+                for name in available_sheets:
+                    name_lower = name.lower()
+                    if 'schedule' in name_lower or 'session' in name_lower or session_code in name:
+                        sheet_name = name
+                        logger.info(f"[DRIVE] Using fallback sheet: {sheet_name}")
+                        break
+
+                # If still not found, use the first sheet
+                if not sheet_name and available_sheets:
+                    sheet_name = available_sheets[0]
+                    logger.info(f"[DRIVE] Using first sheet as fallback: {sheet_name}")
+
+            if not sheet_name:
+                logger.error("[DRIVE] No sheets found in schedule spreadsheet")
+                return None
+
             # Read the schedule spreadsheet
             result = self.sheets.spreadsheets().values().get(
                 spreadsheetId=self.SCHEDULE_SPREADSHEET_ID,
-                range=f"'{self.SCHEDULE_TAB_NAME}'!A:Z"
+                range=f"'{sheet_name}'!A:Z"
             ).execute()
 
             rows = result.get("values", [])
