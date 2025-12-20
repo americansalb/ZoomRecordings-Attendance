@@ -309,57 +309,86 @@ export default function RecordingsPage() {
     if (previewData?.detected_start_time && previewData?.detected_duration) {
       const scheduledStart = new Date(previewData.detected_start_time)
       const recordingStart = new Date(selectedRecording.start_time)
-
-      // Calculate offset: how many seconds into the video does the scheduled time start?
-      // Positive = recording started before scheduled time
-      // Negative = recording started after scheduled time (late start)
-      const offsetSeconds = (scheduledStart.getTime() - recordingStart.getTime()) / 1000
       const scheduledDurationSeconds = previewData.detected_duration * 60
 
-      let startSeconds: number
-      let endSeconds: number
+      console.log('Auto-trim debug:', {
+        scheduledStart: scheduledStart.toISOString(),
+        recordingStart: recordingStart.toISOString(),
+        detected_start_time: previewData.detected_start_time,
+        recording_start_time: selectedRecording.start_time,
+        detected_duration: previewData.detected_duration,
+        video_duration: uploadVideoPreview.duration_seconds
+      })
 
-      if (offsetSeconds >= 0) {
-        // Recording started BEFORE scheduled time
-        // Start: 1 minute before scheduled start
-        startSeconds = Math.max(0, offsetSeconds - 60)
-        // End: scheduled duration + 5 minutes after scheduled end
-        endSeconds = Math.min(
-          uploadVideoPreview.duration_seconds,
-          offsetSeconds + scheduledDurationSeconds + 300
-        )
-      } else {
-        // Recording started AFTER scheduled time (late start)
-        // Start: beginning of video (already late)
-        startSeconds = 0
-        // End: remaining scheduled time + 5 min buffer
-        // If scheduled was 180 min and we started 10 min late, we have 170 min left
-        const remainingScheduledTime = scheduledDurationSeconds + offsetSeconds // offsetSeconds is negative
-        endSeconds = Math.min(
-          uploadVideoPreview.duration_seconds,
-          Math.max(0, remainingScheduledTime) + 300
-        )
+      // Compare only time-of-day to avoid date/timezone issues with recurring meetings
+      // The scheduled start time and recording start time should be on the same day
+      // but Zoom might return different date representations for recurring meetings
+      const getTimeOfDaySeconds = (date: Date): number => {
+        return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds()
+      }
+
+      const scheduledTimeOfDay = getTimeOfDaySeconds(scheduledStart)
+      const recordingTimeOfDay = getTimeOfDaySeconds(recordingStart)
+
+      console.log('Auto-trim time-of-day:', {
+        scheduledTimeOfDay: `${Math.floor(scheduledTimeOfDay/3600)}:${Math.floor((scheduledTimeOfDay%3600)/60).toString().padStart(2,'0')}`,
+        recordingTimeOfDay: `${Math.floor(recordingTimeOfDay/3600)}:${Math.floor((recordingTimeOfDay%3600)/60).toString().padStart(2,'0')}`
+      })
+
+      // Calculate offset: how many seconds into the video does the scheduled time start?
+      // If scheduled is at 10:00 and recording started at 9:55, offset = 5 minutes = 300 seconds
+      // If scheduled is at 10:00 and recording started at 10:02, offset = -2 minutes (recording was late)
+      let offsetSeconds = scheduledTimeOfDay - recordingTimeOfDay
+
+      // Handle edge case: if offset is very negative (more than 12 hours),
+      // it might be due to midnight crossing - adjust by 24 hours
+      if (offsetSeconds < -43200) {
+        offsetSeconds += 86400
+      } else if (offsetSeconds > 43200) {
+        offsetSeconds -= 86400
+      }
+
+      console.log('Auto-trim calculated offset:', offsetSeconds, 'seconds')
+
+      // Sanity check: offset should be reasonable (within 30 minutes)
+      // Recording typically starts 0-15 min before scheduled time
+      if (offsetSeconds < -1800 || offsetSeconds > 1800) {
+        console.warn('Auto-trim: Offset seems unreasonable, using simple defaults.')
+        // Default: start at 0, end at scheduled duration + 5 min or video end
+        setUploadStartTime('0:00')
+        const defaultEnd = Math.min(uploadVideoPreview.duration_seconds, scheduledDurationSeconds + 300)
+        setUploadEndTime(formatSecondsToTime(defaultEnd))
+        return
+      }
+
+      // Start: 1 minute before scheduled start (but not before 0)
+      const startSeconds = Math.max(0, offsetSeconds - 60)
+
+      // End: scheduled duration + 5 minutes after scheduled end (but not past video)
+      const endSeconds = Math.min(
+        uploadVideoPreview.duration_seconds,
+        offsetSeconds + scheduledDurationSeconds + 300
+      )
+
+      // Final sanity check
+      if (endSeconds <= startSeconds || endSeconds <= 0) {
+        console.warn('Auto-trim: Invalid times calculated. Using defaults.')
+        setUploadStartTime('0:00')
+        setUploadEndTime(formatSecondsToTime(uploadVideoPreview.duration_seconds))
+        return
       }
 
       setUploadStartTime(formatSecondsToTime(startSeconds))
       setUploadEndTime(formatSecondsToTime(endSeconds))
 
-      console.log(`Auto-trim: offset=${offsetSeconds}s, start=${startSeconds}s, end=${endSeconds}s`)
+      console.log(`Auto-trim result: start=${formatSecondsToTime(startSeconds)}, end=${formatSecondsToTime(endSeconds)}`)
       return
     }
 
-    // Fallback to API (which currently doesn't work well)
-    try {
-      const autoTrim = await uploadApi.getAutoTrimTimes(
-        previewData?.session_code || '',
-        meetingDate,
-        uploadVideoPreview.duration_seconds
-      )
-      setUploadStartTime(formatSecondsToTime(autoTrim.start_time))
-      setUploadEndTime(formatSecondsToTime(autoTrim.end_time))
-    } catch (error) {
-      console.error('Error calculating auto-trim:', error)
-    }
+    // No schedule detected - use full video
+    console.warn('Auto-trim: No schedule detected. Using full video.')
+    setUploadStartTime('0:00')
+    setUploadEndTime(formatSecondsToTime(uploadVideoPreview.duration_seconds))
   }
 
   // Start the upload process
