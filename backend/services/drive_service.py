@@ -29,7 +29,7 @@ class DriveService:
 
     # Schedule spreadsheet for looking up day numbers
     SCHEDULE_SPREADSHEET_ID = "1CTpisCaJVUxZqrAShjAXM3cCueRiRHqBc3wAqmaXyeg"
-    SCHEDULE_TAB_NAME = "All Official AALB Schedules"
+    SCHEDULE_TAB_NAME = "All Official AALB Schedules (PASTE ROWS ONLY)"
 
     def __init__(self):
         self._drive_service = None
