@@ -355,11 +355,12 @@ export default function RecordingsPage() {
         offsetSeconds -= 86400
       }
 
-      console.log('Auto-trim calculated offset:', offsetSeconds, 'seconds')
+      console.log('Auto-trim calculated offset:', offsetSeconds, 'seconds', `(${Math.floor(offsetSeconds/60)} minutes)`)
 
-      // Sanity check: offset should be reasonable (within 30 minutes)
-      // Recording typically starts 0-15 min before scheduled time
-      if (offsetSeconds < -1800 || offsetSeconds > 1800) {
+      // Sanity check: offset should be reasonable
+      // - Positive offset up to 4 hours (14400s): people can join hours early
+      // - Negative offset up to 30 min (-1800s): recording started slightly late
+      if (offsetSeconds < -1800 || offsetSeconds > 14400) {
         console.warn('Auto-trim: Offset seems unreasonable, using simple defaults.')
         // Default: start at 0, end at scheduled duration + 5 min or video end
         setUploadStartTime('0:00')
