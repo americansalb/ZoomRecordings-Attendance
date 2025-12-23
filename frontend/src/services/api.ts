@@ -156,13 +156,14 @@ export const attendanceApi = {
     }
   },
 
-  process: async (meetingId: string, recordingTitle: string, meetingDate: string, meetingDurationMinutes?: number, meetingStartTime?: string) => {
+  process: async (meetingId: string, recordingTitle: string, meetingDate: string, meetingDurationMinutes?: number, meetingStartTime?: string, numberOfSegments?: number) => {
     const { data } = await api.post('/attendance/process', {
       meeting_id: meetingId,
       recording_title: recordingTitle,
       meeting_date: meetingDate,
       meeting_duration_minutes: meetingDurationMinutes || undefined,
       meeting_start_time: meetingStartTime || undefined,
+      number_of_segments: numberOfSegments || undefined,
     })
     return data
   },
@@ -335,6 +336,227 @@ export const mappingsApi = {
   getRoster: async (sessionCode: string) => {
     const { data } = await api.get(`/mappings/roster/${sessionCode}`)
     return data as { roster: RosterStudent[]; total: number; session_code: string }
+  },
+}
+
+// Proctoring Types
+export interface ProctorJobStatus {
+  job_id: string
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  progress: number
+  message: string
+  result?: ProctorResult
+  error?: string
+}
+
+export interface ProctorResult {
+  recording_id: string
+  session_code: string
+  meeting_date: string
+  total_duration_minutes: number
+  frames_analyzed: number
+  report_path: string
+  screenshots_dir: string
+  participants: ProctorParticipantResult[]
+}
+
+export interface ProctorParticipantResult {
+  name: string
+  visibility_percentage: number
+  violation_count: number
+  total_violation_minutes: number
+  issues: Record<string, number>
+}
+
+export interface ProctorWarningDocument {
+  success: boolean
+  has_violations: boolean
+  participant_name: string
+  session_code?: string
+  meeting_date?: string
+  meeting_duration_minutes?: number
+  visibility_percentage?: number
+  total_violation_minutes?: number
+  violation_count?: number
+  violations?: Array<{
+    type: string
+    start_time: string
+    end_time: string
+    duration_minutes: number
+  }>
+  screenshots?: Array<{
+    timestamp: string
+    data: string
+    filename: string
+  }>
+  warning_text?: string
+  message?: string
+}
+
+// Proctoring API
+export const proctorApi = {
+  startProcessing: async (
+    meetingId: string,
+    recordingTitle: string,
+    sessionCode: string,
+    meetingDate: string,
+    videoUrl: string,
+    participantNames: string[],
+    gridLayout?: [number, number],
+    sampleInterval?: number
+  ) => {
+    const { data } = await api.post('/proctor/process', {
+      meeting_id: meetingId,
+      recording_title: recordingTitle,
+      session_code: sessionCode,
+      meeting_date: meetingDate,
+      video_url: videoUrl,
+      participant_names: participantNames,
+      grid_layout: gridLayout || null,
+      sample_interval: sampleInterval || 30.0,
+    })
+    return data as { success: boolean; job_id: string; message: string }
+  },
+
+  getJobStatus: async (jobId: string) => {
+    const { data } = await api.get(`/proctor/status/${jobId}`)
+    return data as ProctorJobStatus
+  },
+
+  getJobResults: async (jobId: string) => {
+    const { data } = await api.get(`/proctor/results/${jobId}`)
+    return data as { success: boolean; job_id: string; result: ProctorResult }
+  },
+
+  generateWarning: async (jobId: string, participantName: string, minViolationMinutes?: number) => {
+    const { data } = await api.post('/proctor/warning', {
+      job_id: jobId,
+      participant_name: participantName,
+      min_violation_minutes: minViolationMinutes || 1.0,
+    })
+    return data as ProctorWarningDocument
+  },
+
+  listJobs: async () => {
+    const { data } = await api.get('/proctor/jobs')
+    return data as {
+      jobs: Array<{
+        job_id: string
+        status: string
+        progress: number
+        message: string
+        session_code: string
+        meeting_date: string
+      }>
+      total: number
+    }
+  },
+}
+
+// Video Upload Types
+export interface VideoPreviewResponse {
+  duration_seconds: number
+  duration_formatted: string
+  width?: number
+  height?: number
+  size_bytes?: number
+}
+
+export interface AutoTrimResponse {
+  start_time: number
+  end_time: number
+  scheduled_start?: string
+  scheduled_end?: string
+  message: string
+}
+
+export interface UploadJobStatus {
+  job_id: string
+  status: 'pending' | 'downloading' | 'trimming' | 'uploading' | 'completed' | 'failed'
+  progress: number
+  message: string
+  result?: {
+    file_id: string
+    file_name: string
+    web_view_link: string
+    session_code: string
+    day_number: number
+    view_type: string
+    trimmed: boolean
+    start_time?: number
+    end_time?: number
+  }
+  error?: string
+}
+
+// Video Upload API
+export const uploadApi = {
+  previewVideo: async (videoUrl: string, meetingId: string) => {
+    const { data } = await api.post('/upload/preview', {
+      video_url: videoUrl,
+      meeting_id: meetingId,
+    })
+    return data as VideoPreviewResponse
+  },
+
+  getAutoTrimTimes: async (sessionCode: string, meetingDate: string, videoDurationSeconds: number) => {
+    const { data } = await api.post('/upload/auto-trim', {
+      session_code: sessionCode,
+      meeting_date: meetingDate,
+      video_duration_seconds: videoDurationSeconds,
+    })
+    return data as AutoTrimResponse
+  },
+
+  startUpload: async (
+    meetingId: string,
+    recordingTitle: string,
+    sessionCode: string,
+    meetingDate: string,
+    videoUrl: string,
+    viewType: 'gallery' | 'speaker',
+    startTime?: number,
+    endTime?: number,
+    dayNumber?: number
+  ) => {
+    const { data } = await api.post('/upload/start', {
+      meeting_id: meetingId,
+      recording_title: recordingTitle,
+      session_code: sessionCode,
+      meeting_date: meetingDate,
+      video_url: videoUrl,
+      view_type: viewType,
+      start_time: startTime,
+      end_time: endTime,
+      day_number: dayNumber,
+    })
+    return data as { success: boolean; job_id: string; message: string }
+  },
+
+  getJobStatus: async (jobId: string) => {
+    const { data } = await api.get(`/upload/status/${jobId}`)
+    return data as UploadJobStatus
+  },
+
+  getDayNumber: async (sessionCode: string, meetingDate: string) => {
+    const { data } = await api.get(`/upload/day-number/${sessionCode}/${encodeURIComponent(meetingDate)}`)
+    return data as { session_code: string; meeting_date: string; day_number: number; found: boolean }
+  },
+
+  listJobs: async () => {
+    const { data } = await api.get('/upload/jobs')
+    return data as {
+      jobs: Array<{
+        job_id: string
+        status: string
+        progress: number
+        message: string
+        session_code: string
+        view_type: string
+        meeting_date: string
+      }>
+      total: number
+    }
   },
 }
 

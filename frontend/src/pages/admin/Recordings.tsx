@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { accountsApi, recordingsApi, attendanceApi, Recording, Participant } from '../../services/api'
+import { accountsApi, recordingsApi, attendanceApi, proctorApi, uploadApi, Recording, Participant, RecordingFile, ProctorJobStatus, ProctorResult, UploadJobStatus, VideoPreviewResponse } from '../../services/api'
 
 export default function RecordingsPage() {
   const queryClient = useQueryClient()
@@ -12,6 +12,7 @@ export default function RecordingsPage() {
   )
   const [meetingDurationMinutes, setMeetingDurationMinutes] = useState<number | undefined>(undefined)
   const [scheduledStartTime, setScheduledStartTime] = useState<string>('') // Empty = use Zoom's scheduled time
+  const [numberOfSegments, setNumberOfSegments] = useState<number | undefined>(undefined)
   const [searchTerm, setSearchTerm] = useState('')
   const [previewData, setPreviewData] = useState<{
     session_code: string | null
@@ -26,6 +27,26 @@ export default function RecordingsPage() {
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processResult, setProcessResult] = useState<any>(null)
+
+  // Proctoring state
+  const [activeMode, setActiveMode] = useState<'attendance' | 'proctoring' | 'upload'>('attendance')
+  const [selectedVideoFile, setSelectedVideoFile] = useState<RecordingFile | null>(null)
+  const [proctorJobId, setProctorJobId] = useState<string | null>(null)
+  const [proctorJobStatus, setProctorJobStatus] = useState<ProctorJobStatus | null>(null)
+  const [proctorResult, setProctorResult] = useState<ProctorResult | null>(null)
+  const [isProctoring, setIsProctoring] = useState(false)
+  const [sampleInterval, setSampleInterval] = useState<number>(30)
+
+  // Upload state
+  const [uploadVideoPreview, setUploadVideoPreview] = useState<VideoPreviewResponse | null>(null)
+  const [uploadViewType, setUploadViewType] = useState<'gallery' | 'speaker'>('gallery')
+  const [uploadStartTime, setUploadStartTime] = useState<string>('0:00')
+  const [uploadEndTime, setUploadEndTime] = useState<string>('')
+  const [uploadDayNumber, setUploadDayNumber] = useState<number | undefined>(undefined)
+  const [uploadJobId, setUploadJobId] = useState<string | null>(null)
+  const [uploadJobStatus, setUploadJobStatus] = useState<UploadJobStatus | null>(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false)
 
   // Fetch users from Zoom account
   const { data: usersData } = useQuery({
@@ -89,7 +110,8 @@ export default function RecordingsPage() {
         selectedRecording.topic,
         meetingDate,
         meetingDurationMinutes,
-        startTimeISO
+        startTimeISO,
+        numberOfSegments
       )
     },
     onSuccess: (data) => {
@@ -102,6 +124,17 @@ export default function RecordingsPage() {
     setSelectedRecording(recording)
     setPreviewData(null)
     setProcessResult(null)
+    setSelectedVideoFile(null)
+    setProctorJobId(null)
+    setProctorJobStatus(null)
+    setProctorResult(null)
+    // Reset upload state
+    setUploadVideoPreview(null)
+    setUploadJobId(null)
+    setUploadJobStatus(null)
+    setUploadStartTime('0:00')
+    setUploadEndTime('')
+    setUploadDayNumber(undefined)
 
     // Extract date from recording start time for default
     const recordingDate = new Date(recording.start_time)
@@ -111,6 +144,102 @@ export default function RecordingsPage() {
 
     // Auto-preview
     previewMutation.mutate(recording)
+
+    // Auto-select gallery view video if available
+    if (recording.recording_files) {
+      const galleryView = recording.recording_files.find(
+        f => f.recording_type === 'gallery_view' || f.recording_type === 'shared_screen_with_gallery_view'
+      )
+      if (galleryView) {
+        setSelectedVideoFile(galleryView)
+      } else {
+        // Fallback to first MP4 file
+        const mp4File = recording.recording_files.find(f => f.file_type === 'MP4')
+        if (mp4File) setSelectedVideoFile(mp4File)
+      }
+    }
+  }
+
+  // Poll for proctor job status
+  useEffect(() => {
+    if (!proctorJobId || proctorJobStatus?.status === 'completed' || proctorJobStatus?.status === 'failed') {
+      return
+    }
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await proctorApi.getJobStatus(proctorJobId)
+        setProctorJobStatus(status)
+
+        if (status.status === 'completed' && status.result) {
+          setProctorResult(status.result)
+          setIsProctoring(false)
+        } else if (status.status === 'failed') {
+          setIsProctoring(false)
+        }
+      } catch (error) {
+        console.error('Error polling proctor status:', error)
+      }
+    }, 2000) // Poll every 2 seconds
+
+    return () => clearInterval(pollInterval)
+  }, [proctorJobId, proctorJobStatus?.status])
+
+  // Poll for upload job status
+  useEffect(() => {
+    if (!uploadJobId || uploadJobStatus?.status === 'completed' || uploadJobStatus?.status === 'failed') {
+      return
+    }
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await uploadApi.getJobStatus(uploadJobId)
+        setUploadJobStatus(status)
+
+        if (status.status === 'completed' || status.status === 'failed') {
+          setIsUploading(false)
+        }
+      } catch (error) {
+        console.error('Error polling upload status:', error)
+      }
+    }, 2000) // Poll every 2 seconds
+
+    return () => clearInterval(pollInterval)
+  }, [uploadJobId, uploadJobStatus?.status])
+
+  const handleStartProctoring = async () => {
+    if (!selectedRecording || !selectedVideoFile || !previewData?.session_code) return
+
+    setIsProctoring(true)
+    setProctorResult(null)
+    setProctorJobStatus(null)
+
+    try {
+      // Get participant names from preview
+      const participantNames = previewData.participants.map(p => p.name)
+
+      const response = await proctorApi.startProcessing(
+        selectedRecording.id,
+        selectedRecording.topic,
+        previewData.session_code,
+        meetingDate,
+        selectedVideoFile.download_url,
+        participantNames,
+        undefined, // auto-detect grid
+        sampleInterval
+      )
+
+      setProctorJobId(response.job_id)
+      setProctorJobStatus({
+        job_id: response.job_id,
+        status: 'pending',
+        progress: 0,
+        message: response.message
+      })
+    } catch (error) {
+      console.error('Error starting proctoring:', error)
+      setIsProctoring(false)
+    }
   }
 
   const handleProcess = async () => {
@@ -119,6 +248,190 @@ export default function RecordingsPage() {
       await processMutation.mutateAsync()
     } finally {
       setIsProcessing(false)
+    }
+  }
+
+  // Helper: Parse time string to seconds
+  const parseTimeToSeconds = (timeStr: string): number => {
+    const parts = timeStr.split(':').map(p => parseInt(p) || 0)
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    } else if (parts.length === 2) {
+      return parts[0] * 60 + parts[1]
+    }
+    return parseInt(timeStr) || 0
+  }
+
+  // Helper: Format seconds to time string
+  const formatSecondsToTime = (seconds: number): string => {
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = Math.floor(seconds % 60)
+    if (h > 0) {
+      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+    }
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
+
+  // Load video preview for upload
+  const handleLoadVideoPreview = async () => {
+    if (!selectedVideoFile || !selectedRecording) return
+
+    setIsLoadingPreview(true)
+    try {
+      const preview = await uploadApi.previewVideo(selectedVideoFile.download_url, selectedRecording.id)
+      setUploadVideoPreview(preview)
+      setUploadEndTime(preview.duration_formatted)
+
+      // Try to get day number
+      if (previewData?.session_code) {
+        try {
+          console.log(`[Upload] Getting day number for Session ${previewData.session_code} on ${meetingDate}`)
+          const dayInfo = await uploadApi.getDayNumber(previewData.session_code, meetingDate)
+          console.log('[Upload] Day number response:', dayInfo)
+          if (dayInfo.found) {
+            setUploadDayNumber(dayInfo.day_number)
+            console.log(`[Upload] Set day number to ${dayInfo.day_number}`)
+          } else {
+            console.warn('[Upload] Day number not found in schedule, defaulting to 0')
+            setUploadDayNumber(0)
+          }
+        } catch (e) {
+          console.error('[Upload] Error getting day number:', e)
+          setUploadDayNumber(0)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading video preview:', error)
+    } finally {
+      setIsLoadingPreview(false)
+    }
+  }
+
+  // Apply auto-trim times based on schedule
+  const handleAutoTrim = async () => {
+    if (!uploadVideoPreview || !selectedRecording) return
+
+    // Use the detected schedule from Zoom (previewData) instead of external spreadsheet
+    if (previewData?.detected_start_time && previewData?.detected_duration) {
+      const scheduledStart = new Date(previewData.detected_start_time)
+      const recordingStart = new Date(selectedRecording.start_time)
+      const scheduledDurationSeconds = previewData.detected_duration * 60
+
+      console.log('Auto-trim debug:', {
+        scheduledStart: scheduledStart.toISOString(),
+        recordingStart: recordingStart.toISOString(),
+        detected_start_time: previewData.detected_start_time,
+        recording_start_time: selectedRecording.start_time,
+        detected_duration: previewData.detected_duration,
+        video_duration: uploadVideoPreview.duration_seconds
+      })
+
+      // Compare only time-of-day to avoid date/timezone issues with recurring meetings
+      // The scheduled start time and recording start time should be on the same day
+      // but Zoom might return different date representations for recurring meetings
+      const getTimeOfDaySeconds = (date: Date): number => {
+        return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds()
+      }
+
+      const scheduledTimeOfDay = getTimeOfDaySeconds(scheduledStart)
+      const recordingTimeOfDay = getTimeOfDaySeconds(recordingStart)
+
+      console.log('Auto-trim time-of-day:', {
+        scheduledTimeOfDay: `${Math.floor(scheduledTimeOfDay/3600)}:${Math.floor((scheduledTimeOfDay%3600)/60).toString().padStart(2,'0')}`,
+        recordingTimeOfDay: `${Math.floor(recordingTimeOfDay/3600)}:${Math.floor((recordingTimeOfDay%3600)/60).toString().padStart(2,'0')}`
+      })
+
+      // Calculate offset: how many seconds into the video does the scheduled time start?
+      // If scheduled is at 10:00 and recording started at 9:55, offset = 5 minutes = 300 seconds
+      // If scheduled is at 10:00 and recording started at 10:02, offset = -2 minutes (recording was late)
+      let offsetSeconds = scheduledTimeOfDay - recordingTimeOfDay
+
+      // Handle edge case: if offset is very negative (more than 12 hours),
+      // it might be due to midnight crossing - adjust by 24 hours
+      if (offsetSeconds < -43200) {
+        offsetSeconds += 86400
+      } else if (offsetSeconds > 43200) {
+        offsetSeconds -= 86400
+      }
+
+      console.log('Auto-trim calculated offset:', offsetSeconds, 'seconds', `(${Math.floor(offsetSeconds/60)} minutes)`)
+
+      // Sanity check: offset should be reasonable
+      // - Positive offset up to 4 hours (14400s): people can join hours early
+      // - Negative offset up to 30 min (-1800s): recording started slightly late
+      if (offsetSeconds < -1800 || offsetSeconds > 14400) {
+        console.warn('Auto-trim: Offset seems unreasonable, using simple defaults.')
+        // Default: start at 0, end at scheduled duration + 5 min or video end
+        setUploadStartTime('0:00')
+        const defaultEnd = Math.min(uploadVideoPreview.duration_seconds, scheduledDurationSeconds + 300)
+        setUploadEndTime(formatSecondsToTime(defaultEnd))
+        return
+      }
+
+      // Start: 1 minute before scheduled start (but not before 0)
+      const startSeconds = Math.max(0, offsetSeconds - 60)
+
+      // End: scheduled duration + 5 minutes after scheduled end (but not past video)
+      const endSeconds = Math.min(
+        uploadVideoPreview.duration_seconds,
+        offsetSeconds + scheduledDurationSeconds + 300
+      )
+
+      // Final sanity check
+      if (endSeconds <= startSeconds || endSeconds <= 0) {
+        console.warn('Auto-trim: Invalid times calculated. Using defaults.')
+        setUploadStartTime('0:00')
+        setUploadEndTime(formatSecondsToTime(uploadVideoPreview.duration_seconds))
+        return
+      }
+
+      setUploadStartTime(formatSecondsToTime(startSeconds))
+      setUploadEndTime(formatSecondsToTime(endSeconds))
+
+      console.log(`Auto-trim result: start=${formatSecondsToTime(startSeconds)}, end=${formatSecondsToTime(endSeconds)}`)
+      return
+    }
+
+    // No schedule detected - use full video
+    console.warn('Auto-trim: No schedule detected. Using full video.')
+    setUploadStartTime('0:00')
+    setUploadEndTime(formatSecondsToTime(uploadVideoPreview.duration_seconds))
+  }
+
+  // Start the upload process
+  const handleStartUpload = async () => {
+    if (!selectedRecording || !selectedVideoFile || !previewData?.session_code) return
+
+    setIsUploading(true)
+    setUploadJobStatus(null)
+
+    try {
+      const startSeconds = parseTimeToSeconds(uploadStartTime)
+      const endSeconds = uploadEndTime ? parseTimeToSeconds(uploadEndTime) : undefined
+
+      const response = await uploadApi.startUpload(
+        selectedRecording.id,
+        selectedRecording.topic,
+        previewData.session_code,
+        meetingDate,
+        selectedVideoFile.download_url,
+        uploadViewType,
+        startSeconds > 0 ? startSeconds : undefined,
+        endSeconds,
+        uploadDayNumber
+      )
+
+      setUploadJobId(response.job_id)
+      setUploadJobStatus({
+        job_id: response.job_id,
+        status: 'pending',
+        progress: 0,
+        message: response.message
+      })
+    } catch (error) {
+      console.error('Error starting upload:', error)
+      setIsUploading(false)
     }
   }
 
@@ -262,6 +575,43 @@ export default function RecordingsPage() {
                 </p>
               </div>
 
+              {/* Mode Switcher */}
+              <div className="flex border-b border-gray-200">
+                <button
+                  onClick={() => setActiveMode('attendance')}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeMode === 'attendance'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Attendance
+                </button>
+                <button
+                  onClick={() => setActiveMode('proctoring')}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeMode === 'proctoring'
+                      ? 'border-purple-500 text-purple-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Video Proctoring
+                </button>
+                <button
+                  onClick={() => setActiveMode('upload')}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeMode === 'upload'
+                      ? 'border-green-500 text-green-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Trim & Upload
+                </button>
+              </div>
+
+              {/* ATTENDANCE MODE */}
+              {activeMode === 'attendance' && (
+                <>
               {/* Meeting Date Input */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -313,6 +663,27 @@ export default function RecordingsPage() {
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   Edit to override auto-detected duration.
+                </p>
+              </div>
+
+              {/* Time Segments Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Time Segments (optional)
+                </label>
+                <select
+                  className="input"
+                  value={numberOfSegments ?? ''}
+                  onChange={(e) => setNumberOfSegments(e.target.value ? parseInt(e.target.value) : undefined)}
+                >
+                  <option value="">No segmentation</option>
+                  <option value="2">2 segments</option>
+                  <option value="3">3 segments (e.g., hourly for 3hr meeting)</option>
+                  <option value="4">4 segments</option>
+                  <option value="6">6 segments (e.g., 30-min for 3hr meeting)</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Divide attendance into time segments (shows hour-by-hour breakdown in sheet)
                 </p>
               </div>
 
@@ -497,6 +868,472 @@ export default function RecordingsPage() {
                     Open Google Sheet
                   </a>
                 </div>
+              )}
+                </>
+              )}
+
+              {/* PROCTORING MODE */}
+              {activeMode === 'proctoring' && (
+                <>
+                  {/* Video File Selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Select Video File
+                    </label>
+                    {selectedRecording.recording_files && selectedRecording.recording_files.length > 0 ? (
+                      <select
+                        className="input"
+                        value={selectedVideoFile?.id || ''}
+                        onChange={(e) => {
+                          const file = selectedRecording.recording_files?.find(f => f.id === e.target.value)
+                          setSelectedVideoFile(file || null)
+                        }}
+                      >
+                        <option value="">Select a video file...</option>
+                        {selectedRecording.recording_files
+                          .filter(f => f.file_type === 'MP4')
+                          .map((file) => (
+                            <option key={file.id} value={file.id}>
+                              {file.recording_type.replace(/_/g, ' ')} ({(file.file_size / 1024 / 1024).toFixed(1)} MB)
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <p className="text-sm text-gray-500">No video files available</p>
+                    )}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Select "gallery view" for best face detection results
+                    </p>
+                  </div>
+
+                  {/* Sample Interval */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Sample Interval (seconds)
+                    </label>
+                    <select
+                      className="input"
+                      value={sampleInterval}
+                      onChange={(e) => setSampleInterval(parseInt(e.target.value))}
+                    >
+                      <option value="15">15 seconds (more detailed)</option>
+                      <option value="30">30 seconds (recommended)</option>
+                      <option value="60">60 seconds (faster)</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      How often to check for face visibility
+                    </p>
+                  </div>
+
+                  {/* Session Info */}
+                  {previewData && (
+                    <div className="p-3 bg-purple-50 rounded-lg">
+                      <p className="text-sm">
+                        <strong>Session:</strong>{' '}
+                        {previewData.session_code ? `Session ${previewData.session_code}` : 'No session code found'}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Participants:</strong> {previewData.participants.length}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Date:</strong> {meetingDate}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Start Proctoring Button */}
+                  {!proctorResult && !isProctoring && (
+                    <button
+                      onClick={handleStartProctoring}
+                      disabled={!selectedVideoFile || !previewData?.session_code || previewMutation.isPending}
+                      className="w-full btn bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50"
+                    >
+                      Start Video Proctoring
+                    </button>
+                  )}
+
+                  {!selectedVideoFile && (
+                    <p className="text-sm text-red-600">
+                      Please select a video file to proctor
+                    </p>
+                  )}
+
+                  {/* Proctoring Progress */}
+                  {proctorJobStatus && proctorJobStatus.status !== 'completed' && (
+                    <div className="p-4 bg-purple-50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-purple-900">
+                          {proctorJobStatus.message}
+                        </span>
+                        <span className="text-sm text-purple-600">
+                          {Math.round(proctorJobStatus.progress * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-purple-200 rounded-full h-2">
+                        <div
+                          className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${proctorJobStatus.progress * 100}%` }}
+                        />
+                      </div>
+                      {proctorJobStatus.status === 'failed' && proctorJobStatus.error && (
+                        <p className="text-sm text-red-600 mt-2">
+                          Error: {proctorJobStatus.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Proctoring Results */}
+                  {proctorResult && (
+                    <div className="space-y-4">
+                      <div className="p-4 bg-green-50 rounded-lg">
+                        <h3 className="font-medium text-green-800 mb-2">Proctoring Complete!</h3>
+                        <p className="text-sm text-green-700">
+                          Duration: {proctorResult.total_duration_minutes.toFixed(0)} minutes
+                        </p>
+                        <p className="text-sm text-green-700">
+                          Frames analyzed: {proctorResult.frames_analyzed}
+                        </p>
+                      </div>
+
+                      {/* Participant Results */}
+                      <div>
+                        <h3 className="font-medium text-gray-900 mb-2">
+                          Participant Visibility
+                        </h3>
+                        <div className="max-h-64 overflow-y-auto border rounded-lg">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Name</th>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Visibility</th>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Violations</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-200">
+                              {proctorResult.participants.map((p, idx) => (
+                                <tr
+                                  key={idx}
+                                  className={p.visibility_percentage < 80 ? 'bg-red-50' : p.visibility_percentage < 95 ? 'bg-yellow-50' : ''}
+                                >
+                                  <td className="px-3 py-2 text-sm">{p.name}</td>
+                                  <td className="px-3 py-2 text-sm">
+                                    <span className={`font-medium ${
+                                      p.visibility_percentage >= 95 ? 'text-green-600' :
+                                      p.visibility_percentage >= 80 ? 'text-yellow-600' : 'text-red-600'
+                                    }`}>
+                                      {p.visibility_percentage.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-sm">
+                                    {p.violation_count > 0 ? (
+                                      <span className="text-red-600">
+                                        {p.violation_count} ({p.total_violation_minutes.toFixed(1)} min)
+                                      </span>
+                                    ) : (
+                                      <span className="text-green-600">None</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Summary Stats */}
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="p-2 bg-green-100 rounded">
+                          <p className="text-2xl font-bold text-green-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage >= 95).length}
+                          </p>
+                          <p className="text-xs text-green-600">95%+ visible</p>
+                        </div>
+                        <div className="p-2 bg-yellow-100 rounded">
+                          <p className="text-2xl font-bold text-yellow-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage >= 80 && p.visibility_percentage < 95).length}
+                          </p>
+                          <p className="text-xs text-yellow-600">80-95% visible</p>
+                        </div>
+                        <div className="p-2 bg-red-100 rounded">
+                          <p className="text-2xl font-bold text-red-700">
+                            {proctorResult.participants.filter(p => p.visibility_percentage < 80).length}
+                          </p>
+                          <p className="text-xs text-red-600">&lt;80% visible</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* UPLOAD MODE */}
+              {activeMode === 'upload' && (
+                <>
+                  {/* Video File Selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Select Video File
+                    </label>
+                    {selectedRecording.recording_files && selectedRecording.recording_files.length > 0 ? (
+                      <select
+                        className="input"
+                        value={selectedVideoFile?.id || ''}
+                        onChange={(e) => {
+                          const file = selectedRecording.recording_files?.find(f => f.id === e.target.value)
+                          setSelectedVideoFile(file || null)
+                          setUploadVideoPreview(null) // Reset preview when file changes
+                        }}
+                      >
+                        <option value="">Select a video file...</option>
+                        {selectedRecording.recording_files
+                          .filter(f => f.file_type === 'MP4')
+                          .map((file) => (
+                            <option key={file.id} value={file.id}>
+                              {file.recording_type.replace(/_/g, ' ')} ({(file.file_size / 1024 / 1024).toFixed(1)} MB)
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <p className="text-sm text-gray-500">No video files available</p>
+                    )}
+                  </div>
+
+                  {/* View Type Selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Upload As
+                    </label>
+                    <select
+                      className="input"
+                      value={uploadViewType}
+                      onChange={(e) => setUploadViewType(e.target.value as 'gallery' | 'speaker')}
+                    >
+                      <option value="gallery">Gallery View</option>
+                      <option value="speaker">Speaker View</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      This determines the folder and filename
+                    </p>
+                  </div>
+
+                  {/* Load Preview Button */}
+                  {selectedVideoFile && !uploadVideoPreview && (
+                    <button
+                      onClick={handleLoadVideoPreview}
+                      disabled={isLoadingPreview}
+                      className="w-full btn bg-gray-600 hover:bg-gray-700 text-white disabled:opacity-50"
+                    >
+                      {isLoadingPreview ? 'Loading Video Info...' : 'Load Video Info'}
+                    </button>
+                  )}
+
+                  {/* Video Preview Info */}
+                  {uploadVideoPreview && (
+                    <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                      <h3 className="font-medium text-green-900 mb-2">Video Information</h3>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>
+                          <span className="text-green-700 font-medium">Duration:</span>
+                          <span className="text-green-900 ml-1">{uploadVideoPreview.duration_formatted}</span>
+                        </div>
+                        {uploadVideoPreview.width && uploadVideoPreview.height && (
+                          <div>
+                            <span className="text-green-700 font-medium">Resolution:</span>
+                            <span className="text-green-900 ml-1">{uploadVideoPreview.width}x{uploadVideoPreview.height}</span>
+                          </div>
+                        )}
+                        {uploadVideoPreview.size_bytes && (
+                          <div>
+                            <span className="text-green-700 font-medium">Size:</span>
+                            <span className="text-green-900 ml-1">{(uploadVideoPreview.size_bytes / 1024 / 1024).toFixed(1)} MB</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Trim Controls */}
+                  {uploadVideoPreview && (
+                    <>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Start Time
+                          </label>
+                          <input
+                            type="text"
+                            className="input"
+                            value={uploadStartTime}
+                            onChange={(e) => setUploadStartTime(e.target.value)}
+                            placeholder="0:00"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">Format: M:SS or H:MM:SS</p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            End Time
+                          </label>
+                          <input
+                            type="text"
+                            className="input"
+                            value={uploadEndTime}
+                            onChange={(e) => setUploadEndTime(e.target.value)}
+                            placeholder={uploadVideoPreview.duration_formatted}
+                          />
+                          <p className="text-xs text-gray-500 mt-1">Leave empty for full video</p>
+                        </div>
+                      </div>
+
+                      {/* Auto-Trim Button */}
+                      <button
+                        onClick={handleAutoTrim}
+                        className="w-full btn bg-blue-500 hover:bg-blue-600 text-white"
+                      >
+                        Auto-Trim (1 min before, 5 min after scheduled time)
+                      </button>
+                    </>
+                  )}
+
+                  {/* Day Number Override */}
+                  {uploadVideoPreview && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Day Number
+                        {uploadDayNumber !== undefined && (
+                          <span className="text-green-600 font-normal text-xs ml-1">
+                            (auto-detected: Day {uploadDayNumber})
+                          </span>
+                        )}
+                      </label>
+                      <input
+                        type="number"
+                        className="input"
+                        value={uploadDayNumber ?? ''}
+                        onChange={(e) => setUploadDayNumber(e.target.value ? parseInt(e.target.value) : undefined)}
+                        placeholder="0"
+                        min="0"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">
+                        Override if auto-detection is wrong
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Session Info */}
+                  {previewData && uploadVideoPreview && (
+                    <div className="p-3 bg-green-50 rounded-lg">
+                      <p className="text-sm">
+                        <strong>Session:</strong>{' '}
+                        {previewData.session_code ? `Session ${previewData.session_code}` : 'No session code found'}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Date:</strong> {meetingDate}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Day:</strong> {uploadDayNumber ?? 0}
+                      </p>
+                      <p className="text-sm">
+                        <strong>Folder:</strong> Session {previewData.session_code} / {uploadViewType === 'gallery' ? 'Gallery View' : 'Speaker View'}
+                      </p>
+                      <p className="text-sm text-gray-600 mt-1">
+                        <strong>Filename:</strong> Session {previewData.session_code} - Day {uploadDayNumber ?? 0} - {meetingDate.replace('/', '')} ({uploadViewType === 'gallery' ? 'Gallery View' : 'Speaker View'}).mp4
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Upload Button */}
+                  {uploadVideoPreview && !uploadJobStatus && (
+                    <button
+                      onClick={handleStartUpload}
+                      disabled={isUploading || !previewData?.session_code}
+                      className="w-full btn bg-green-600 hover:bg-green-700 text-white disabled:opacity-50"
+                    >
+                      {isUploading ? 'Starting Upload...' : 'Trim & Upload to Google Drive'}
+                    </button>
+                  )}
+
+                  {!previewData?.session_code && uploadVideoPreview && (
+                    <p className="text-sm text-red-600">
+                      Cannot upload: No session code found in recording title.
+                    </p>
+                  )}
+
+                  {/* Upload Progress */}
+                  {uploadJobStatus && uploadJobStatus.status !== 'completed' && uploadJobStatus.status !== 'failed' && (
+                    <div className="p-4 bg-green-50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-green-900">
+                          {uploadJobStatus.message}
+                        </span>
+                        <span className="text-sm text-green-600">
+                          {Math.round(uploadJobStatus.progress * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-green-200 rounded-full h-2">
+                        <div
+                          className="bg-green-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${uploadJobStatus.progress * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Upload Failed */}
+                  {uploadJobStatus?.status === 'failed' && (
+                    <div className="p-4 bg-red-50 rounded-lg">
+                      <h3 className="font-medium text-red-800 mb-2">Upload Failed</h3>
+                      <p className="text-sm text-red-700">
+                        {uploadJobStatus.error || uploadJobStatus.message}
+                      </p>
+                      <button
+                        onClick={() => {
+                          setUploadJobStatus(null)
+                          setUploadJobId(null)
+                        }}
+                        className="mt-2 text-sm text-red-600 hover:text-red-800"
+                      >
+                        Try Again
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Upload Complete */}
+                  {uploadJobStatus?.status === 'completed' && uploadJobStatus.result && (
+                    <div className="p-4 bg-green-50 rounded-lg">
+                      <h3 className="font-medium text-green-800 mb-2">Upload Complete!</h3>
+                      <p className="text-sm text-green-700 mb-1">
+                        <strong>File:</strong> {uploadJobStatus.result.file_name}
+                      </p>
+                      <p className="text-sm text-green-700 mb-2">
+                        <strong>Day:</strong> {uploadJobStatus.result.day_number}
+                      </p>
+                      {uploadJobStatus.result.trimmed && (
+                        <p className="text-sm text-green-700 mb-2">
+                          <strong>Trimmed:</strong> {formatSecondsToTime(uploadJobStatus.result.start_time || 0)} - {formatSecondsToTime(uploadJobStatus.result.end_time || 0)}
+                        </p>
+                      )}
+                      <a
+                        href={uploadJobStatus.result.web_view_link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block mt-2 text-blue-600 hover:text-blue-800"
+                      >
+                        Open in Google Drive
+                      </a>
+                      <button
+                        onClick={() => {
+                          setUploadJobStatus(null)
+                          setUploadJobId(null)
+                          setUploadVideoPreview(null)
+                        }}
+                        className="ml-4 text-sm text-gray-600 hover:text-gray-800"
+                      >
+                        Upload Another
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
