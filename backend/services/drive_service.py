@@ -139,9 +139,42 @@ class DriveService:
                 return None
 
             headers = rows[0] if rows else []
-            logger.info(f"[DRIVE] Schedule headers (first 10): {headers[:10]}")
+            logger.info(f"[DRIVE] Schedule has {len(rows)} rows, {len(headers)} columns")
+            logger.info(f"[DRIVE] Headers: {headers[:15]}")
 
-            # Try multiple matching strategies
+            # Log first few rows to understand structure
+            for i, row in enumerate(rows[:5]):
+                logger.info(f"[DRIVE] Row {i}: {row[:10] if len(row) > 10 else row}")
+
+            # SIMPLE APPROACH: Find all rows containing this session, count which one has our date
+            # This works regardless of spreadsheet structure
+            session_rows = []
+            for row_idx, row in enumerate(rows):
+                row_text = ' '.join(str(cell) for cell in row).lower()
+                # Check if this row mentions our session
+                if (f"session {session_code}".lower() in row_text or
+                    f"sess {session_code}".lower() in row_text or
+                    f" {session_code} " in f" {row_text} " or
+                    f"s{session_code}".lower() in row_text):
+                    session_rows.append((row_idx, row))
+
+            logger.info(f"[DRIVE] Found {len(session_rows)} rows mentioning Session {session_code}")
+
+            # Now find which row has our date and count its position
+            day_counter = 0
+            for row_idx, row in session_rows:
+                row_text = ' '.join(str(cell) for cell in row)
+                # Check each cell for date match
+                for cell in row:
+                    if self._dates_match(str(cell), meeting_date):
+                        logger.info(f"[DRIVE] Found day {day_counter} - row {row_idx} contains date {meeting_date}")
+                        self._schedule_cache[cache_key] = day_counter
+                        return day_counter
+                day_counter += 1
+
+            logger.warning(f"[DRIVE] Could not find date {meeting_date} in any of the {len(session_rows)} session rows")
+
+            # Fallback: Try original strategies
 
             # STRATEGY 1: Look for session code in headers (sessions as columns)
             session_col = None
