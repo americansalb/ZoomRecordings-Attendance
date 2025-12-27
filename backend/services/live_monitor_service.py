@@ -195,39 +195,62 @@ class LiveMonitorService:
             days_ahead: Number of days ahead to fetch (default 7)
         """
         scheduled = []
+        seen_ids = set()
+
+        logger.info(f"[SCHEDULE] Fetching scheduled meetings for next {days_ahead} days")
+        logger.info(f"[SCHEDULE] Checking {len(self.zoom_service.accounts)} Zoom accounts")
 
         for account in self.zoom_service.accounts.values():
             try:
+                logger.info(f"[SCHEDULE] Processing account: {account.name}")
                 users = await self.zoom_service.list_users(account.account_id)
+                logger.info(f"[SCHEDULE] Found {len(users)} users in {account.name}")
 
                 for user in users:
                     try:
-                        # Get upcoming/scheduled meetings
+                        # Get scheduled meetings (type=scheduled gets all scheduled, type=upcoming gets upcoming only)
                         response = await self.zoom_service._make_request(
                             "GET",
                             f"/users/{user['id']}/meetings",
                             account,
-                            params={"type": "upcoming", "page_size": 100}
+                            params={"type": "scheduled", "page_size": 100}
                         )
 
-                        for meeting in response.get("meetings", []):
+                        meetings = response.get("meetings", [])
+                        logger.info(f"[SCHEDULE] User {user.get('email')}: {len(meetings)} scheduled meetings")
+
+                        for meeting in meetings:
+                            # Skip if we've already seen this meeting
+                            meeting_id = str(meeting.get("id", ""))
+                            if meeting_id in seen_ids:
+                                continue
+                            seen_ids.add(meeting_id)
+
                             session = self._create_scheduled_session(meeting, user)
                             if session:
-                                # Filter by date range
-                                if session.start_time <= datetime.utcnow() + timedelta(days=days_ahead):
+                                # Filter by date range (next N days)
+                                now = datetime.utcnow()
+                                if session.start_time.tzinfo:
+                                    now = now.replace(tzinfo=session.start_time.tzinfo)
+
+                                future_limit = now + timedelta(days=days_ahead)
+
+                                # Include if start time is in the future (within range)
+                                if session.start_time >= now and session.start_time <= future_limit:
                                     scheduled.append(session)
+                                    logger.debug(f"[SCHEDULE] Added: {session.topic} at {session.start_time}")
 
                     except Exception as e:
-                        logger.debug(f"[SCHEDULE] Error fetching for {user.get('email')}: {e}")
+                        logger.warning(f"[SCHEDULE] Error fetching for {user.get('email')}: {e}")
 
             except Exception as e:
-                logger.warning(f"[SCHEDULE] Failed for {account.name}: {e}")
+                logger.error(f"[SCHEDULE] Failed for account {account.name}: {e}")
 
         # Sort by start time
         scheduled.sort(key=lambda s: s.start_time)
         self._scheduled_sessions = scheduled
 
-        logger.info(f"[SCHEDULE] Found {len(scheduled)} scheduled meetings")
+        logger.info(f"[SCHEDULE] Total scheduled meetings found: {len(scheduled)}")
         return scheduled
 
     async def _create_live_session(self, meeting_data: Dict, account) -> Optional[LiveSession]:
@@ -312,18 +335,37 @@ class LiveMonitorService:
             meeting_id = str(meeting_data.get("id", ""))
             topic = meeting_data.get("topic", "")
             session_code = self._extract_session_code(topic)
+            meeting_type = meeting_data.get("type", 0)
+
+            # Log meeting data for debugging
+            logger.debug(f"[SCHEDULE] Processing meeting: {topic} (type={meeting_type}, id={meeting_id})")
 
             start_time = None
-            if meeting_data.get("start_time"):
-                start_time = datetime.fromisoformat(
-                    meeting_data["start_time"].replace("Z", "+00:00")
-                )
+            start_time_str = meeting_data.get("start_time")
+
+            if start_time_str:
+                try:
+                    # Handle both formats: with Z and with offset
+                    if start_time_str.endswith("Z"):
+                        start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                    elif "+" in start_time_str or start_time_str.count("-") > 2:
+                        start_time = datetime.fromisoformat(start_time_str)
+                    else:
+                        # No timezone, assume UTC
+                        start_time = datetime.fromisoformat(start_time_str)
+                except Exception as e:
+                    logger.warning(f"[SCHEDULE] Could not parse start_time '{start_time_str}': {e}")
 
             if not start_time:
+                # For recurring meetings without start_time, skip
+                logger.debug(f"[SCHEDULE] Skipping meeting '{topic}' - no start_time")
                 return None
 
             # Determine status
-            now = datetime.utcnow().replace(tzinfo=start_time.tzinfo) if start_time.tzinfo else datetime.utcnow()
+            now = datetime.utcnow()
+            if start_time.tzinfo:
+                now = now.replace(tzinfo=start_time.tzinfo)
+
             duration = meeting_data.get("duration", 60)
             end_time = start_time + timedelta(minutes=duration)
 
@@ -346,7 +388,7 @@ class LiveMonitorService:
             )
 
         except Exception as e:
-            logger.error(f"[SCHEDULE] Error creating scheduled session: {e}")
+            logger.error(f"[SCHEDULE] Error creating scheduled session from {meeting_data}: {e}")
             return None
 
     async def _get_meeting_participants(self, meeting_id: str, account) -> List[LiveParticipant]:
