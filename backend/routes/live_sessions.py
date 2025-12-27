@@ -219,3 +219,30 @@ async def get_notification_config() -> Dict:
             "google_spaces_configured": bool(notification_service.google_spaces_webhook)
         }
     }
+
+
+@router.get("/scheduled")
+async def get_scheduled_sessions(days: int = 7) -> Dict:
+    """
+    Get all scheduled meetings for the calendar view.
+
+    Args:
+        days: Number of days ahead to fetch (default 7)
+
+    Returns:
+        List of scheduled sessions
+    """
+    try:
+        monitor = get_monitor()
+        sessions = await monitor.get_scheduled_meetings(days_ahead=days)
+
+        return {
+            "success": True,
+            "sessions": monitor.get_scheduled_sessions_summary(),
+            "total": len(sessions),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"[LIVE API] Error fetching scheduled sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

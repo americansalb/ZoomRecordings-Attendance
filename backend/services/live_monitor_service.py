@@ -70,6 +70,19 @@ class LiveSession:
         return self.student_count > 0 and not self.has_trainer
 
 
+@dataclass
+class ScheduledSession:
+    """Represents a scheduled Zoom meeting."""
+    meeting_id: str
+    topic: str
+    host_id: str
+    host_name: str
+    start_time: datetime
+    duration_minutes: int
+    session_code: Optional[str]
+    status: str  # waiting, started, finished
+
+
 class LiveMonitorService:
     """
     Service for monitoring active Zoom sessions and detecting trainer absence.
@@ -78,6 +91,7 @@ class LiveMonitorService:
     def __init__(self, zoom_service):
         self.zoom_service = zoom_service
         self._active_sessions: Dict[str, LiveSession] = {}
+        self._scheduled_sessions: List[ScheduledSession] = []
         self._alert_history: Dict[str, Dict[str, datetime]] = {}  # meeting_id -> {alert_type: sent_time}
         logger.info("LiveMonitorService initialized")
 
@@ -85,69 +99,138 @@ class LiveMonitorService:
         """
         Get all currently active Zoom meetings.
 
-        Uses Zoom Dashboard API to get live meetings.
+        Uses multiple strategies to find live meetings.
         """
+        live_sessions = []
+        seen_meeting_ids = set()
+
+        # Strategy 1: Try Dashboard API first (requires Business/Education plan)
         try:
-            # Use Zoom's Dashboard Meetings API
-            # GET /metrics/meetings?type=live
-            response = await self.zoom_service.api_request(
-                "GET",
-                "/metrics/meetings",
-                params={"type": "live", "page_size": 100}
-            )
-
-            meetings = response.get("meetings", [])
-            logger.info(f"[LIVE] Found {len(meetings)} active meetings")
-
-            live_sessions = []
-            for meeting in meetings:
-                session = await self._create_live_session(meeting)
-                if session:
+            dashboard_sessions = await self._get_live_from_dashboard()
+            for session in dashboard_sessions:
+                if session.meeting_id not in seen_meeting_ids:
                     live_sessions.append(session)
+                    seen_meeting_ids.add(session.meeting_id)
                     self._active_sessions[session.meeting_id] = session
-
-            return live_sessions
-
+            logger.info(f"[LIVE] Dashboard API returned {len(dashboard_sessions)} meetings")
         except Exception as e:
-            logger.error(f"[LIVE] Error fetching live meetings: {e}")
-            # Fallback: try to get meetings from recordings that are in progress
-            return await self._get_live_meetings_fallback()
+            logger.warning(f"[LIVE] Dashboard API failed (may require Business plan): {e}")
 
-    async def _get_live_meetings_fallback(self) -> List[LiveSession]:
-        """
-        Fallback method to detect live meetings when Dashboard API is unavailable.
-        Uses the meetings list API to find meetings currently in progress.
-        """
+        # Strategy 2: Check each user for live meetings
         try:
-            # Get all users and check their ongoing meetings
-            users = await self.zoom_service.list_users()
-            live_sessions = []
-
-            for user in users:
-                try:
-                    # Check if user has any live meetings
-                    response = await self.zoom_service.api_request(
-                        "GET",
-                        f"/users/{user['id']}/meetings",
-                        params={"type": "live", "page_size": 30}
-                    )
-
-                    for meeting in response.get("meetings", []):
-                        session = await self._create_live_session_from_meeting(meeting, user)
-                        if session:
-                            live_sessions.append(session)
-                            self._active_sessions[session.meeting_id] = session
-
-                except Exception as e:
-                    logger.warning(f"[LIVE] Error checking live meetings for user {user.get('email')}: {e}")
-
-            return live_sessions
-
+            user_sessions = await self._get_live_from_users()
+            for session in user_sessions:
+                if session.meeting_id not in seen_meeting_ids:
+                    live_sessions.append(session)
+                    seen_meeting_ids.add(session.meeting_id)
+                    self._active_sessions[session.meeting_id] = session
+            logger.info(f"[LIVE] User meetings API returned {len(user_sessions)} additional meetings")
         except Exception as e:
-            logger.error(f"[LIVE] Fallback method failed: {e}")
-            return []
+            logger.warning(f"[LIVE] User meetings check failed: {e}")
 
-    async def _create_live_session(self, meeting_data: Dict) -> Optional[LiveSession]:
+        logger.info(f"[LIVE] Total active meetings found: {len(live_sessions)}")
+        return live_sessions
+
+    async def _get_live_from_dashboard(self) -> List[LiveSession]:
+        """Get live meetings from Dashboard API (Business/Education plans only)."""
+        sessions = []
+
+        for account in self.zoom_service.accounts.values():
+            try:
+                response = await self.zoom_service._make_request(
+                    "GET",
+                    "/metrics/meetings",
+                    account,
+                    params={"type": "live", "page_size": 100}
+                )
+
+                for meeting in response.get("meetings", []):
+                    session = await self._create_live_session(meeting, account)
+                    if session:
+                        sessions.append(session)
+
+            except Exception as e:
+                logger.debug(f"[LIVE] Dashboard API failed for {account.name}: {e}")
+
+        return sessions
+
+    async def _get_live_from_users(self) -> List[LiveSession]:
+        """Get live meetings by checking each user's meetings."""
+        sessions = []
+
+        for account in self.zoom_service.accounts.values():
+            try:
+                # Get all users in this account
+                users = await self.zoom_service.list_users(account.account_id)
+
+                for user in users:
+                    try:
+                        # Check if user has any live meetings
+                        response = await self.zoom_service._make_request(
+                            "GET",
+                            f"/users/{user['id']}/meetings",
+                            account,
+                            params={"type": "live", "page_size": 30}
+                        )
+
+                        for meeting in response.get("meetings", []):
+                            session = await self._create_live_session_from_user_meeting(meeting, user, account)
+                            if session:
+                                sessions.append(session)
+
+                    except Exception as e:
+                        # User might not have any live meetings
+                        logger.debug(f"[LIVE] No live meetings for {user.get('email')}: {e}")
+
+            except Exception as e:
+                logger.warning(f"[LIVE] Failed to check users for {account.name}: {e}")
+
+        return sessions
+
+    async def get_scheduled_meetings(self, days_ahead: int = 7) -> List[ScheduledSession]:
+        """
+        Get all scheduled meetings for the calendar view.
+
+        Args:
+            days_ahead: Number of days ahead to fetch (default 7)
+        """
+        scheduled = []
+
+        for account in self.zoom_service.accounts.values():
+            try:
+                users = await self.zoom_service.list_users(account.account_id)
+
+                for user in users:
+                    try:
+                        # Get upcoming/scheduled meetings
+                        response = await self.zoom_service._make_request(
+                            "GET",
+                            f"/users/{user['id']}/meetings",
+                            account,
+                            params={"type": "upcoming", "page_size": 100}
+                        )
+
+                        for meeting in response.get("meetings", []):
+                            session = self._create_scheduled_session(meeting, user)
+                            if session:
+                                # Filter by date range
+                                if session.start_time <= datetime.utcnow() + timedelta(days=days_ahead):
+                                    scheduled.append(session)
+
+                    except Exception as e:
+                        logger.debug(f"[SCHEDULE] Error fetching for {user.get('email')}: {e}")
+
+            except Exception as e:
+                logger.warning(f"[SCHEDULE] Failed for {account.name}: {e}")
+
+        # Sort by start time
+        scheduled.sort(key=lambda s: s.start_time)
+        self._scheduled_sessions = scheduled
+
+        logger.info(f"[SCHEDULE] Found {len(scheduled)} scheduled meetings")
+        return scheduled
+
+    async def _create_live_session(self, meeting_data: Dict, account) -> Optional[LiveSession]:
         """Create a LiveSession from Dashboard API meeting data."""
         try:
             meeting_id = str(meeting_data.get("id", ""))
@@ -177,8 +260,8 @@ class LiveMonitorService:
                 participants=[]
             )
 
-            # Fetch participants
-            session.participants = await self._get_meeting_participants(meeting_uuid or meeting_id)
+            # Try to fetch participants
+            session.participants = await self._get_meeting_participants(meeting_uuid or meeting_id, account)
 
             return session
 
@@ -186,8 +269,8 @@ class LiveMonitorService:
             logger.error(f"[LIVE] Error creating session from meeting data: {e}")
             return None
 
-    async def _create_live_session_from_meeting(self, meeting_data: Dict, host_user: Dict) -> Optional[LiveSession]:
-        """Create a LiveSession from Meetings API data."""
+    async def _create_live_session_from_user_meeting(self, meeting_data: Dict, host_user: Dict, account) -> Optional[LiveSession]:
+        """Create a LiveSession from user Meetings API data."""
         try:
             meeting_id = str(meeting_data.get("id", ""))
             meeting_uuid = meeting_data.get("uuid", "")
@@ -206,7 +289,7 @@ class LiveMonitorService:
                 meeting_uuid=meeting_uuid,
                 topic=topic,
                 host_id=host_user.get("id", ""),
-                host_name=host_user.get("first_name", "") + " " + host_user.get("last_name", ""),
+                host_name=host_user.get("display_name", host_user.get("email", "")),
                 start_time=start_time or datetime.utcnow(),
                 scheduled_start=None,
                 scheduled_duration_minutes=meeting_data.get("duration"),
@@ -214,8 +297,8 @@ class LiveMonitorService:
                 participants=[]
             )
 
-            # Fetch participants
-            session.participants = await self._get_meeting_participants(meeting_uuid or meeting_id)
+            # Try to fetch participants (may fail without Dashboard API)
+            session.participants = await self._get_meeting_participants(meeting_uuid or meeting_id, account)
 
             return session
 
@@ -223,15 +306,59 @@ class LiveMonitorService:
             logger.error(f"[LIVE] Error creating session: {e}")
             return None
 
-    async def _get_meeting_participants(self, meeting_id: str) -> List[LiveParticipant]:
+    def _create_scheduled_session(self, meeting_data: Dict, host_user: Dict) -> Optional[ScheduledSession]:
+        """Create a ScheduledSession from meetings API data."""
+        try:
+            meeting_id = str(meeting_data.get("id", ""))
+            topic = meeting_data.get("topic", "")
+            session_code = self._extract_session_code(topic)
+
+            start_time = None
+            if meeting_data.get("start_time"):
+                start_time = datetime.fromisoformat(
+                    meeting_data["start_time"].replace("Z", "+00:00")
+                )
+
+            if not start_time:
+                return None
+
+            # Determine status
+            now = datetime.utcnow().replace(tzinfo=start_time.tzinfo) if start_time.tzinfo else datetime.utcnow()
+            duration = meeting_data.get("duration", 60)
+            end_time = start_time + timedelta(minutes=duration)
+
+            if now < start_time:
+                status = "waiting"
+            elif now > end_time:
+                status = "finished"
+            else:
+                status = "started"
+
+            return ScheduledSession(
+                meeting_id=meeting_id,
+                topic=topic,
+                host_id=host_user.get("id", ""),
+                host_name=host_user.get("display_name", host_user.get("email", "")),
+                start_time=start_time,
+                duration_minutes=duration,
+                session_code=session_code,
+                status=status
+            )
+
+        except Exception as e:
+            logger.error(f"[SCHEDULE] Error creating scheduled session: {e}")
+            return None
+
+    async def _get_meeting_participants(self, meeting_id: str, account) -> List[LiveParticipant]:
         """Get current participants in a live meeting."""
         participants = []
 
         try:
             # Try Dashboard API first (more detailed)
-            response = await self.zoom_service.api_request(
+            response = await self.zoom_service._make_request(
                 "GET",
                 f"/metrics/meetings/{meeting_id}/participants",
+                account,
                 params={"type": "live", "page_size": 100}
             )
 
@@ -454,6 +581,21 @@ class LiveMonitorService:
                 ]
             }
             for session in self._active_sessions.values()
+        ]
+
+    def get_scheduled_sessions_summary(self) -> List[Dict]:
+        """Get summary of scheduled sessions for the calendar."""
+        return [
+            {
+                "meeting_id": session.meeting_id,
+                "topic": session.topic,
+                "session_code": session.session_code,
+                "start_time": session.start_time.isoformat() if session.start_time else None,
+                "duration_minutes": session.duration_minutes,
+                "host_name": session.host_name,
+                "status": session.status
+            }
+            for session in self._scheduled_sessions
         ]
 
 
