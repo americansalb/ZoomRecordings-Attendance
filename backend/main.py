@@ -7,7 +7,8 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload
+from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions
+from services.scheduler_service import scheduler_service
 
 load_dotenv()
 
@@ -50,6 +51,12 @@ async def startup_event():
     print(f"GOOGLE_SPREADSHEET_ID: {'SET' if spreadsheet_id else 'MISSING'}", flush=True)
     print(f"ROSTER_SPREADSHEET_ID: {'SET' if roster_id else 'NOT SET (roster matching disabled)'}", flush=True)
 
+    # Check notification configuration
+    smtp_user = os.getenv("SMTP_USER")
+    alert_emails = os.getenv("TRAINER_ALERT_EMAILS")
+    print(f"SMTP_USER: {'SET' if smtp_user else 'NOT SET (email alerts disabled)'}", flush=True)
+    print(f"TRAINER_ALERT_EMAILS: {'SET' if alert_emails else 'NOT SET'}", flush=True)
+
     # Log registered routes
     print("=" * 50, flush=True)
     print("REGISTERED ROUTES:", flush=True)
@@ -59,6 +66,17 @@ async def startup_event():
         elif hasattr(route, 'path'):
             print(f"  MOUNT {route.path}", flush=True)
     print("=" * 50, flush=True)
+
+    # Start background scheduler for trainer absence checks
+    scheduler_service.start()
+    print("[SCHEDULER] Background trainer absence checker started", flush=True)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop scheduler on shutdown"""
+    scheduler_service.stop()
+    print("[SCHEDULER] Background scheduler stopped", flush=True)
 
 # CORS configuration
 app.add_middleware(
@@ -78,6 +96,7 @@ app.include_router(sheets.router, prefix="/api/sheets", tags=["Sheets"])
 app.include_router(mappings.router, prefix="/api/mappings", tags=["Mappings"])
 app.include_router(proctoring.router, prefix="/api", tags=["Proctoring"])
 app.include_router(video_upload.router, prefix="/api", tags=["Video Upload"])
+app.include_router(live_sessions.router, prefix="/api", tags=["Live Sessions"])
 
 
 @app.get("/api/health")

@@ -9,6 +9,7 @@ pydantic==2.9.2
 python-multipart==0.0.12
 thefuzz==0.22.1
 rapidfuzz==3.10.0
+apscheduler==3.10.4
 opencv-python-headless==4.10.0.84
 numpy>=1.24.0
 requests>=2.31.0
