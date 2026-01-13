@@ -149,16 +149,50 @@ class DriveService:
             # SIMPLE APPROACH: Find all rows containing this session, count which one has our date
             # This works regardless of spreadsheet structure
             session_rows = []
+
+            # Determine if this is a Saturday or Sunday based on the date
+            target_day_of_week = self._get_day_of_week(meeting_date)
+            logger.info(f"[DRIVE] Target date {meeting_date} is a {target_day_of_week or 'unknown day'}")
+
             for row_idx, row in enumerate(rows):
                 row_text = ' '.join(str(cell) for cell in row).lower()
                 # Check if this row mentions our session
+                # Support various formats: "Session 129", "Sess 129", "S129", "129",
+                # "Session 129 Sat", "Session 129 Sun", "Session 129 (Saturday)", etc.
+                session_match = False
+
+                # Check standard patterns
                 if (f"session {session_code}".lower() in row_text or
                     f"sess {session_code}".lower() in row_text or
                     f" {session_code} " in f" {row_text} " or
-                    f"s{session_code}".lower() in row_text):
-                    session_rows.append((row_idx, row))
+                    f"s{session_code}".lower() in row_text or
+                    f"session{session_code}".lower() in row_text):
+                    session_match = True
 
-            logger.info(f"[DRIVE] Found {len(session_rows)} rows mentioning Session {session_code}")
+                if session_match:
+                    # Check if this row is day-specific (Saturday/Sunday)
+                    row_day = None
+                    if 'saturday' in row_text or ' sat ' in f" {row_text} " or row_text.endswith(' sat') or 'sat)' in row_text:
+                        row_day = 'Saturday'
+                    elif 'sunday' in row_text or ' sun ' in f" {row_text} " or row_text.endswith(' sun') or 'sun)' in row_text:
+                        row_day = 'Sunday'
+
+                    # Log what we found
+                    first_cell = str(row[0])[:50] if row else ''
+                    logger.info(f"[DRIVE] Row {row_idx} matches session {session_code}: '{first_cell}...' (day={row_day})")
+
+                    # If we know the target day of week and this row has a day, only include if it matches
+                    if target_day_of_week and row_day:
+                        if target_day_of_week == row_day:
+                            session_rows.append((row_idx, row))
+                            logger.info(f"[DRIVE] Including row {row_idx} - day matches ({row_day})")
+                        else:
+                            logger.info(f"[DRIVE] Skipping row {row_idx} - day mismatch (target={target_day_of_week}, row={row_day})")
+                    else:
+                        # No day filter, include all matching rows
+                        session_rows.append((row_idx, row))
+
+            logger.info(f"[DRIVE] Found {len(session_rows)} rows mentioning Session {session_code} (filtered for {target_day_of_week or 'any day'})")
 
             # Now find which row has our date and count its position
             day_counter = 0
@@ -173,6 +207,33 @@ class DriveService:
                 day_counter += 1
 
             logger.warning(f"[DRIVE] Could not find date {meeting_date} in any of the {len(session_rows)} session rows")
+
+            # FALLBACK: If day filtering was applied but no date found, try without filtering
+            # This handles cases where the date is in a different session variant row
+            if target_day_of_week:
+                logger.info(f"[DRIVE] Retrying without day-of-week filter...")
+                all_session_rows = []
+                for row_idx, row in enumerate(rows):
+                    row_text = ' '.join(str(cell) for cell in row).lower()
+                    if (f"session {session_code}".lower() in row_text or
+                        f"sess {session_code}".lower() in row_text or
+                        f" {session_code} " in f" {row_text} " or
+                        f"s{session_code}".lower() in row_text or
+                        f"session{session_code}".lower() in row_text):
+                        all_session_rows.append((row_idx, row))
+
+                logger.info(f"[DRIVE] Found {len(all_session_rows)} rows without day filter")
+
+                day_counter = 0
+                for row_idx, row in all_session_rows:
+                    for cell in row:
+                        if self._dates_match(str(cell), meeting_date):
+                            logger.info(f"[DRIVE] Found day {day_counter} - row {row_idx} contains date {meeting_date} (no day filter)")
+                            self._schedule_cache[cache_key] = day_counter
+                            return day_counter
+                    day_counter += 1
+
+                logger.warning(f"[DRIVE] Still could not find date {meeting_date} even without day filter")
 
             # Fallback: Try original strategies
 
@@ -329,6 +390,70 @@ class DriveService:
             return norm_cell == norm_target
 
         return False
+
+    def _get_day_of_week(self, date_str: str) -> Optional[str]:
+        """
+        Determine the day of week for a given date string.
+
+        Args:
+            date_str: Date in format "MM/DD", "Nov10", etc.
+
+        Returns:
+            "Saturday", "Sunday", or None if can't determine
+        """
+        import re
+        from datetime import datetime
+
+        months = {
+            'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+            'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+            'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+            'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+            'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+            'dec': 12, 'december': 12
+        }
+
+        try:
+            date_lower = str(date_str).lower().strip()
+            month = None
+            day = None
+
+            # Try MM/DD format
+            match = re.search(r'(\d{1,2})/(\d{1,2})', date_lower)
+            if match:
+                month = int(match.group(1))
+                day = int(match.group(2))
+            else:
+                # Try Month Day format (Nov10, Nov 10, November 10)
+                for month_name, month_num in months.items():
+                    if month_name in date_lower:
+                        month = month_num
+                        day_match = re.search(r'(\d{1,2})', date_lower)
+                        if day_match:
+                            day = int(day_match.group(1))
+                        break
+
+            if month and day:
+                # Assume current year (2026 based on context)
+                year = datetime.now().year
+                date_obj = datetime(year, month, day)
+                day_name = date_obj.strftime('%A')  # Full day name
+                if day_name in ('Saturday', 'Sunday'):
+                    return day_name
+                # Also check previous year in case dates span year boundary
+                try:
+                    date_obj_prev = datetime(year - 1, month, day)
+                    day_name_prev = date_obj_prev.strftime('%A')
+                    if day_name_prev in ('Saturday', 'Sunday'):
+                        return day_name_prev
+                except ValueError:
+                    pass
+                return day_name
+
+        except Exception as e:
+            logger.warning(f"[DRIVE] Could not determine day of week for {date_str}: {e}")
+
+        return None
 
     def get_or_create_session_folder(self, session_code: str) -> Optional[str]:
         """
