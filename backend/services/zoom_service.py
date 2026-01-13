@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import base64
 import re
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -283,6 +283,30 @@ class ZoomService:
         logger.info(f"Total recordings found for {account.name}: {len(all_recordings)}")
         return all_recordings
 
+    def _encode_meeting_uuid(self, meeting_id: str) -> str:
+        """
+        Properly encode a meeting UUID for Zoom API.
+
+        Zoom requires double URL encoding for UUIDs containing "/" or "=".
+        The meeting_id might come in already URL-encoded (e.g., from frontend),
+        so we first decode it to get the raw UUID, then double-encode.
+        """
+        # First, fully decode the meeting_id in case it's already encoded
+        # Keep decoding until no more %XX patterns remain
+        decoded_id = str(meeting_id)
+        prev_id = None
+        while prev_id != decoded_id:
+            prev_id = decoded_id
+            decoded_id = unquote(decoded_id)
+
+        # Now double-encode if it contains special characters
+        if "/" in decoded_id or "=" in decoded_id:
+            encoded_id = quote(quote(decoded_id, safe=""), safe="")
+            print(f"[ZOOM] UUID encoded: {meeting_id} -> {decoded_id} -> {encoded_id}", flush=True)
+            return encoded_id
+
+        return decoded_id
+
     async def get_meeting_participants(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """
         Get participant report for a past meeting
@@ -295,14 +319,7 @@ class ZoomService:
         reports are available ~15 minutes after the meeting ends
         """
         account = self._get_account(account_id)
-
-        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
-        # e.g., "abc/def==" -> "abc%2Fdef%3D%3D" -> "abc%252Fdef%253D%253D"
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            # Double URL encode for Zoom API
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-            print(f"[ZOOM] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
 
         all_participants = []
         next_page_token = None
@@ -361,11 +378,7 @@ class ZoomService:
         """
         account = self._get_account(account_id)
 
-        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-            print(f"[ZOOM DASHBOARD] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
 
         all_participants = []
         next_page_token = None
@@ -440,17 +453,13 @@ class ZoomService:
     async def get_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get details about a specific meeting"""
         account = self._get_account(account_id)
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
         return await self._make_request("GET", f"/meetings/{clean_meeting_id}", account)
 
     async def get_past_meeting_details(self, meeting_id: str, account_id: Optional[str] = None) -> dict:
         """Get details about a past meeting instance - includes actual start/end times"""
         account = self._get_account(account_id)
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
         result = await self._make_request("GET", f"/past_meetings/{clean_meeting_id}", account)
         print(f"[ZOOM] past_meetings response: {result}", flush=True)
         return result
@@ -463,11 +472,7 @@ class ZoomService:
         """
         account = self._get_account(account_id)
 
-        # For UUIDs with "/" or "==" characters, Zoom requires double URL encoding
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
-            print(f"[ZOOM PAST_MEETINGS] UUID double-encoded: {meeting_id} -> {clean_meeting_id}", flush=True)
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
 
         all_participants = []
         next_page_token = None
@@ -532,9 +537,7 @@ class ZoomService:
         """Get scheduled meeting details - for recurring meetings, this has the scheduled times"""
         account = self._get_account(account_id)
         # Extract numeric meeting ID from UUID if needed (UUIDs are for instances, numeric IDs for the series)
-        clean_meeting_id = str(meeting_id)
-        if "/" in clean_meeting_id or "=" in clean_meeting_id:
-            clean_meeting_id = quote(quote(clean_meeting_id, safe=""), safe="")
+        clean_meeting_id = self._encode_meeting_uuid(meeting_id)
 
         result = await self._make_request("GET", f"/meetings/{clean_meeting_id}", account)
         print(f"[ZOOM] meetings (schedule) response: {result}", flush=True)
