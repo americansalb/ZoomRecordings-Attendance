@@ -170,12 +170,19 @@ class DriveService:
                     session_match = True
 
                 if session_match:
-                    # Check if this row is day-specific (Saturday/Sunday)
-                    row_day = None
-                    if 'saturday' in row_text or ' sat ' in f" {row_text} " or row_text.endswith(' sat') or 'sat)' in row_text:
+                    # Check if this row is day-specific (Saturday/Sunday/Both)
+                    # Check for BOTH days first (e.g., "Saturdays and Sundays")
+                    has_saturday = 'saturday' in row_text or ' sat ' in f" {row_text} " or row_text.endswith(' sat') or 'sat)' in row_text
+                    has_sunday = 'sunday' in row_text or ' sun ' in f" {row_text} " or row_text.endswith(' sun') or 'sun)' in row_text
+
+                    if has_saturday and has_sunday:
+                        row_day = 'Both'  # Session runs on both Saturday and Sunday
+                    elif has_saturday:
                         row_day = 'Saturday'
-                    elif 'sunday' in row_text or ' sun ' in f" {row_text} " or row_text.endswith(' sun') or 'sun)' in row_text:
+                    elif has_sunday:
                         row_day = 'Sunday'
+                    else:
+                        row_day = None
 
                     # Log what we found
                     first_cell = str(row[0])[:50] if row else ''
@@ -183,7 +190,8 @@ class DriveService:
 
                     # If we know the target day of week and this row has a day, only include if it matches
                     if target_day_of_week and row_day:
-                        if target_day_of_week == row_day:
+                        # "Both" matches any weekend day
+                        if row_day == 'Both' or target_day_of_week == row_day:
                             session_rows.append((row_idx, row))
                             logger.info(f"[DRIVE] Including row {row_idx} - day matches ({row_day})")
                         else:
