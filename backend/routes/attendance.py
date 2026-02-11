@@ -485,8 +485,15 @@ async def preview_attendance(meeting_id: str, recording_title: str):
     try:
         session_code = zoom_service.extract_session_code(recording_title)
 
-        participant_data = await zoom_service.get_meeting_participants(meeting_id)
-        participants = participant_data.get("participants", [])
+        # Try to get participants, but don't fail if Zoom API errors
+        participants = []
+        participant_error = None
+        try:
+            participant_data = await zoom_service.get_meeting_participants(meeting_id)
+            participants = participant_data.get("participants", [])
+        except Exception as e:
+            participant_error = str(e)
+            print(f"[PREVIEW] Could not fetch participants: {e}", flush=True)
 
         # Detect scheduled time and duration (same logic as process_attendance)
         zoom_start_time = None
@@ -623,6 +630,10 @@ async def preview_attendance(meeting_id: str, recording_title: str):
 
         preview.sort(key=lambda x: x["name"].lower())
 
+        # Add participant error to warnings if it occurred
+        if participant_error:
+            detection_warnings.append(f"Could not fetch participants: {participant_error}")
+
         return {
             "session_code": session_code,
             "existing_tab": existing_tab,
@@ -632,7 +643,8 @@ async def preview_attendance(meeting_id: str, recording_title: str):
             "detected_start_time": detected_start_time,
             "detected_duration": detected_duration,
             "detection_source": detection_source,
-            "detection_warnings": detection_warnings
+            "detection_warnings": detection_warnings,
+            "participant_error": participant_error
         }
 
     except Exception as e:
