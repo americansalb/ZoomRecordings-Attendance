@@ -22,6 +22,75 @@ class UpdateProfileRequest(BaseModel):
     email: str
 
 
+def _mask_last_name(last_name: str) -> str:
+    """Mask last name: first letter + asterisks + last letter"""
+    if not last_name:
+        return ""
+    if len(last_name) == 1:
+        return last_name
+    if len(last_name) == 2:
+        return last_name[0] + "*"
+    # First letter + asterisks for middle + last letter
+    middle_count = len(last_name) - 2
+    return last_name[0] + ("*" * middle_count) + last_name[-1]
+
+
+@router.get("/lookup")
+async def lookup_student(
+    first_name: str = Query(..., min_length=1, description="Student's first name"),
+    session_code: str = Query(..., min_length=3, max_length=3, description="3-digit session code")
+):
+    """
+    Look up a student by first name within a specific session.
+    Returns masked results for privacy.
+    """
+    try:
+        results = []
+
+        # Get summary data for the specific session
+        try:
+            summary_data = sheets_service.get_summary_data(session_code)
+        except Exception as e:
+            print(f"Error getting summary for session {session_code}: {e}")
+            return {"results": [], "total": 0, "error": f"Session {session_code} not found"}
+
+        search_term = first_name.lower().strip()
+
+        for student in summary_data.get("students", []):
+            student_first = student.get("first_name", "").lower()
+
+            # Match if first name starts with or contains the search term
+            if search_term in student_first or student_first.startswith(search_term):
+                # Create masked display name
+                full_first = student.get("first_name", "")
+                full_last = student.get("last_name", "")
+                masked_last = _mask_last_name(full_last)
+                display_name = f"{full_first} {masked_last}"
+
+                # Create student ID preview (first 3 + **)
+                student_id = student.get("student_id", "")
+                if student_id and len(student_id) >= 3:
+                    student_id_preview = student_id[:3] + "**"
+                else:
+                    student_id_preview = ""
+
+                results.append({
+                    "row_number": student["row_number"],
+                    "session_code": session_code,
+                    "display_name": display_name,
+                    "first_name": full_first,
+                    "student_id_preview": student_id_preview
+                })
+
+        return {
+            "results": results,
+            "total": len(results)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/search")
 async def search_students(
     query: str = Query(..., min_length=1, description="Search query (name or email)"),
