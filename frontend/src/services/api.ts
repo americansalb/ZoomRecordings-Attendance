@@ -236,25 +236,8 @@ export const sheetsApi = {
   },
 }
 
-// Student Lookup Result Type
-export interface StudentLookupResult {
-  row_number: number
-  session_code: string
-  display_name: string
-  first_name: string
-  student_id_preview: string
-}
-
 // Students API
 export const studentsApi = {
-  // New lookup by first name + session code (returns masked results)
-  lookup: async (firstName: string, sessionCode: string) => {
-    const { data } = await api.get('/students/lookup', {
-      params: { first_name: firstName, session_code: sessionCode },
-    })
-    return data as { results: StudentLookupResult[]; total: number }
-  },
-
   search: async (query: string, sessionCode?: string) => {
     const { data } = await api.get('/students/search', {
       params: { query, session_code: sessionCode },

@@ -104,25 +104,15 @@ export default function StudentSummaryProfile() {
       {/* Profile Header */}
       <div className="card">
         <div className="flex items-center space-x-4">
-          <div className="w-16 h-16 bg-teal-100 rounded-full flex items-center justify-center">
-            <span className="text-2xl font-bold text-teal-600">
+          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
+            <span className="text-2xl font-bold text-blue-600">
               {displayFirstName.charAt(0)}
               {profile.last_name.charAt(0)}
             </span>
           </div>
           <div className="flex-1">
-            {/* Student ID - Prominent Display */}
-            {profile.student_id && (
-              <div className="mb-2">
-                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Student ID</p>
-                <div className="text-4xl font-bold tracking-wider">
-                  <span style={{ color: '#0D9488' }}>{profile.student_id.slice(0, 3)}</span>
-                  <span style={{ color: '#5EEAD4' }}>{profile.student_id.slice(3, 5)}</span>
-                </div>
-              </div>
-            )}
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-semibold text-gray-900">
+              <h1 className="text-2xl font-bold text-gray-900">
                 {displayFirstName} {profile.last_name}
               </h1>
               {needsReview && (
@@ -131,7 +121,10 @@ export default function StudentSummaryProfile() {
                 </span>
               )}
             </div>
-            <p className="text-sm text-gray-500">Session {sessionCode}</p>
+            {profile.student_id && (
+              <p className="text-gray-500">Student ID: {profile.student_id}</p>
+            )}
+            <p className="text-sm text-blue-600">Session {sessionCode}</p>
           </div>
         </div>
 
