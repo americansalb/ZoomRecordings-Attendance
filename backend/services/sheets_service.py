@@ -145,11 +145,11 @@ class SheetsService:
 
             sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-            # Set up header row (includes Roster Match column for manual review)
-            headers = [["First Name", "Last Name", "Email", "Roster Match"]]
+            # Set up header row (Student ID in column A for ID-based matching)
+            headers = [["Student ID", "First Name", "Last Name", "Email", "Roster Match"]]
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{tab_name}'!A1:D1",
+                range=f"'{tab_name}'!A1:E1",
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
@@ -768,19 +768,27 @@ class SheetsService:
         headers = data[0]
         profiles = []
 
+        # Detect column layout
+        has_sid = (headers[0].strip().lower() in ["student id", "student id #", "id"]) if headers else False
+        fn_col = 1 if has_sid else 0
+        ln_col = 2 if has_sid else 1
+        em_col = 3 if has_sid else 2
+        data_start_col = 4 if has_sid else 3
+
         for row_idx, row in enumerate(data[1:], start=2):
-            if not row or not any(row[:3]):
+            if not row or not any(row[:data_start_col]):
                 continue
 
             profile = {
                 "row_number": row_idx,
-                "first_name": row[0] if len(row) > 0 else "",
-                "last_name": row[1] if len(row) > 1 else "",
-                "email": row[2] if len(row) > 2 else "",
+                "student_id": row[0] if has_sid and len(row) > 0 else "",
+                "first_name": row[fn_col] if len(row) > fn_col else "",
+                "last_name": row[ln_col] if len(row) > ln_col else "",
+                "email": row[em_col] if len(row) > em_col else "",
                 "attendance": {}
             }
 
-            for col_idx, header in enumerate(headers[3:], start=3):
+            for col_idx, header in enumerate(headers[data_start_col:], start=data_start_col):
                 if col_idx < len(row):
                     value = row[col_idx]
                     try:
@@ -948,8 +956,23 @@ class SheetsService:
 
         # Step 1: Read existing data ONCE (bypass cache to get fresh data)
         data = self.get_tab_data(session_code, use_cache=False)
-        headers = data[0] if data else ["First Name", "Last Name", "Email"]
+        headers = data[0] if data else ["Student ID", "First Name", "Last Name", "Email"]
         existing_rows = data[1:] if len(data) > 1 else []
+
+        # Detect column layout - sheets may have Student ID in column A
+        has_student_id_col = (headers[0].strip().lower() in ["student id", "student id #", "id"]) if headers else False
+        if has_student_id_col:
+            sid_col = 0
+            fn_col = 1
+            ln_col = 2
+            email_col = 3
+            print(f"[SHEETS] Detected Student ID column layout (A=ID, B=First, C=Last)", flush=True)
+        else:
+            sid_col = None
+            fn_col = 0
+            ln_col = 1
+            email_col = 2
+            print(f"[SHEETS] Using standard column layout (A=First, B=Last, C=Email)", flush=True)
 
         print(f"[SHEETS] Found {len(existing_rows)} existing profiles", flush=True)
 
@@ -963,13 +986,27 @@ class SheetsService:
         # ALSO build normalized indexes to match cleaned Zoom names
         norm_profile_index = {}  # (normalized_first, normalized_last) -> row_number
         norm_first_name_index = {}  # normalized_first -> row_number
+        # Direct student ID -> row index from column A of the attendance sheet
+        sheet_student_id_index = {}  # student_id_str -> row_number
 
         for row_idx, row in enumerate(existing_rows, start=2):
-            if not row or not any(row[:3]):
+            min_cols = 3 if sid_col is None else 3
+            if not row or len(row) < min_cols:
                 continue
-            first_name = row[0].strip().lower() if len(row) > 0 and row[0] else ""
-            last_name = row[1].strip().lower() if len(row) > 1 and row[1] else ""
-            email = row[2].strip().lower() if len(row) > 2 and row[2] else ""
+            # Skip completely empty rows
+            check_end = 3 if sid_col is None else 4
+            if not any(row[:check_end]):
+                continue
+
+            first_name = row[fn_col].strip().lower() if len(row) > fn_col and row[fn_col] else ""
+            last_name = row[ln_col].strip().lower() if len(row) > ln_col and row[ln_col] else ""
+            email = row[email_col].strip().lower() if len(row) > email_col and row[email_col] else ""
+
+            # Build student ID index directly from column A
+            if sid_col is not None:
+                sheet_sid = row[sid_col].strip() if len(row) > sid_col and row[sid_col] else ""
+                if sheet_sid:
+                    sheet_student_id_index[sheet_sid] = row_idx
 
             # Also normalize for matching (handles "Dilorom_Russian" -> "dilorom", "Chrisnove's" -> "chrisnove")
             norm_first = self._normalize_name(first_name)
@@ -999,26 +1036,28 @@ class SheetsService:
             if email:
                 email_index[email] = row_idx
 
-        # Step 2b: Build student ID index from roster for ID-based matching
-        # Maps student_id -> row_number in the attendance sheet (cross-referenced via roster names)
+        # Step 2b: Build student ID index from roster and sheet for ID-based matching
         roster_for_index = self.get_roster(session_code)
-        student_id_index = {}  # student_id -> row_number
+        student_id_index = {}  # student_id -> row_number (merged from sheet column A + roster cross-ref)
         roster_id_lookup = {}  # student_id -> {"first_name", "last_name", "student_id"}
+
+        # First: use direct sheet column A mapping (most reliable - already in the sheet)
+        student_id_index.update(sheet_student_id_index)
 
         for r in roster_for_index:
             sid = r.get("student_id", "").strip()
             if sid:
                 roster_id_lookup[sid] = r
-                # Cross-reference: find the roster student's row in the attendance sheet
-                r_first = r["first_name"].strip().lower()
-                r_last = r["last_name"].strip().lower()
-                if (r_first, r_last) in profile_index:
-                    student_id_index[sid] = profile_index[(r_first, r_last)]
-                elif (r_first, r_last) in norm_profile_index:
-                    student_id_index[sid] = norm_profile_index[(r_first, r_last)]
+                # Also cross-reference by name if not already found via column A
+                if sid not in student_id_index:
+                    r_first = r["first_name"].strip().lower()
+                    r_last = r["last_name"].strip().lower()
+                    if (r_first, r_last) in profile_index:
+                        student_id_index[sid] = profile_index[(r_first, r_last)]
+                    elif (r_first, r_last) in norm_profile_index:
+                        student_id_index[sid] = norm_profile_index[(r_first, r_last)]
 
-        if roster_id_lookup:
-            print(f"[SHEETS] Built student ID index: {len(roster_id_lookup)} roster IDs, {len(student_id_index)} matched to existing rows", flush=True)
+        print(f"[SHEETS] Student ID index: {len(sheet_student_id_index)} from sheet col A, {len(roster_id_lookup)} roster IDs, {len(student_id_index)} total matched to rows", flush=True)
 
         # Step 3: Find or add date columns (including segment columns if provided)
         attendance_header = f"{date_str} Attendance"
@@ -1249,7 +1288,13 @@ class SheetsService:
                 print(f"[SHEETS] ✓ Matched '{zoom_full_name}' ({attendance_minutes} min) to existing row {row_number}{' (via ID)' if id_matched else ''}", flush=True)
             else:
                 # New profile - use ORIGINAL Zoom name (not roster name)
-                new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
+                # Include student ID in column A if the sheet has that layout
+                if has_student_id_col:
+                    # Use matched student ID, or the one extracted from the Zoom name
+                    profile_sid = student_id if student_id else ""
+                    new_profiles.append([profile_sid, zoom_first, zoom_last, email, roster_match_str])
+                else:
+                    new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
 
                 # Track student ID -> row for new profiles too
                 if student_id and student_id not in student_id_index:
@@ -1298,12 +1343,13 @@ class SheetsService:
                 })
                 print(f"[SHEETS] + Adding new profile '{zoom_full_name}' ({attendance_minutes} min) at row {row_number}", flush=True)
 
-        # Step 6: Batch add all new profiles (ONE API call) - now with 4 columns including Roster Match
+        # Step 6: Batch add all new profiles (ONE API call)
         if new_profiles:
-            print(f"[SHEETS] Adding {len(new_profiles)} new profiles in batch", flush=True)
+            append_range = f"'{tab_name}'!A:E" if has_student_id_col else f"'{tab_name}'!A:D"
+            print(f"[SHEETS] Adding {len(new_profiles)} new profiles in batch (range={append_range})", flush=True)
             self.sheets.spreadsheets().values().append(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{tab_name}'!A:D",
+                range=append_range,
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": new_profiles}
@@ -1385,10 +1431,11 @@ class SheetsService:
                         })
                         print(f"[SHEETS] Writing row {row} segment {seg_num}: {seg_mins} minutes", flush=True)
 
-        # Add roster match updates (column D = index 3)
+        # Add roster match updates (column E if Student ID col exists, else column D)
+        roster_match_col_letter = "E" if has_student_id_col else "D"
         for update in roster_match_updates:
             batch_data.append({
-                "range": f"'{tab_name}'!D{update['row']}",
+                "range": f"'{tab_name}'!{roster_match_col_letter}{update['row']}",
                 "values": [[update["value"]]]
             })
 
@@ -1592,8 +1639,14 @@ class SheetsService:
 
         # Step 2: Read raw attendance data
         raw_data = self.get_tab_data(session_code, use_cache=False)
-        raw_headers = raw_data[0] if raw_data else ["First Name", "Last Name", "Email", "Roster Match"]
+        raw_headers = raw_data[0] if raw_data else ["Student ID", "First Name", "Last Name", "Email", "Roster Match"]
         raw_rows = raw_data[1:] if len(raw_data) > 1 else []
+
+        # Detect column layout
+        raw_has_sid = (raw_headers[0].strip().lower() in ["student id", "student id #", "id"]) if raw_headers else False
+        raw_fn_col = 1 if raw_has_sid else 0
+        raw_ln_col = 2 if raw_has_sid else 1
+        raw_rm_col = 4 if raw_has_sid else 3  # Roster Match column
 
         # Step 3: Extract date columns from raw headers
         date_columns = []
@@ -1607,6 +1660,8 @@ class SheetsService:
         # Step 4: Initialize summary data with ALL roster students (even those with no attendance)
         # Key = "first_name last_name" lowercase
         summary_data = {}
+        # Also build a student_id -> key lookup for ID-based roster match strings
+        summary_sid_lookup = {}
         for entry in roster:
             key = f"{entry['first_name']} {entry['last_name']}".lower().strip()
             summary_data[key] = {
@@ -1616,17 +1671,21 @@ class SheetsService:
                 "attendance": {dc["date"]: 0 for dc in date_columns},  # Initialize all dates to 0
                 "is_roster": True
             }
+            if entry.get("student_id"):
+                summary_sid_lookup[entry["student_id"]] = key
 
         # Step 5: Process raw attendance data and match to roster
         unmatched_entries = {}  # For Zoom names that don't match any roster student
 
         for row in raw_rows:
-            if not row or not any(row[:3]):
+            min_cols = 3 if not raw_has_sid else 3
+            if not row or len(row) < min_cols:
                 continue
 
-            zoom_first = row[0].strip() if len(row) > 0 and row[0] else ""
-            zoom_last = row[1].strip() if len(row) > 1 and row[1] else ""
-            roster_match = row[3].strip() if len(row) > 3 and row[3] else ""
+            zoom_first = row[raw_fn_col].strip() if len(row) > raw_fn_col and row[raw_fn_col] else ""
+            zoom_last = row[raw_ln_col].strip() if len(row) > raw_ln_col and row[raw_ln_col] else ""
+            roster_match = row[raw_rm_col].strip() if len(row) > raw_rm_col and row[raw_rm_col] else ""
+            row_sid = row[0].strip() if raw_has_sid and len(row) > 0 and row[0] else ""
             zoom_full = f"{zoom_first} {zoom_last}".strip()
 
             # Skip empty names or generic Zoom User entries
@@ -1636,12 +1695,24 @@ class SheetsService:
             # Determine if this row has a valid roster match
             is_matched = bool(roster_match and not roster_match.startswith("⚠️"))
 
+            # Also try matching by student ID from column A
+            if not is_matched and row_sid and row_sid in summary_sid_lookup:
+                roster_key = summary_sid_lookup[row_sid]
+                is_matched = True
+
             if is_matched:
                 # Find the roster student by name
-                roster_key = roster_match.lower().strip()
+                # Handle "ID:12345 → First Last" format from ID matching
+                roster_match_name = roster_match
+                if roster_match.startswith("ID:") and "→" in roster_match:
+                    roster_match_name = roster_match.split("→", 1)[1].strip()
 
-                # If exact key not found, try to find by first+last name
-                if roster_key not in summary_data:
+                roster_key = roster_match_name.lower().strip() if roster_match_name else ""
+
+                # Try direct student ID lookup first
+                if row_sid and row_sid in summary_sid_lookup:
+                    roster_key = summary_sid_lookup[row_sid]
+                elif roster_key not in summary_data:
                     # Try parsing the roster_match as "First Last"
                     for key in summary_data.keys():
                         if key == roster_key or summary_data[key]["canonical_name"].lower() == roster_key:
