@@ -268,6 +268,21 @@ class SheetsService:
             print(f"[ROSTER] Error loading roster for session {session_code}: {e}", flush=True)
             return []
 
+    def _extract_student_id(self, name: str) -> str:
+        """
+        Extract a 5-digit student ID from a Zoom display name.
+
+        Students are required to include their 5-digit ID in their Zoom name,
+        e.g., "12345 John Smith", "John Smith 12345", "12345-John Smith".
+
+        Returns the 5-digit ID string or empty string if not found.
+        """
+        if not name:
+            return ""
+        # Match a standalone 5-digit number (not part of a longer number)
+        match = re.search(r'(?<!\d)\d{5}(?!\d)', name)
+        return match.group(0) if match else ""
+
     def _normalize_name(self, name: str) -> str:
         """
         Normalize a name for matching:
@@ -984,6 +999,27 @@ class SheetsService:
             if email:
                 email_index[email] = row_idx
 
+        # Step 2b: Build student ID index from roster for ID-based matching
+        # Maps student_id -> row_number in the attendance sheet (cross-referenced via roster names)
+        roster_for_index = self.get_roster(session_code)
+        student_id_index = {}  # student_id -> row_number
+        roster_id_lookup = {}  # student_id -> {"first_name", "last_name", "student_id"}
+
+        for r in roster_for_index:
+            sid = r.get("student_id", "").strip()
+            if sid:
+                roster_id_lookup[sid] = r
+                # Cross-reference: find the roster student's row in the attendance sheet
+                r_first = r["first_name"].strip().lower()
+                r_last = r["last_name"].strip().lower()
+                if (r_first, r_last) in profile_index:
+                    student_id_index[sid] = profile_index[(r_first, r_last)]
+                elif (r_first, r_last) in norm_profile_index:
+                    student_id_index[sid] = norm_profile_index[(r_first, r_last)]
+
+        if roster_id_lookup:
+            print(f"[SHEETS] Built student ID index: {len(roster_id_lookup)} roster IDs, {len(student_id_index)} matched to existing rows", flush=True)
+
         # Step 3: Find or add date columns (including segment columns if provided)
         attendance_header = f"{date_str} Attendance"
         participation_header = f"{date_str} Participation"
@@ -1047,7 +1083,7 @@ class SheetsService:
         new_profiles = []
         existing_updates = []
         roster_match_updates = []  # Updates for the Roster Match column
-        results = {"new_profiles": 0, "updated_profiles": 0, "roster_matched": 0, "mapping_matched": 0, "unmatched": 0, "needs_review": 0, "profiles": []}
+        results = {"new_profiles": 0, "updated_profiles": 0, "id_matched": 0, "roster_matched": 0, "mapping_matched": 0, "unmatched": 0, "needs_review": 0, "profiles": []}
         next_row = len(data) + 1  # Next available row
 
         for p in participants:
@@ -1075,65 +1111,98 @@ class SheetsService:
             roster_match_str = ""
             match_confidence = "none"
 
-            # First check for explicit name mappings (highest priority)
-            mapping_match = self.find_mapping_for_name(zoom_full_name, session_code)
-            if mapping_match:
-                roster_match_str = f"{mapping_match['first_name']} {mapping_match['last_name']}"
+            # === PRIMARY: Student ID matching (students must have 5-digit ID in Zoom name) ===
+            student_id = self._extract_student_id(zoom_full_name)
+            id_matched = False
+            if student_id and student_id in roster_id_lookup:
+                roster_entry = roster_id_lookup[student_id]
+                roster_match_str = f"ID:{student_id} → {roster_entry['first_name']} {roster_entry['last_name']}"
                 match_confidence = "high"
-                results["mapping_matched"] += 1
-                print(f"[MAPPINGS] ✓ Used mapping: '{zoom_full_name}' -> '{roster_match_str}'", flush=True)
-            elif roster:
-                # Fall back to fuzzy roster matching
-                roster_match = self.match_to_roster(zoom_first, zoom_last, roster)
-                if roster_match:
-                    roster_match_str = f"{roster_match['first_name']} {roster_match['last_name']}"
-                    match_confidence = "high"
-                    results["roster_matched"] += 1
+                id_matched = True
+                results["id_matched"] += 1
+                print(f"[SHEETS] ✓ Student ID match: '{zoom_full_name}' -> ID {student_id} -> {roster_entry['first_name']} {roster_entry['last_name']}", flush=True)
+            elif student_id:
+                # ID found in name but not in roster - flag for review
+                print(f"[SHEETS] ⚠️ Student ID {student_id} found in '{zoom_full_name}' but NOT in roster", flush=True)
 
-            # Try to find existing profile (use ORIGINAL Zoom name, not roster name)
+            # === FALLBACK: Name-based matching (if no student ID match) ===
+            mapping_match = None
+            if not id_matched:
+                # Check for explicit name mappings
+                mapping_match = self.find_mapping_for_name(zoom_full_name, session_code)
+                if mapping_match:
+                    roster_match_str = f"{mapping_match['first_name']} {mapping_match['last_name']}"
+                    match_confidence = "high"
+                    results["mapping_matched"] += 1
+                    print(f"[MAPPINGS] ✓ Used mapping: '{zoom_full_name}' -> '{roster_match_str}'", flush=True)
+                elif roster:
+                    # Fall back to fuzzy roster matching
+                    roster_match = self.match_to_roster(zoom_first, zoom_last, roster)
+                    if roster_match:
+                        roster_match_str = f"{roster_match['first_name']} {roster_match['last_name']}"
+                        match_confidence = "high"
+                        results["roster_matched"] += 1
+
+            # === ROW LOOKUP: Find the existing row in the attendance sheet ===
             row_number = None
 
-            # Check by email first
-            if email and email.lower() in email_index:
+            # Priority 1: Student ID -> row (most reliable)
+            if student_id and student_id in student_id_index:
+                row_number = student_id_index[student_id]
+                print(f"[SHEETS] ✓ Row found via student ID {student_id} -> row {row_number}", flush=True)
+
+            # Priority 2: If ID matched a roster entry, find row by roster name
+            if row_number is None and id_matched:
+                roster_entry = roster_id_lookup[student_id]
+                id_name_key = (roster_entry["first_name"].strip().lower(), roster_entry["last_name"].strip().lower())
+                if id_name_key in profile_index:
+                    row_number = profile_index[id_name_key]
+                elif id_name_key in norm_profile_index:
+                    row_number = norm_profile_index[id_name_key]
+                if row_number:
+                    # Cache this mapping for future participants in same batch
+                    student_id_index[student_id] = row_number
+                    print(f"[SHEETS] ✓ Row found via roster name for ID {student_id} -> row {row_number}", flush=True)
+
+            # Priority 3: Check by email
+            if row_number is None and email and email.lower() in email_index:
                 row_number = email_index[email.lower()]
 
-            # Try original (non-normalized) Zoom name in raw index
+            # Priority 4: Try original (non-normalized) Zoom name in raw index
             if row_number is None:
                 orig_key = (zoom_first.lower(), zoom_last.lower())
                 if orig_key in profile_index:
                     row_number = profile_index[orig_key]
 
-            # Try normalized Zoom name in normalized index
+            # Priority 5: Try normalized Zoom name in normalized index
             if row_number is None:
                 norm_key = (norm_first.lower(), norm_last.lower()) if norm_first and norm_last else None
                 if norm_key and norm_key in norm_profile_index:
                     row_number = norm_profile_index[norm_key]
 
-            # Try normalized name in raw profile index (in case stored names are clean)
+            # Priority 6: Try normalized name in raw profile index
             if row_number is None and norm_first:
                 name_key = (norm_first.lower(), norm_last.lower() if norm_last else "")
                 if name_key in profile_index:
                     row_number = profile_index[name_key]
 
-            # If roster match found, try to find existing profile with roster name
+            # Priority 7: If roster match found, try to find existing profile with roster name
             if row_number is None and roster_match:
                 roster_key = (roster_match["first_name"].lower(), roster_match["last_name"].lower())
                 if roster_key in profile_index:
                     row_number = profile_index[roster_key]
-                # Also try in normalized index
                 if row_number is None and roster_key in norm_profile_index:
                     row_number = norm_profile_index[roster_key]
 
-            # Try initial-based matching (e.g., "Jamie R" matches existing "Jamie Reisman")
+            # Priority 8: Initial-based matching (e.g., "Jamie R" matches existing "Jamie Reisman")
             if row_number is None and roster_match and len(roster_match["last_name"]) == 1:
                 initial_key = (roster_match["first_name"].lower(), roster_match["last_name"].lower())
                 if initial_key in initial_index:
                     row_number = initial_index[initial_key]
                     print(f"[SHEETS] ✓ Initial match: '{roster_match['first_name']} {roster_match['last_name']}' found existing profile at row {row_number}", flush=True)
 
-            # FALLBACK: First-name-only matching for cases like "Fritz", "Dilorom_Russian", "Chrisnove's iPhone"
+            # Priority 9 (LAST RESORT): First-name-only matching
             if row_number is None and norm_first:
-                # Try normalized first name index first (most likely to match)
                 if norm_first in norm_first_name_index:
                     row_number = norm_first_name_index[norm_first]
                     if match_confidence == "none":
@@ -1173,13 +1242,18 @@ class SheetsService:
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": False,
+                    "id_matched": id_matched,
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
-                print(f"[SHEETS] ✓ Matched '{zoom_full_name}' ({attendance_minutes} min) to existing row {row_number}", flush=True)
+                print(f"[SHEETS] ✓ Matched '{zoom_full_name}' ({attendance_minutes} min) to existing row {row_number}{' (via ID)' if id_matched else ''}", flush=True)
             else:
                 # New profile - use ORIGINAL Zoom name (not roster name)
                 new_profiles.append([zoom_first, zoom_last, email, roster_match_str])
+
+                # Track student ID -> row for new profiles too
+                if student_id and student_id not in student_id_index:
+                    student_id_index[student_id] = next_row
 
                 # Track for duplicate detection using BOTH raw and normalized names
                 # Raw name (as stored in sheet)
@@ -1208,7 +1282,7 @@ class SheetsService:
                 })
 
                 results["new_profiles"] += 1
-                if not roster_match and not mapping_match:
+                if not roster_match and not mapping_match and not id_matched:
                     results["unmatched"] += 1
                 results["profiles"].append({
                     "row": row_number,
@@ -1218,6 +1292,7 @@ class SheetsService:
                     "email": email,
                     "attendance_minutes": attendance_minutes,
                     "is_new": True,
+                    "id_matched": id_matched,
                     "roster_matched": roster_match is not None,
                     "mapping_matched": mapping_match is not None
                 })
