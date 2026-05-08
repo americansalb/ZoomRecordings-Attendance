@@ -13,6 +13,8 @@ apscheduler==3.10.4
 opencv-python-headless==4.10.0.84
 numpy>=1.24.0
 requests>=2.31.0
+redis>=5.0.0
+rq>=1.16.2
 
 # System dependencies (install separately):
 # - ffmpeg (for video trimming): apt-get install ffmpeg
