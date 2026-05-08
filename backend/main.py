@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 
 from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions
+from services.job_store import get_job_store
 from services.scheduler_service import scheduler_service
 
 load_dotenv()
@@ -66,6 +67,16 @@ async def startup_event():
         elif hasattr(route, 'path'):
             print(f"  MOUNT {route.path}", flush=True)
     print("=" * 50, flush=True)
+
+    # Mark any in-progress upload jobs as failed (left over from a previous
+    # process). Without this, the frontend polls /upload/status/{id} forever
+    # and gets 404 because the in-memory job dict was wiped by the restart.
+    try:
+        marked = get_job_store().mark_stale_failed()
+        if marked:
+            print(f"[JOBSTORE] Marked {marked} stale upload job(s) as failed", flush=True)
+    except Exception as e:
+        print(f"[JOBSTORE] Stale-check error: {e}", flush=True)
 
     # Start background scheduler for trainer absence checks
     scheduler_service.start()

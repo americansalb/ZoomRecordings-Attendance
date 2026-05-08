@@ -1,4 +1,25 @@
 # Render Blueprint for deployment
+#
+# Two deployment modes:
+#
+# 1. Single-process (default, no Redis): the web service runs uvicorn and
+#    runs upload jobs in-process via FastAPI BackgroundTasks. Job state is
+#    persisted in a local SQLite file (`backend/data/upload_jobs.db`). If
+#    the container restarts mid-upload, in-flight jobs are marked failed
+#    on startup so the frontend sees a clear error and the user can retry.
+#    To enable durable storage of the SQLite file across deploys, attach
+#    a Render Disk to the web service (see disks block below) — otherwise
+#    job history resets on each deploy.
+#
+# 2. Redis + worker (recommended for production): set REDIS_URL on BOTH
+#    the web service and the worker service. The web service enqueues
+#    jobs onto an RQ queue; the worker service runs them. Worker restarts
+#    independently of the web service, so a redeploy of the API doesn't
+#    kill in-flight uploads. Provision a Render Key Value (Redis-compatible)
+#    instance and copy its URL into REDIS_URL on both services.
+#    The `worker` service block below is commented out — uncomment it
+#    once you've provisioned Redis and added REDIS_URL.
+
 services:
   # Backend API
   - type: web
@@ -22,7 +43,40 @@ services:
           name: zoom-attendance-frontend
           type: web
           property: host
+      # Set REDIS_URL (e.g. from a Render Key Value instance) to enable the
+      # worker-mode pipeline. Leave unset to use the SQLite + BackgroundTasks
+      # fallback.
+      - key: REDIS_URL
+        sync: false
+      - key: UPLOAD_JOBS_DB
+        value: data/upload_jobs.db
     healthCheckPath: /health
+    # Optional: persist SQLite job history across deploys. Render Disks
+    # only attach to one service, so this is safe to keep on the API.
+    disk:
+      name: upload-jobs-data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1
+
+  # Upload worker (uncomment once REDIS_URL is configured)
+  # - type: worker
+  #   name: zoom-attendance-worker
+  #   runtime: python
+  #   buildCommand: apt-get update && apt-get install -y ffmpeg && cd backend && pip install -r requirements.txt
+  #   startCommand: cd backend && python worker.py
+  #   envVars:
+  #     - key: ZOOM_ACCOUNT_ID
+  #       sync: false
+  #     - key: ZOOM_CLIENT_ID
+  #       sync: false
+  #     - key: ZOOM_CLIENT_SECRET
+  #       sync: false
+  #     - key: GOOGLE_SERVICE_ACCOUNT_FILE
+  #       value: credentials.json
+  #     - key: GOOGLE_SHARED_DRIVE_ID
+  #       sync: false
+  #     - key: REDIS_URL
+  #       sync: false
 
   # Frontend
   - type: web

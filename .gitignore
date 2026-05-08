@@ -39,3 +39,4 @@ htmlcov/
 # Misc
 *.sqlite3
 *.db
+backend/data/
