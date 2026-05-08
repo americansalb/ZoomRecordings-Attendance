@@ -39,6 +39,33 @@ def _format_date_for_filename(date_str: str) -> str:
     return date_str
 
 
+def _disk_free_bytes(path: str) -> int:
+    try:
+        return shutil.disk_usage(path).free
+    except Exception:
+        return -1
+
+
+def _human(n: int) -> str:
+    if n < 0:
+        return "unknown"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    f = float(n)
+    for u in units:
+        if f < 1024 or u == units[-1]:
+            return f"{f:.1f} {u}"
+        f /= 1024
+    return f"{n} B"
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        logger.warning(f"[UPLOAD] Could not delete {path}: {e}")
+
+
 def run_upload_job(job_id: str) -> None:
     """
     Execute the full download/trim/upload pipeline for a job.
@@ -56,6 +83,7 @@ def run_upload_job(job_id: str) -> None:
     temp_dir = None
     trimmer = None
 
+    original_path = None  # set after we know temp_dir; deleted post-trim
     try:
         store.update_job(
             job_id,
@@ -65,29 +93,62 @@ def run_upload_job(job_id: str) -> None:
         )
 
         temp_dir = tempfile.mkdtemp(prefix=f"upload_{job_id}_")
-        video_path = os.path.join(temp_dir, "recording.mp4")
+        original_path = os.path.join(temp_dir, "recording.mp4")
+        video_path = original_path
+
+        # Pre-flight: peek at the file size and check we have room for it.
+        # Free-tier Render ephemeral disk is small; if the recording can't
+        # fit, fail fast with a clear message instead of hanging.
+        head_resp = requests.head(req["video_url"], allow_redirects=True, timeout=30)
+        announced_size = int(head_resp.headers.get("content-length", 0))
+        free = _disk_free_bytes(temp_dir)
+        logger.info(
+            f"[UPLOAD] Job {job_id}: file ~{_human(announced_size)}, "
+            f"disk free ~{_human(free)} at {temp_dir}"
+        )
+        # We need room for the original AND the trimmed copy briefly. We
+        # delete the original right after trim, but during trim both exist.
+        # Be generous: require 2.2x the file size to be safe.
+        if announced_size and free > 0 and free < int(announced_size * 2.2):
+            raise Exception(
+                f"Not enough disk space: file is {_human(announced_size)} "
+                f"but only {_human(free)} free. Free-tier Render disks are "
+                f"small; try the Speaker View (smaller) or upgrade the plan."
+            )
 
         logger.info(f"[UPLOAD] Downloading video for job {job_id}")
         # Long timeout: large recordings take a while; allow up to 1h.
         response = requests.get(req["video_url"], stream=True, timeout=3600)
         response.raise_for_status()
 
-        total_size = int(response.headers.get("content-length", 0))
+        total_size = int(response.headers.get("content-length", 0)) or announced_size
         downloaded = 0
         last_reported = 0.0
+        last_logged = 0.0
 
-        with open(video_path, "wb") as f:
+        with open(original_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
                 f.write(chunk)
                 downloaded += len(chunk)
                 if total_size > 0:
                     pct = downloaded / total_size
                     progress = 0.05 + (pct * 0.25)
-                    # Throttle DB/Redis writes to once per ~1% change
                     if progress - last_reported >= 0.01:
                         store.update_job(job_id, progress=progress)
                         last_reported = progress
+                    if pct - last_logged >= 0.10:
+                        logger.info(
+                            f"[UPLOAD] Job {job_id}: downloaded "
+                            f"{_human(downloaded)} / {_human(total_size)} ({pct*100:.0f}%)"
+                        )
+                        last_logged = pct
 
+        logger.info(
+            f"[UPLOAD] Job {job_id}: download complete, "
+            f"size on disk = {_human(os.path.getsize(original_path))}"
+        )
         store.update_job(
             job_id,
             progress=0.30,
@@ -95,7 +156,7 @@ def run_upload_job(job_id: str) -> None:
         )
 
         trimmer = VideoTrimmerService(output_dir=temp_dir)
-        duration = trimmer.get_video_duration(video_path)
+        duration = trimmer.get_video_duration(original_path)
         if not duration:
             raise Exception("Could not determine video duration")
 
@@ -120,11 +181,20 @@ def run_upload_job(job_id: str) -> None:
                 store.update_job(job_id, progress=0.30 + (pct / 100 * 0.20))
 
             trimmed_path = trimmer.trim_video(
-                video_path, start_time, end_time, progress_callback=trim_progress
+                original_path, start_time, end_time, progress_callback=trim_progress
             )
             if not trimmed_path:
                 raise Exception("Video trimming failed")
             video_path = trimmed_path
+            # KEY: remove the original immediately so we don't hold ~2x the
+            # file size on disk while uploading. On free-tier disks this is
+            # often the difference between "works" and "silently hangs".
+            _safe_remove(original_path)
+            logger.info(
+                f"[UPLOAD] Job {job_id}: trimmed file = "
+                f"{_human(os.path.getsize(video_path))}; original deleted; "
+                f"disk free now {_human(_disk_free_bytes(temp_dir))}"
+            )
 
         store.update_job(job_id, progress=0.50)
 
