@@ -37,7 +37,12 @@ All requests carry `Content-Type: application/json` and (if configured)
   "display_name": "AALB Assistant",
   "announce": true,
   "announcement": "Hi everyone — I'm the AALB assistant…",  // post on join if announce
-  "session_ref": "42"                // OPAQUE: echo this back on every event
+  "session_ref": "42",               // OPAQUE: echo this back on every event
+  "capture": {                        // per-student screenshot config (may be null)
+    "enabled": false,
+    "interval_seconds": 300,
+    "store_images": true
+  }
 }
 ```
 
@@ -128,6 +133,46 @@ approves them.
 Respond `200` to acknowledge; the backend returns `{ "success": true }`.
 
 ---
+
+## Screenshots / per-student capture
+
+If `capture.enabled` is true, the bot runs a capture loop every
+`capture.interval_seconds`. For **each participant** it renders *that user's own
+video stream* to an off-screen canvas (keyed by Zoom user id, so tile position
+is irrelevant), grabs a frame, and:
+
+1. Determines `video_on` (is the user's camera sending video?) and `face_present`
+   (OpenCV face check on the frame). These cross-check each other — camera off ⇒
+   `video_on:false`; camera on but no face ⇒ `face_present:false`.
+2. If `capture.store_images` is true, uploads the frame to Google Drive
+   (per-session folder) and keeps the link. If false, it discards the pixels and
+   records only the presence flags.
+3. Reports one manifest row to the backend:
+
+```
+POST {BACKEND}/api/tutor/bot/screenshots
+Header: X-Tutor-Bot-Secret: <secret>   (if configured)
+```
+
+```json
+{
+  "session_ref": "42",
+  "runtime_id": "bot_01HXYZ…",
+  "participant_id": "p_55",
+  "participant_name": "Maria Gomez",
+  "registrant_id": null,            // populate once registration links are used
+  "captured_at": 1749500000.0,
+  "video_on": true,
+  "face_present": true,
+  "stored": true,
+  "image_url": "https://drive.google.com/file/d/…/view",
+  "drive_file_id": "1AbC…"
+}
+```
+
+Attribution is by Zoom's stream identity (`participant_id`) plus `participant_name`
+— never by tile position. Both are stored so either can serve as a failsafe for
+the other.
 
 ## Notes
 

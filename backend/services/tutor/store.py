@@ -52,6 +52,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "max_ai_messages_per_session": 20,
         "quiet_mode": False,
     },
+    # Periodic per-student video snapshots. Off by default -- capturing student
+    # faces is a consent/privacy decision the admin must opt into.
+    "capture": {
+        "enabled": False,
+        "interval_seconds": 300,   # snapshot cadence per student
+        "store_images": True,      # False = record presence flags only, discard pixels
+    },
     "bot": {
         "display_name": "AALB Assistant",
         "announce_on_join": True,
@@ -167,6 +174,24 @@ class TutorStore:
     CREATE INDEX IF NOT EXISTS idx_tutor_messages_session ON tutor_messages(session_id);
     CREATE INDEX IF NOT EXISTS idx_tutor_messages_meeting ON tutor_messages(meeting_id);
     CREATE INDEX IF NOT EXISTS idx_tutor_messages_created ON tutor_messages(created_at);
+
+    CREATE TABLE IF NOT EXISTS tutor_screenshots (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id        INTEGER,
+        meeting_id        TEXT,
+        participant_id    TEXT,
+        participant_name  TEXT,
+        registrant_id     TEXT,
+        captured_at       REAL NOT NULL,
+        video_on          INTEGER NOT NULL DEFAULT 0,
+        face_present      INTEGER NOT NULL DEFAULT 0,
+        stored            INTEGER NOT NULL DEFAULT 0,
+        image_url         TEXT,
+        drive_file_id     TEXT,
+        created_at        REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tutor_shots_session ON tutor_screenshots(session_id);
+    CREATE INDEX IF NOT EXISTS idx_tutor_shots_captured ON tutor_screenshots(captured_at);
     """
 
     # Columns that hold JSON and should be (de)serialized transparently.
@@ -555,6 +580,69 @@ class TutorStore:
                 (session_id,),
             ).fetchone()
         return r["t"] if r and r["t"] is not None else None
+
+    # ------------------------------------------------------- screenshot manifest
+
+    def add_screenshot(
+        self,
+        *,
+        captured_at: float,
+        video_on: bool,
+        face_present: bool,
+        session_id: Optional[int] = None,
+        meeting_id: Optional[str] = None,
+        participant_id: Optional[str] = None,
+        participant_name: Optional[str] = None,
+        registrant_id: Optional[str] = None,
+        stored: bool = False,
+        image_url: Optional[str] = None,
+        drive_file_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = _now()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO tutor_screenshots
+                   (session_id, meeting_id, participant_id, participant_name, registrant_id,
+                    captured_at, video_on, face_present, stored, image_url, drive_file_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, meeting_id, participant_id, participant_name, registrant_id,
+                    captured_at, 1 if video_on else 0, 1 if face_present else 0,
+                    1 if stored else 0, image_url, drive_file_id, now,
+                ),
+            )
+            conn.commit()
+            shot_id = cur.lastrowid
+        with self._connect() as conn:
+            r = conn.execute("SELECT * FROM tutor_screenshots WHERE id = ?", (shot_id,)).fetchone()
+        return _row(r)
+
+    def list_screenshots(
+        self,
+        *,
+        session_id: Optional[int] = None,
+        meeting_id: Optional[str] = None,
+        participant_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if meeting_id is not None:
+            clauses.append("meeting_id = ?")
+            params.append(meeting_id)
+        if participant_id is not None:
+            clauses.append("participant_id = ?")
+            params.append(participant_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM tutor_screenshots{where} ORDER BY captured_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [_row(r) for r in rows]
 
 
 # --------------------------------------------------------------------- helpers

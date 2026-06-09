@@ -123,6 +123,7 @@ class LiveTutorService:
                 join_url=join_url,
                 announce=bool(bot_cfg.get("announce_on_join", True)),
                 announcement=bot_cfg.get("announcement"),
+                capture=settings.get("capture"),
             ))
         except BotRuntimeError as e:
             self.store.update_session(session["id"], status=store_mod.SESSION_ERROR, error=str(e))

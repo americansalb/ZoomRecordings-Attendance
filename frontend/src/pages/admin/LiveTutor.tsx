@@ -8,9 +8,10 @@ import {
   type TutorSession,
   type TutorApproval,
   type TutorMessage,
+  type TutorScreenshot,
 } from '../../services/api'
 
-type Tab = 'approvals' | 'sessions' | 'reminders' | 'policies' | 'messages' | 'settings'
+type Tab = 'approvals' | 'sessions' | 'reminders' | 'policies' | 'messages' | 'screenshots' | 'settings'
 
 function timeAgo(ts: number): string {
   const secs = Math.floor(Date.now() / 1000 - ts)
@@ -36,6 +37,7 @@ export default function LiveTutorPage() {
     { id: 'reminders', label: 'Reminders' },
     { id: 'policies', label: 'Policies' },
     { id: 'messages', label: 'Message Log' },
+    { id: 'screenshots', label: 'Screenshots' },
     { id: 'settings', label: 'Settings' },
   ]
 
@@ -90,6 +92,7 @@ export default function LiveTutorPage() {
       {tab === 'reminders' && <RemindersTab />}
       {tab === 'policies' && <PoliciesTab />}
       {tab === 'messages' && <MessagesTab />}
+      {tab === 'screenshots' && <ScreenshotsTab />}
       {tab === 'settings' && <SettingsTab />}
     </div>
   )
@@ -627,6 +630,66 @@ function MessagesTab() {
   )
 }
 
+// --------------------------------------------------------------- Screenshots
+
+function ScreenshotsTab() {
+  const { data: shots = [], isLoading } = useQuery({
+    queryKey: ['tutor-screenshots'],
+    queryFn: () => tutorApi.listScreenshots({ limit: 500 }),
+    refetchInterval: 20000,
+  })
+
+  return (
+    <div className="card">
+      <h3 className="font-semibold text-gray-900 mb-1">Per-student snapshots</h3>
+      <p className="text-sm text-gray-500 mb-3">
+        Each row is one snapshot of a student’s own video stream, attributed by Zoom identity (not tile position).
+        <span className="font-medium"> Camera on</span> and <span className="font-medium">Face visible</span> cross-check each other.
+        Enable capture in Settings.
+      </p>
+      {isLoading ? (
+        <div className="text-gray-500">Loading…</div>
+      ) : shots.length === 0 ? (
+        <div className="text-center text-gray-500 py-8">No snapshots yet.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500">
+                <th className="py-2 pr-4">When</th>
+                <th className="py-2 pr-4">Student</th>
+                <th className="py-2 pr-4">Camera</th>
+                <th className="py-2 pr-4">Face</th>
+                <th className="py-2 pr-4">Image</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {shots.map((s: TutorScreenshot) => (
+                <tr key={s.id}>
+                  <td className="py-2 pr-4 whitespace-nowrap text-gray-500">{timeAgo(s.captured_at)}</td>
+                  <td className="py-2 pr-4">
+                    <div className="font-medium text-gray-900">{s.participant_name || 'Unknown'}</div>
+                    <div className="text-xs text-gray-400">{s.registrant_id || s.participant_id || ''}</div>
+                  </td>
+                  <td className="py-2 pr-4">{presenceBadge(!!s.video_on, 'on', 'off')}</td>
+                  <td className="py-2 pr-4">{presenceBadge(!!s.face_present, 'visible', 'none')}</td>
+                  <td className="py-2 pr-4">
+                    {s.image_url ? (
+                      <a href={s.image_url} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">view</a>
+                    ) : (
+                      <span className="text-gray-400">log only</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ----------------------------------------------------------------- Settings
 
 function SettingsTab() {
@@ -649,7 +712,8 @@ function SettingsTab() {
   const set = (patch: Partial<TutorSettings>) =>
     setDraft({ ...current, ...patch, capabilities: { ...current.capabilities, ...(patch.capabilities || {}) },
       guardrails: { ...current.guardrails, ...(patch.guardrails || {}) },
-      bot: { ...current.bot, ...(patch.bot || {}) } })
+      bot: { ...current.bot, ...(patch.bot || {}) },
+      capture: { ...current.capture, ...(patch.capture || {}) } })
 
   const caps: { key: keyof TutorSettings['capabilities']; label: string; note?: string }[] = [
     { key: 'reminders', label: 'Reminders' },
@@ -722,6 +786,32 @@ function SettingsTab() {
         </div>
       </div>
 
+      <div className="card">
+        <h3 className="font-semibold text-gray-900 mb-1">Per-student screenshots</h3>
+        <p className="text-sm text-amber-600 mb-3">
+          Captures students’ faces on an interval (likely minors). Off by default — only enable with a consent/policy basis.
+          The bot announces itself on join.
+        </p>
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={current.capture.enabled}
+              onChange={(e) => set({ capture: { enabled: e.target.checked } as any })} />
+            <span className="text-gray-700">Enable periodic capture</span>
+          </label>
+          <label className="text-sm block max-w-xs">
+            <span className="block text-gray-600 mb-1">Snapshot interval (seconds per student)</span>
+            <input type="number" min={30} className="border border-gray-300 rounded p-2 w-full"
+              value={current.capture.interval_seconds}
+              onChange={(e) => set({ capture: { interval_seconds: Number(e.target.value) } as any })} />
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={current.capture.store_images}
+              onChange={(e) => set({ capture: { store_images: e.target.checked } as any })} />
+            <span className="text-gray-700">Store images to Google Drive (uncheck for presence-flags-only, no pixels kept)</span>
+          </label>
+        </div>
+      </div>
+
       <div className="flex items-center gap-3">
         <button className="btn btn-primary disabled:opacity-50" disabled={!draft || save.isPending}
           onClick={() => draft && save.mutate(draft)}>
@@ -743,6 +833,14 @@ function sourceLabel(source: string): string {
 function channelLabel(a: TutorApproval): string {
   if (a.channel === 'dm') return `DM${a.target_name ? ` → ${a.target_name}` : ''}`
   return 'Public'
+}
+
+function presenceBadge(on: boolean, yes: string, no: string) {
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs ${on ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500'}`}>
+      {on ? yes : no}
+    </span>
+  )
 }
 
 function statusBadge(status: string) {

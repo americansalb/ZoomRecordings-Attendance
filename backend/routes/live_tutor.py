@@ -35,6 +35,7 @@ class SettingsPatch(BaseModel):
     autonomy: Optional[str] = None
     guardrails: Optional[Dict[str, Any]] = None
     bot: Optional[Dict[str, Any]] = None
+    capture: Optional[Dict[str, Any]] = None
 
 
 class ReminderIn(BaseModel):
@@ -97,6 +98,20 @@ class SimulateInboundIn(BaseModel):
     text: str
     participant_id: Optional[str] = None
     participant_name: Optional[str] = None
+
+
+class ScreenshotIn(BaseModel):
+    session_ref: Optional[str] = None
+    runtime_id: Optional[str] = None
+    participant_id: Optional[str] = None
+    participant_name: Optional[str] = None
+    registrant_id: Optional[str] = None
+    captured_at: Optional[float] = None
+    video_on: bool = False
+    face_present: bool = False
+    stored: bool = False
+    image_url: Optional[str] = None
+    drive_file_id: Optional[str] = None
 
 
 def _actor(x_admin_user: Optional[str]) -> str:
@@ -325,6 +340,58 @@ async def list_messages(
         session_id=session_id, meeting_id=meeting_id, channel=channel, limit=limit
     )
     return {"success": True, "messages": msgs}
+
+
+# --------------------------------------------------------------- screenshots
+
+
+@router.get("/screenshots")
+async def list_screenshots(
+    session_id: Optional[int] = None,
+    meeting_id: Optional[str] = None,
+    participant_id: Optional[str] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    shots = get_tutor_store().list_screenshots(
+        session_id=session_id, meeting_id=meeting_id, participant_id=participant_id, limit=limit
+    )
+    return {"success": True, "screenshots": shots}
+
+
+@router.post("/bot/screenshots")
+async def ingest_screenshot(
+    body: ScreenshotIn,
+    x_tutor_bot_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Manifest row from the bot: who/when, video-on, face-present, and (if
+    stored) the Drive link. One row per per-student snapshot."""
+    _check_bot_secret(x_tutor_bot_secret)
+    import time as _time
+
+    store = get_tutor_store()
+    session = None
+    if body.session_ref:
+        try:
+            session = store.get_session(int(body.session_ref))
+        except (TypeError, ValueError):
+            session = None
+    if session is None and body.runtime_id:
+        session = store.get_session_by_runtime(body.runtime_id)
+
+    shot = store.add_screenshot(
+        captured_at=body.captured_at or _time.time(),
+        video_on=body.video_on,
+        face_present=body.face_present,
+        session_id=session["id"] if session else None,
+        meeting_id=(session.get("meeting_id") if session else None),
+        participant_id=body.participant_id,
+        participant_name=body.participant_name,
+        registrant_id=body.registrant_id,
+        stored=body.stored,
+        image_url=body.image_url,
+        drive_file_id=body.drive_file_id,
+    )
+    return {"success": True, "screenshot": shot}
 
 
 # --------------------------------------------------------------- bot webhook

@@ -583,11 +583,18 @@ export interface TutorBotConfig {
   announcement: string
 }
 
+export interface TutorCaptureConfig {
+  enabled: boolean
+  interval_seconds: number
+  store_images: boolean
+}
+
 export interface TutorSettings {
   capabilities: TutorCapabilities
   autonomy: string
   guardrails: TutorGuardrails
   bot: TutorBotConfig
+  capture: TutorCaptureConfig
 }
 
 export interface TutorStatus {
@@ -665,6 +672,22 @@ export interface TutorMessage {
   source: string
   reason: string | null
   approval_id: number | null
+  created_at: number
+}
+
+export interface TutorScreenshot {
+  id: number
+  session_id: number | null
+  meeting_id: string | null
+  participant_id: string | null
+  participant_name: string | null
+  registrant_id: string | null
+  captured_at: number
+  video_on: number
+  face_present: number
+  stored: number
+  image_url: string | null
+  drive_file_id: string | null
   created_at: number
 }
 
@@ -774,6 +797,11 @@ export const tutorApi = {
   listMessages: async (params?: { session_id?: number; meeting_id?: string; channel?: string; limit?: number }) => {
     const { data } = await api.get('/tutor/messages', { params })
     return data.messages as TutorMessage[]
+  },
+
+  listScreenshots: async (params?: { session_id?: number; meeting_id?: string; participant_id?: string; limit?: number }) => {
+    const { data } = await api.get('/tutor/screenshots', { params })
+    return data.screenshots as TutorScreenshot[]
   },
 }
 

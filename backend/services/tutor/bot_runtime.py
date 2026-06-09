@@ -51,6 +51,7 @@ class JoinRequest:
     join_url: Optional[str] = None
     announce: bool = True
     announcement: Optional[str] = None
+    capture: Optional[dict] = None  # screenshot capture config (enabled/interval/store)
 
 
 class BotRuntime(ABC):
@@ -108,6 +109,7 @@ class SelfHostedBotRuntime(BotRuntime):
             "announce": req.announce,
             "announcement": req.announcement,
             "session_ref": req.session_ref,
+            "capture": req.capture,
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
