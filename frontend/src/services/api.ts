@@ -560,4 +560,249 @@ export const uploadApi = {
   },
 }
 
+// ============================================================================
+// Live Tutor
+// ============================================================================
+
+export interface TutorCapabilities {
+  reminders: boolean
+  answer_questions: boolean
+  direct_messages: boolean
+  summon_dismiss: boolean
+}
+
+export interface TutorGuardrails {
+  min_seconds_between_messages: number
+  max_ai_messages_per_session: number
+  quiet_mode: boolean
+}
+
+export interface TutorBotConfig {
+  display_name: string
+  announce_on_join: boolean
+  announcement: string
+}
+
+export interface TutorCaptureConfig {
+  enabled: boolean
+  interval_seconds: number
+  store_images: boolean
+}
+
+export interface TutorSettings {
+  capabilities: TutorCapabilities
+  autonomy: string
+  guardrails: TutorGuardrails
+  bot: TutorBotConfig
+  capture: TutorCaptureConfig
+}
+
+export interface TutorStatus {
+  success: boolean
+  bot_configured: boolean
+  responder_available: boolean
+  pending_approvals: number
+  active_sessions: number
+  settings: TutorSettings
+}
+
+export interface TutorReminder {
+  id: number
+  label: string
+  message: string
+  enabled: number
+  created_at: number
+  updated_at: number
+}
+
+export interface TutorPolicy {
+  id: number
+  title: string
+  content: string
+  enabled: number
+  created_at: number
+  updated_at: number
+}
+
+export interface TutorSession {
+  id: number
+  meeting_id: string
+  meeting_uuid: string | null
+  topic: string | null
+  session_code: string | null
+  status: string
+  runtime_id: string | null
+  join_url: string | null
+  overrides: Record<string, unknown> | null
+  summoned_by: string | null
+  error: string | null
+  created_at: number
+  updated_at: number
+}
+
+export interface TutorApproval {
+  id: number
+  session_id: number | null
+  meeting_id: string | null
+  channel: 'public' | 'dm'
+  target_id: string | null
+  target_name: string | null
+  source: string
+  reason: string | null
+  draft_text: string
+  final_text: string | null
+  context: Record<string, unknown> | null
+  confidence: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'sent' | 'failed'
+  decided_by: string | null
+  decided_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+export interface TutorMessage {
+  id: number
+  session_id: number | null
+  meeting_id: string | null
+  direction: 'inbound' | 'outbound'
+  channel: 'public' | 'dm'
+  participant_id: string | null
+  participant_name: string | null
+  text: string
+  source: string
+  reason: string | null
+  approval_id: number | null
+  created_at: number
+}
+
+export interface TutorScreenshot {
+  id: number
+  session_id: number | null
+  meeting_id: string | null
+  participant_id: string | null
+  participant_name: string | null
+  registrant_id: string | null
+  captured_at: number
+  video_on: number
+  face_present: number
+  stored: number
+  image_url: string | null
+  drive_file_id: string | null
+  created_at: number
+}
+
+export const tutorApi = {
+  getStatus: async () => {
+    const { data } = await api.get('/tutor/status')
+    return data as TutorStatus
+  },
+  getSettings: async () => {
+    const { data } = await api.get('/tutor/settings')
+    return data.settings as TutorSettings
+  },
+  patchSettings: async (patch: Partial<TutorSettings>) => {
+    const { data } = await api.patch('/tutor/settings', patch)
+    return data.settings as TutorSettings
+  },
+
+  listReminders: async () => {
+    const { data } = await api.get('/tutor/reminders')
+    return data.reminders as TutorReminder[]
+  },
+  createReminder: async (body: { label: string; message: string; enabled?: boolean }) => {
+    const { data } = await api.post('/tutor/reminders', body)
+    return data.reminder as TutorReminder
+  },
+  updateReminder: async (id: number, patch: Partial<{ label: string; message: string; enabled: boolean }>) => {
+    const { data } = await api.patch(`/tutor/reminders/${id}`, patch)
+    return data.reminder as TutorReminder
+  },
+  deleteReminder: async (id: number) => {
+    await api.delete(`/tutor/reminders/${id}`)
+  },
+
+  listPolicies: async () => {
+    const { data } = await api.get('/tutor/policies')
+    return data.policies as TutorPolicy[]
+  },
+  createPolicy: async (body: { title: string; content: string; enabled?: boolean }) => {
+    const { data } = await api.post('/tutor/policies', body)
+    return data.policy as TutorPolicy
+  },
+  updatePolicy: async (id: number, patch: Partial<{ title: string; content: string; enabled: boolean }>) => {
+    const { data } = await api.patch(`/tutor/policies/${id}`, patch)
+    return data.policy as TutorPolicy
+  },
+  deletePolicy: async (id: number) => {
+    await api.delete(`/tutor/policies/${id}`)
+  },
+
+  listSessions: async () => {
+    const { data } = await api.get('/tutor/sessions')
+    return data.sessions as TutorSession[]
+  },
+  summon: async (body: {
+    meeting_id: string
+    topic?: string
+    session_code?: string
+    meeting_uuid?: string
+    join_url?: string
+  }) => {
+    const { data } = await api.post('/tutor/sessions/summon', body)
+    return data.session as TutorSession
+  },
+  dismiss: async (sessionId: number) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/dismiss`)
+    return data.session as TutorSession
+  },
+  postReminder: async (sessionId: number, body: { reminder_id?: number; text?: string }) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/reminder`, body)
+    return data.message as TutorMessage
+  },
+  sendMessage: async (
+    sessionId: number,
+    body: { channel: 'public' | 'dm'; text: string; target_id?: string; target_name?: string }
+  ) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/message`, body)
+    return data.message as TutorMessage
+  },
+  requestAiDm: async (
+    sessionId: number,
+    body: { target_id: string; target_name?: string; instruction: string }
+  ) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/ai-dm`, body)
+    return data.approval as TutorApproval
+  },
+  simulateInbound: async (
+    sessionId: number,
+    body: { text: string; channel?: 'public' | 'dm'; participant_name?: string; participant_id?: string }
+  ) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/simulate-inbound`, body)
+    return data as { success: boolean; drafted: boolean; approval: TutorApproval | null }
+  },
+
+  listApprovals: async (status?: string) => {
+    const { data } = await api.get('/tutor/approvals', { params: status ? { status } : undefined })
+    return data.approvals as TutorApproval[]
+  },
+  approve: async (id: number, finalText?: string) => {
+    const { data } = await api.post(`/tutor/approvals/${id}/approve`, { final_text: finalText })
+    return data.approval as TutorApproval
+  },
+  reject: async (id: number) => {
+    const { data } = await api.post(`/tutor/approvals/${id}/reject`)
+    return data.approval as TutorApproval
+  },
+
+  listMessages: async (params?: { session_id?: number; meeting_id?: string; channel?: string; limit?: number }) => {
+    const { data } = await api.get('/tutor/messages', { params })
+    return data.messages as TutorMessage[]
+  },
+
+  listScreenshots: async (params?: { session_id?: number; meeting_id?: string; participant_id?: string; limit?: number }) => {
+    const { data } = await api.get('/tutor/screenshots', { params })
+    return data.screenshots as TutorScreenshot[]
+  },
+}
+
 export default api

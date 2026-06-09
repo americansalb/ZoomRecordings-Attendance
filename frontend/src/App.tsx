@@ -7,6 +7,7 @@ import SessionPage from './pages/admin/Session'
 import DuplicatesPage from './pages/admin/Duplicates'
 import NameMappingsPage from './pages/admin/NameMappings'
 import LiveSessionsPage from './pages/admin/LiveSessions'
+import LiveTutorPage from './pages/admin/LiveTutor'
 
 // Student Pages
 import StudentSearch from './pages/student/Search'
@@ -58,6 +59,7 @@ function App() {
           <Route path="/" element={<AdminDashboard />} />
           <Route path="/recordings" element={<RecordingsPage />} />
           <Route path="/live" element={<LiveSessionsPage />} />
+          <Route path="/tutor" element={<LiveTutorPage />} />
           <Route path="/session/:sessionCode" element={<SessionPage />} />
           <Route path="/duplicates/:sessionCode" element={<DuplicatesPage />} />
           <Route path="/mappings" element={<NameMappingsPage />} />

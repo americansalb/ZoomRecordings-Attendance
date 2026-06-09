@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions
+from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions, live_tutor
 from services.job_store import get_job_store
 from services.scheduler_service import scheduler_service
 
@@ -57,6 +57,18 @@ async def startup_event():
     alert_emails = os.getenv("TRAINER_ALERT_EMAILS")
     print(f"SMTP_USER: {'SET' if smtp_user else 'NOT SET (email alerts disabled)'}", flush=True)
     print(f"TRAINER_ALERT_EMAILS: {'SET' if alert_emails else 'NOT SET'}", flush=True)
+
+    # Check Live Tutor configuration
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    tutor_bot_url = os.getenv("TUTOR_BOT_BASE_URL")
+    print(f"ANTHROPIC_API_KEY: {'SET' if anthropic_key else 'NOT SET (AI drafting disabled)'}", flush=True)
+    print(f"TUTOR_BOT_BASE_URL: {'SET' if tutor_bot_url else 'NOT SET (bot sends are simulated)'}", flush=True)
+    try:
+        from services.tutor.store import get_tutor_store
+        get_tutor_store()  # create the SQLite schema eagerly
+        print("[TUTOR] Store initialized", flush=True)
+    except Exception as e:
+        print(f"[TUTOR] Store init error: {e}", flush=True)
 
     # Log registered routes
     print("=" * 50, flush=True)
@@ -108,6 +120,7 @@ app.include_router(mappings.router, prefix="/api/mappings", tags=["Mappings"])
 app.include_router(proctoring.router, prefix="/api", tags=["Proctoring"])
 app.include_router(video_upload.router, prefix="/api", tags=["Video Upload"])
 app.include_router(live_sessions.router, prefix="/api", tags=["Live Sessions"])
+app.include_router(live_tutor.router, prefix="/api", tags=["Live Tutor"])
 
 
 @app.get("/api/health")

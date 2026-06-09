@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Live Tutor — Zoom client</title>
+    <!--
+      Include the Zoom Web Meeting SDK (Component View) for YOUR SDK version.
+      Pin the version you developed your own bot against. Example (replace VERSION):
+
+      <script src="https://source.zoom.us/VERSION/zoom-meeting-embedded-VERSION.min.js"></script>
+
+      The page is served by the bot with COOP/COEP headers so the SDK's
+      SharedArrayBuffer works (see app.py). The Zoom CDN supports CORP.
+    -->
+    <script src="https://source.zoom.us/3.13.2/zoom-meeting-embedded-3.13.2.min.js"></script>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; }
+      #zoom-root { width: 1280px; height: 720px; }
+      /* Off-screen canvas we render individual users into for capture. */
+      #cap-canvas { position: absolute; left: -10000px; top: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="zoom-root"></div>
+    <canvas id="cap-canvas" width="320" height="180"></canvas>
+    <script src="/static/zoom_client.js"></script>
+  </body>
+</html>
