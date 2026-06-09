@@ -16,5 +16,6 @@ ENV BOT_HEADLESS=true \
 
 EXPOSE 8088
 
-# uvicorn serves the contract + the Zoom client page.
-CMD ["uvicorn", "bot.app:app", "--host", "0.0.0.0", "--port", "8088"]
+# uvicorn serves the contract + the Zoom client page. Bind Render's $PORT
+# (falls back to 8088 for local Docker runs).
+CMD ["sh", "-c", "uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088}"]

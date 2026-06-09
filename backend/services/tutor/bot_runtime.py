@@ -197,7 +197,10 @@ def get_bot_runtime() -> BotRuntime:
     """Self-hosted runtime if TUTOR_BOT_BASE_URL is set, else the null runtime."""
     global _runtime
     if _runtime is None:
-        base_url = os.getenv("TUTOR_BOT_BASE_URL")
+        base_url = (os.getenv("TUTOR_BOT_BASE_URL") or "").strip().rstrip("/")
+        # Render's fromService provides a bare hostname; make it a usable URL.
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = "https://" + base_url
         if base_url:
             _runtime = SelfHostedBotRuntime(
                 base_url, shared_secret=os.getenv("TUTOR_BOT_SHARED_SECRET")

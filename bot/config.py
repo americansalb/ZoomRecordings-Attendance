@@ -23,13 +23,26 @@ class Config:
     drive_folder_id: Optional[str]
 
 
+def _with_scheme(url: str) -> str:
+    """Render's fromService gives a bare hostname; make it a usable URL."""
+    url = (url or "").strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 def load_config() -> Config:
     return Config(
-        backend_url=os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/"),
+        backend_url=_with_scheme(os.getenv("BACKEND_URL", "http://localhost:8000")),
         bot_shared_secret=os.getenv("TUTOR_BOT_SHARED_SECRET"),
         sdk_key=os.getenv("ZOOM_MEETING_SDK_KEY"),
         sdk_secret=os.getenv("ZOOM_MEETING_SDK_SECRET"),
-        public_base_url=os.getenv("BOT_PUBLIC_BASE_URL", "http://localhost:8088").rstrip("/"),
+        # Prefer an explicit value; else use the public URL Render injects for us.
+        public_base_url=_with_scheme(
+            os.getenv("BOT_PUBLIC_BASE_URL")
+            or os.getenv("RENDER_EXTERNAL_URL")
+            or "http://localhost:8088"
+        ),
         headless=os.getenv("BOT_HEADLESS", "true").lower() not in ("false", "0", "no"),
         drive_folder_id=os.getenv("TUTOR_DRIVE_FOLDER_ID") or os.getenv("GOOGLE_SHARED_DRIVE_ID"),
     )

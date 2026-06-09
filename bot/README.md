@@ -32,18 +32,28 @@ backend ──HTTP (TUTOR_BOT.md)──► bot/app.py ──Playwright──► 
 
 ## Configuration
 
+On Render, the Blueprint (`render.yaml`) wires the two services together, so the
+only values you paste are the Zoom keys (and Google creds, for screenshots).
+
+**You paste these:**
+
 | Env var | Purpose |
 |---|---|
-| `BACKEND_URL` | The Phase 1 backend base URL (default `http://localhost:8000`). |
-| `TUTOR_BOT_SHARED_SECRET` | Shared secret; must match the backend's. Verified on inbound control calls and sent on outbound posts. |
-| `ZOOM_MEETING_SDK_KEY` / `ZOOM_MEETING_SDK_SECRET` | Meeting SDK app credentials (sign the join). |
-| `BOT_PUBLIC_BASE_URL` | URL the headless browser uses to load the client page (must serve COOP/COEP — this app does). |
-| `BOT_HEADLESS` | `true` (default) or `false` for debugging with a visible browser. |
-| `TUTOR_DRIVE_FOLDER_ID` / `GOOGLE_SHARED_DRIVE_ID` | Parent Drive folder for per-session screenshot folders. |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` *or* `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY` | Drive credentials. |
+| `ZOOM_MEETING_SDK_KEY` / `ZOOM_MEETING_SDK_SECRET` | Meeting SDK app credentials (Client ID + Secret). |
+| `GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY` (or `GOOGLE_SERVICE_ACCOUNT_FILE`) | Drive credentials for screenshot uploads. |
+| `TUTOR_DRIVE_FOLDER_ID` | (optional) Parent Drive folder for per-session screenshot folders. |
 
-On the **backend**, point `TUTOR_BOT_BASE_URL` at this service and set the same
-`TUTOR_BOT_SHARED_SECRET`. Then summon/dismiss and chat flow through here.
+**Auto-set on Render (set by hand only for local dev):**
+
+| Env var | Purpose |
+|---|---|
+| `BACKEND_URL` | Backend base URL. On Render, wired from the backend service. A bare hostname is fine — the bot adds `https://`. |
+| `TUTOR_BOT_SHARED_SECRET` | Shared secret. Generated once and shared with the backend via an env group. |
+| `BOT_PUBLIC_BASE_URL` | URL the headless browser loads the client page from. Defaults to Render's `RENDER_EXTERNAL_URL`. |
+| `BOT_HEADLESS` | `true` (default) or `false` to debug with a visible browser. |
+
+The backend side (`TUTOR_BOT_BASE_URL`, `TUTOR_BOT_SHARED_SECRET`,
+`ANTHROPIC_API_KEY`) is likewise wired by the Blueprint — see `render.yaml`.
 
 ## Run
 

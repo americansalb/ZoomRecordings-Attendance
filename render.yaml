@@ -43,6 +43,18 @@ services:
           name: zoom-attendance-frontend
           type: web
           property: host
+      # --- Live Tutor ---
+      # Opus 4.8 key for AI drafting (paste this one in the dashboard).
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Auto-wired to the bot service's hostname — no URL to look up.
+      - key: TUTOR_BOT_BASE_URL
+        fromService:
+          name: livetutor-bot
+          type: web
+          property: host
+      # Shared secret between backend and bot, generated once (see envVarGroups).
+      - fromGroup: livetutor-shared
       # Set REDIS_URL (e.g. from a Render Key Value instance) to enable the
       # worker-mode pipeline. Leave unset to use the SQLite + BackgroundTasks
       # fallback.
@@ -95,3 +107,45 @@ services:
       - type: rewrite
         source: /*
         destination: /index.html
+
+  # Live Tutor bot (joins meetings). Runs the Zoom Web SDK in headless Chromium,
+  # so it ships as a Docker image (the Playwright base image bundles Chromium +
+  # WebRTC libs). The only values you paste are the two Zoom Meeting SDK keys and
+  # your Google creds — every URL and the shared secret are wired automatically.
+  - type: web
+    name: livetutor-bot
+    runtime: docker
+    dockerfilePath: ./bot/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      # From your Zoom "General App" (Meeting SDK enabled): Client ID + Secret.
+      - key: ZOOM_MEETING_SDK_KEY
+        sync: false
+      - key: ZOOM_MEETING_SDK_SECRET
+        sync: false
+      # Same Google service account the backend uses, for Drive screenshot uploads.
+      - key: GOOGLE_CLIENT_EMAIL
+        sync: false
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false
+      # Optional: Drive folder to nest per-session screenshot folders under.
+      - key: TUTOR_DRIVE_FOLDER_ID
+        sync: false
+      # Auto-wired to the backend's hostname — no URL to look up.
+      - key: BACKEND_URL
+        fromService:
+          name: zoom-attendance-api
+          type: web
+          property: host
+      # Same generated shared secret as the backend.
+      - fromGroup: livetutor-shared
+      # BOT_PUBLIC_BASE_URL is left unset on purpose: the bot reads its own public
+      # URL from Render's RENDER_EXTERNAL_URL automatically.
+
+# Generated once, shared by the backend and the bot so they trust each other.
+envVarGroups:
+  - name: livetutor-shared
+    envVars:
+      - key: TUTOR_BOT_SHARED_SECRET
+        generateValue: true
