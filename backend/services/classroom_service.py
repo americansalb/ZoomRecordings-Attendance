@@ -189,6 +189,24 @@ class ClassroomService:
                         "project yet. Google says: " + google_message
                     ),
                 )
+            # Reading courses can succeed while writing fails, and the two have
+            # different fixes — so don't lump them together.
+            if (
+                "insufficient authentication scopes" in google_message.lower()
+                or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in body
+            ):
+                return ClassroomResult(
+                    ok=False,
+                    reason="scope_missing",
+                    detail=(
+                        "Reading courses works, but posting doesn't — the "
+                        "classroom.courseworkmaterials scope is missing from the domain-wide "
+                        "delegation entry. In the Admin console, open the delegation row, click "
+                        "Edit, and make sure all three of these are listed: "
+                        "classroom.courses.readonly, classroom.topics, "
+                        "classroom.courseworkmaterials."
+                    ),
+                )
             if "Requested entity was not found" in google_message:
                 return ClassroomResult(
                     ok=False,
