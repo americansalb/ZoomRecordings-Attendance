@@ -164,7 +164,8 @@ def compute_trim(
 
 
 DEFAULT_CLASS_MINUTES = 180        # classes run three hours
-DEFAULT_PAD_MINUTES = 5            # keep five minutes either side
+DEFAULT_PAD_BEFORE_MINUTES = 5     # keep five minutes before the start
+DEFAULT_PAD_AFTER_MINUTES = 10     # and ten after the end, where the recording has them
 
 
 def build_title(
@@ -222,8 +223,8 @@ def manual_trim_settings(
         timezone=timezone,
         scheduled_start=f"{hour:02d}:{minute:02d}",
         scheduled_end=f"{end_total // 60:02d}:{end_total % 60:02d}",
-        pad_before_minutes=DEFAULT_PAD_MINUTES,
-        pad_after_minutes=DEFAULT_PAD_MINUTES,
+        pad_before_minutes=DEFAULT_PAD_BEFORE_MINUTES,
+        pad_after_minutes=DEFAULT_PAD_AFTER_MINUTES,
     )
 
 
@@ -295,7 +296,8 @@ def plan_recording(
             f"Class started {manual_start} and ran "
             f"{(manual_duration_minutes or DEFAULT_CLASS_MINUTES) // 60}h"
             f"{(manual_duration_minutes or DEFAULT_CLASS_MINUTES) % 60:02d}m. "
-            f"Keeping {DEFAULT_PAD_MINUTES} minutes either side."
+            f"Keeping {DEFAULT_PAD_BEFORE_MINUTES} min before and "
+            f"{DEFAULT_PAD_AFTER_MINUTES} min after."
         )
     elif settings and duration_seconds > 0:
         trim = compute_trim(settings, start_utc, duration_seconds)

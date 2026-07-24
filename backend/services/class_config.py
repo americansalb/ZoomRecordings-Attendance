@@ -96,9 +96,12 @@ class ClassSettings:
     scheduled_end: str = ""                     # "02:00" local (may cross midnight)
     meeting_weekdays: List[int] = field(default_factory=list)  # 0=Mon .. 6=Sun
     first_class_date: str = ""                  # "2025-11-10", day 1
-    # Classes run ~3 hours; keep 5 minutes either side of the scheduled window.
+    # Keep 5 minutes before the scheduled start and 10 after the scheduled end.
+    # Classes run over more often than they start early, and the end is clamped
+    # to the real recording length, so asking for 10 costs nothing when it isn't
+    # there.
     pad_before_minutes: int = 5
-    pad_after_minutes: int = 5
+    pad_after_minutes: int = 10
 
     # --- what to publish ---
     views: List[str] = field(default_factory=lambda: [PRIMARY_VIEW])

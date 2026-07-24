@@ -69,7 +69,7 @@ class ClassPayload(BaseModel):
     meeting_weekdays: List[int] = []
     first_class_date: str = ""
     pad_before_minutes: int = 5
-    pad_after_minutes: int = 5
+    pad_after_minutes: int = 10
     views: List[str] = ["speaker"]
     filename_pattern: str = class_config.DEFAULT_FILENAME_PATTERN
     title_pattern: str = class_config.DEFAULT_TITLE_PATTERN

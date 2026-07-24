@@ -57,10 +57,11 @@ old flow did when its spreadsheet lookup failed.
 
 `services/publish_planner.py :: compute_trim`
 
-1. **A start time you typed** — keeps 5 min before it and 5 min after the class
+1. **A start time you typed** — keeps 5 min before it and 10 min after the class
    length you picked (3 hours by default)
 2. **The class schedule** — `scheduled_start` to `scheduled_end`, plus each
-   class's `pad_before_minutes` / `pad_after_minutes` (5 and 5 by default)
+   class's `pad_before_minutes` / `pad_after_minutes` (5 before, 10 after by
+   default — classes run over more often than they start early)
 3. **Neither** — the whole recording, and the screen asks when class started
 
 Two guards, both tested: a recording whose start is more than 4 hours before or
@@ -136,5 +137,5 @@ typed.
 | --- | --- |
 | Class start / end time | Not stated anywhere in Zoom or Classroom data |
 | Teacher email to post as | A choice about identity, not a fact to look up |
-| Trim padding | Policy, not data (defaults to 5 min either side) |
+| Trim padding | Policy, not data (defaults to 5 min before, 10 after) |
 | Filename / title patterns | Naming convention |

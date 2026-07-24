@@ -541,7 +541,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         <Card title="When did the class start?" tone="amber">
           <p className="text-sm text-gray-600 mb-4">
             There's no schedule to trim against, so tell us when class actually started. We'll keep
-            5 minutes before it and 5 minutes after it ends. Recording began at{' '}
+            5 minutes before it and 10 minutes after it ends, where the recording has them.
+            Recording began at{' '}
             <b className="font-mono">{draft.started_local}</b>.
           </p>
           <div className="grid sm:grid-cols-3 gap-4 items-end">
@@ -1084,8 +1085,8 @@ function Settings({ onDone }: { onDone: () => void }) {
     scheduled_end: '',
     meeting_weekdays: [],
     first_class_date: '',
-    pad_before_minutes: 1,
-    pad_after_minutes: 5,
+    pad_before_minutes: 5,
+    pad_after_minutes: 10,
     views: ['speaker'],
     filename_pattern: 'Session {session} - Day {day} - {date} ({view}).mp4',
     title_pattern: '{course} — Day {day} ({date})',
