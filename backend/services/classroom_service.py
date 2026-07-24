@@ -17,6 +17,7 @@ pipeline still uploads to Drive and hands back a link to post by hand.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -169,12 +170,43 @@ class ClassroomService:
                 ),
             )
         if status == 403:
+            # Google's own message on a 403 is genuinely useful — for a disabled
+            # API it contains a direct "enable it here" link with the project ID
+            # already filled in. Throwing it away and printing a generic guess
+            # makes this harder to fix, not easier.
+            google_message = ""
+            try:
+                google_message = (json.loads(body).get("error") or {}).get("message", "")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+            if "has not been used in project" in google_message or "is disabled" in google_message:
+                return ClassroomResult(
+                    ok=False,
+                    reason="api_not_enabled",
+                    detail=(
+                        "The Google Classroom API isn't switched on for your Google Cloud "
+                        "project yet. Google says: " + google_message
+                    ),
+                )
+            if "Requested entity was not found" in google_message:
+                return ClassroomResult(
+                    ok=False,
+                    reason="not_a_classroom_user",
+                    detail=(
+                        "That account isn't set up in Google Classroom. Sign in to "
+                        "classroom.google.com as it once to activate it, and make sure it's a "
+                        "teacher on the courses you want to post to."
+                    ),
+                )
             return ClassroomResult(
                 ok=False,
                 reason="permission_denied",
                 detail=(
-                    "Permission denied. Either the Classroom API isn't enabled, the teacher "
-                    "isn't a teacher on this course, or the course is archived."
+                    "Google refused the request"
+                    + (f": {google_message}" if google_message else ".")
+                    + " Usual causes: the Classroom API isn't enabled on the Cloud project, or "
+                    "that account isn't a teacher on the course."
                 ),
             )
         if status == 404:
