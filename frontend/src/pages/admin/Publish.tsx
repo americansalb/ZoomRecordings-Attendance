@@ -1144,6 +1144,30 @@ function Settings({ onDone }: { onDone: () => void }) {
           style={{ background: ACCENT }}>
           {saved ? 'Saved' : 'Save'}
         </button>
+
+        {/* If settings keep disappearing, say so here rather than leaving
+            someone to notice they've been asked to reconnect again. */}
+        {data?.storage && !data.storage.exists && (
+          <div className="mt-4 rounded-lg border p-3 text-sm"
+            style={{ borderColor: COLORS.amber.ink, background: COLORS.amber.soft,
+                     color: COLORS.amber.ink }}>
+            <b className="block mb-1">These settings may not survive the next deploy.</b>
+            <span className="text-gray-800">
+              Nothing is saved at{' '}
+              <span className="font-mono text-xs">{data.storage.path}</span> yet. If you've
+              saved before and it's gone, that folder is being wiped on each deploy — attach a
+              persistent disk in Render at that path, or set{' '}
+              <span className="font-mono text-xs">CLASSROOM_SUBJECT</span> as an environment
+              variable so at least the Classroom connection sticks.
+            </span>
+          </div>
+        )}
+        {data?.storage?.env_fallback_in_use && (
+          <p className="mt-3 text-xs text-gray-500">
+            Teacher email is coming from the CLASSROOM_SUBJECT environment variable, so it
+            survives redeploys.
+          </p>
+        )}
       </section>
 
       {data?.classes.map((c) => (
