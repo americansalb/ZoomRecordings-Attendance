@@ -8,6 +8,7 @@ import DuplicatesPage from './pages/admin/Duplicates'
 import NameMappingsPage from './pages/admin/NameMappings'
 import LiveSessionsPage from './pages/admin/LiveSessions'
 import LiveTutorPage from './pages/admin/LiveTutor'
+import PublishPage from './pages/admin/Publish'
 
 // Student Pages
 import StudentSearch from './pages/student/Search'
@@ -39,6 +40,16 @@ function App() {
                   Admin
                 </Link>
                 <Link
+                  to="/publish"
+                  className={`px-3 py-2 rounded-md text-sm font-medium ${
+                    location.pathname === '/publish'
+                      ? 'text-blue-600 bg-blue-50'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Publish
+                </Link>
+                <Link
                   to="/student"
                   className={`px-3 py-2 rounded-md text-sm font-medium ${
                     !isAdmin ? 'text-blue-600 bg-blue-50' : 'text-gray-600 hover:text-gray-900'
@@ -58,6 +69,7 @@ function App() {
           {/* Admin Routes */}
           <Route path="/" element={<AdminDashboard />} />
           <Route path="/recordings" element={<RecordingsPage />} />
+          <Route path="/publish" element={<PublishPage />} />
           <Route path="/live" element={<LiveSessionsPage />} />
           <Route path="/tutor" element={<LiveTutorPage />} />
           <Route path="/session/:sessionCode" element={<SessionPage />} />
