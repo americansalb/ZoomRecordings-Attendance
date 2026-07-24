@@ -900,6 +900,12 @@ function Outcome({ result }: { result: any }) {
           Open the Classroom post →
         </a>
       )}
+      {classroom?.ok && classroom.reason === 'posted_as_link' && (
+        <div className="mt-3 rounded-lg border p-3 text-sm"
+          style={{ borderColor: COLORS.amber.ink, background: '#fff', color: COLORS.amber.ink }}>
+          <b>Posted.</b> {classroom.detail}
+        </div>
+      )}
       {classroom && !classroom.ok && (
         <div className="mt-3 rounded-lg border p-3 text-sm"
           style={{ borderColor: COLORS.amber.ink, background: '#fff', color: COLORS.amber.ink }}>

@@ -211,15 +211,23 @@ def run_publish_job(job_id: str) -> None:
         )
 
         config = class_config.load()
+
+        # Students reach the video through the "anyone with the link" permission
+        # set at upload, so this is not what makes the post work. It gives the
+        # teacher the recording in their own Drive, and covers the case where
+        # Classroom resolves the link back into the file. Best-effort.
+        for upload in uploaded:
+            drive_service.grant_access(upload["file_id"], config.classroom_subject)
+
         classroom = classroom_service.post_material(
             subject=config.classroom_subject,
             course_id=req.get("course_id", ""),
             drive_file_ids=[u["file_id"] for u in uploaded],
+            drive_links=[u["link"] for u in uploaded if u.get("link")],
             title=req.get("title") or "Class recording",
             description=req.get("description", ""),
             topic_id=req.get("topic_id") or None,
             state=req.get("post_state", "PUBLISHED"),
-            share_mode=req.get("share_mode", "VIEW"),
             scheduled_time=req.get("scheduled_time") or None,
         )
 
