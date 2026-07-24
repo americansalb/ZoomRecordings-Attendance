@@ -1087,7 +1087,7 @@ function ClassCard({
   onDone,
 }: {
   settings: ClassSettings
-  courses: { id: string; name: string; section: string }[]
+  courses: { id: string; name: string; section: string; parsed?: any }[]
   viewKeys: string[]
   viewTypes: Record<string, { name: string; description: string; zoom_type: string; folder: string }>
   isNew?: boolean
@@ -1249,9 +1249,21 @@ function ClassCard({
           <select className="input" value={s.classroom_course_id}
             onChange={(e) => {
               const course = courses.find((x) => x.id === e.target.value)
+              const p = course?.parsed
+              // The course name already states the session number, the days it
+              // meets and the term dates. Fill those in, but never overwrite
+              // something already typed — a suggestion, not a takeover.
               set({
                 classroom_course_id: e.target.value,
                 classroom_course_name: course?.name || '',
+                ...(p?.session_code && !s.code ? { code: p.session_code } : {}),
+                ...(p?.label && !s.label ? { label: p.label } : {}),
+                ...(p?.meeting_weekdays?.length && s.meeting_weekdays.length === 0
+                  ? { meeting_weekdays: p.meeting_weekdays }
+                  : {}),
+                ...(p?.first_class_date && !s.first_class_date
+                  ? { first_class_date: p.first_class_date }
+                  : {}),
               })
             }}>
             <option value="">Not connected — Drive only</option>
