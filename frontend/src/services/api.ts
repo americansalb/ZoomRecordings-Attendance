@@ -1000,7 +1000,21 @@ export const publishApi = {
     const { data } = await api.get('/publish/classroom/courses')
     return data as {
       ok: boolean
-      courses: { id: string; name: string; section: string; link: string }[]
+      courses: {
+        id: string
+        name: string
+        section: string
+        link: string
+        parsed: {
+          session_code: string | null
+          meeting_weekdays: number[]
+          first_class_date: string | null
+          term_start: string | null
+          term_end: string | null
+          part_of_day: string | null
+          label: string | null
+        }
+      }[]
       reason?: string
       detail?: string
     }
