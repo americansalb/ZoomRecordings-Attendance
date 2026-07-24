@@ -318,6 +318,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
   const [title, setTitle] = useState(plan.title)
   const [note, setNote] = useState('')
   const [postState, setPostState] = useState(plan.post_state || 'PUBLISHED')
+  const [courseId, setCourseId] = useState(plan.course_id || '')
+  const [topicId, setTopicId] = useState(plan.topic_id || '')
   const [manualStart, setManualStart] = useState<string | null>(null)
   const [manualDuration, setManualDuration] = useState<number>(180)
   const [jobId, setJobId] = useState<string | null>(null)
@@ -330,8 +332,23 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
     queryFn: publishApi.settings,
   })
 
+  const { data: courses } = useQuery({
+    queryKey: ['classroom-courses'],
+    queryFn: publishApi.courses,
+  })
+
+  const { data: topics } = useQuery({
+    queryKey: ['classroom-topics', courseId],
+    queryFn: () => publishApi.topics(courseId),
+    enabled: !!courseId,
+  })
+
+  const courseName =
+    courses?.courses.find((c) => c.id === courseId)?.name || draft.course_name || ''
+  const topicName =
+    topics?.topics.find((t) => t.id === topicId)?.name || draft.topic_name || ''
+
   const readOnly = draft.state === 'published' && !jobId
-  const cls = settings?.classes.find((c) => c.code === draft.session_code)
 
   // Bring the result into view the moment it lands.
   useEffect(() => {
@@ -390,6 +407,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
     setEnd(replanned.trim.end_seconds)
     setSelected(replanned.outputs.map((o) => o.key))
     setTitle(replanned.title)
+    setCourseId(replanned.course_id || '')
+    setTopicId(replanned.topic_id || '')
   }
 
   const send = async () => {
@@ -414,8 +433,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         outputs,
         start_seconds: start,
         end_seconds: end,
-        course_id: draft.course_id,
-        topic_id: draft.topic_id,
+        course_id: courseId,
+        topic_id: topicId,
         post_state: postState,
       })
       setJobId(res.job_id)
@@ -429,7 +448,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
   const kept = end - start
   // Classroom only happens when this recording resolves to a course. Without
   // one it's still a perfectly good Drive upload.
-  const willPostToClassroom = !!draft.course_id
+  const willPostToClassroom = !!courseId
 
   return (
     <div>
@@ -712,21 +731,86 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
           </div>
         </div>
 
-        <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 text-xs font-mono text-gray-800 space-y-1">
-          {draft.available_views
-            .filter((v) => selected.includes(v.key))
-            .map((v) => (
-              <div key={v.key}>
-                <span className="text-gray-500">
-                  Drive / {(v.drive_folders || []).join(' / ')} /{' '}
-                </span>
-                {v.filename}
-              </div>
-            ))}
-          <div className="pt-1">
-            <span className="text-gray-500">Classroom: </span>
-            {draft.course_name || cls?.classroom_course_name || 'not posting — you\'ll get the Drive link to attach by hand'}
-            {draft.topic_name && <span className="text-gray-500"> → {draft.topic_name}</span>}
+        <div className="grid sm:grid-cols-2 gap-4 mb-4">
+          <label className="block">
+            <span className="block text-sm font-semibold mb-1">Classroom course</span>
+            <select
+              className="input"
+              value={courseId}
+              disabled={readOnly}
+              onChange={(e) => {
+                setCourseId(e.target.value)
+                setTopicId('')          // topics belong to a course
+              }}
+            >
+              <option value="">Don't post — upload to Drive only</option>
+              {(courses?.courses || []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            {courses && !courses.ok && (
+              <span className="block text-xs mt-1" style={{ color: COLORS.amber.ink }}>
+                Couldn't load your courses — {courses.detail}
+              </span>
+            )}
+          </label>
+
+          <label className="block">
+            <span className="block text-sm font-semibold mb-1">
+              Where in the course
+            </span>
+            <select
+              className="input"
+              value={topicId}
+              disabled={readOnly || !courseId}
+              onChange={(e) => setTopicId(e.target.value)}
+            >
+              <option value="">Classwork — no topic</option>
+              {(topics?.topics || []).map((t) => (
+                <option key={t.id} value={t.id}>
+                  Under "{t.name}"
+                </option>
+              ))}
+            </select>
+            <span className="block text-xs text-gray-500 mt-1">
+              {courseId
+                ? 'Topics are the headings students see on the Classwork page.'
+                : 'Pick a course first.'}
+            </span>
+          </label>
+        </div>
+
+        <div className="rounded-lg border p-3 text-sm"
+          style={{ borderColor: willPostToClassroom ? COLORS.teal.ink : COLORS.amber.ink,
+                   background: willPostToClassroom ? COLORS.teal.soft : COLORS.amber.soft }}>
+          <b className="block mb-2"
+            style={{ color: willPostToClassroom ? COLORS.teal.ink : COLORS.amber.ink }}>
+            {willPostToClassroom ? 'This will post to' : 'This will NOT post to Classroom'}
+          </b>
+          {willPostToClassroom ? (
+            <p className="text-gray-800 mb-2">
+              <b>{courseName}</b>
+              {topicName ? <> → <b>{topicName}</b></> : <> → Classwork (no topic)</>}
+              {postState === 'DRAFT' && <> · as a <b>draft</b>, students won't see it yet</>}
+            </p>
+          ) : (
+            <p className="text-gray-800 mb-2">
+              You'll get the Drive link to attach by hand.
+            </p>
+          )}
+          <div className="text-xs font-mono text-gray-700 space-y-0.5">
+            {draft.available_views
+              .filter((v) => selected.includes(v.key))
+              .map((v) => (
+                <div key={v.key}>
+                  <span className="text-gray-500">
+                    Drive / {(v.drive_folders || []).join(' / ')} /{' '}
+                  </span>
+                  {v.filename}
+                </div>
+              ))}
           </div>
         </div>
       </Card>
@@ -735,8 +819,15 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
       <div className="sticky bottom-4 bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-4 flex-wrap shadow-lg">
         <span className="text-sm text-gray-600">
           Sending <b className="text-gray-900">{selected.length}</b> video
-          {selected.length === 1 ? '' : 's'} · <b className="text-gray-900">{hm(kept)}</b> each ·{' '}
-          {willPostToClassroom ? 'Drive + Classroom' : 'Drive only'}
+          {selected.length === 1 ? '' : 's'} · <b className="text-gray-900">{hm(kept)}</b> each
+          <span className="block mt-0.5">
+            {willPostToClassroom ? (
+              <>→ Drive, and posted to <b className="text-gray-900">{courseName}</b>
+                {topicName && <> under <b className="text-gray-900">{topicName}</b></>}</>
+            ) : (
+              <>→ Drive only, not posted to Classroom</>
+            )}
+          </span>
         </span>
         <span className="flex-1" />
 
