@@ -159,14 +159,16 @@ class ClassroomService:
                     "delegation (see docs/classroom-setup.md)."
                 ),
             )
+        # Checked before the status branches: Google returns this one as
+        # FAILED_PRECONDITION (400), not 403, so testing it inside the 403 block
+        # meant it never matched.
         if "AttachmentNotVisible" in body:
             return ClassroomResult(
                 ok=False,
                 reason="attachment_not_visible",
                 detail=(
-                    "Classroom can't see the uploaded video. It needs to live in a Shared "
-                    "Drive the teacher belongs to, rather than being owned by the service "
-                    "account alone."
+                    "Classroom can't see the uploaded video. The teacher account needs "
+                    "access to the file — check the shared drive is one they belong to."
                 ),
             )
         if status == 403:
@@ -217,14 +219,26 @@ class ClassroomService:
                         "teacher on the courses you want to post to."
                     ),
                 )
+            # Google's message on this one is just "The caller does not have
+            # permission", so the body is no help. The full response goes to the
+            # log; the user gets the explanation that actually fits.
+            #
+            # Being a teacher is already established — the course picker lists
+            # only courses where courses.list(teacherId="me") returned it. What
+            # remains, and what Google documents for this call, is that it could
+            # not "share a Drive attachment": Classroom posts as the teacher, and
+            # the teacher has no rights over a file the service account owns.
+            logger.error(f"[CLASSROOM] 403 on post: {body[:800]}")
             return ClassroomResult(
                 ok=False,
                 reason="permission_denied",
                 detail=(
                     "Google refused the request"
-                    + (f": {google_message}" if google_message else ".")
-                    + " Usual causes: the Classroom API isn't enabled on the Cloud project, or "
-                    "that account isn't a teacher on the course."
+                    + (f": {google_message}." if google_message else ".")
+                    + " The most likely reason is that Classroom couldn't share the video "
+                    "file: it posts as the teacher, and the teacher needs access to a file "
+                    "the service account owns. Giving that account edit access to the Drive "
+                    "folder fixes it."
                 ),
             )
         if status == 404:
@@ -303,12 +317,18 @@ class ClassroomService:
         state: str = "PUBLISHED",
         share_mode: str = "VIEW",
         scheduled_time: Optional[str] = None,
+        drive_links: Optional[List[str]] = None,
     ) -> ClassroomResult:
         """
         Attach one or more already-uploaded Drive files to a course.
 
         Returns a ClassroomResult; never raises. A failure here must not lose
         the upload that already succeeded.
+
+        If Google refuses because it can't share the attachment, this falls back
+        to posting the same material with the Drive links written into the
+        description. Students still get to the video, and the result says plainly
+        which of the two happened.
         """
         if not course_id:
             return ClassroomResult(
@@ -353,10 +373,84 @@ class ClassroomService:
         except (RefreshError, GoogleAuthError) as e:
             return self._explain_auth(e)
         except HttpError as e:
-            return self._explain(e)
+            failure = self._explain(e)
+            if failure.reason in ("permission_denied", "attachment_not_visible") and drive_links:
+                recovered = self._post_link_only(
+                    subject=subject,
+                    course_id=course_id,
+                    title=title,
+                    description=description,
+                    topic_id=topic_id,
+                    state=body["state"],
+                    scheduled_time=scheduled_time,
+                    drive_links=drive_links,
+                )
+                if recovered:
+                    return recovered
+            return failure
         except Exception as e:                      # noqa: BLE001
             logger.error(f"[CLASSROOM] post_material failed: {e}", exc_info=True)
             return ClassroomResult(ok=False, reason="error", detail=str(e))
+
+    def _post_link_only(
+        self,
+        subject: str,
+        course_id: str,
+        title: str,
+        description: str,
+        topic_id: Optional[str],
+        state: str,
+        scheduled_time: Optional[str],
+        drive_links: List[str],
+    ) -> Optional[ClassroomResult]:
+        """
+        Post the material with the video as a link in the text instead of an
+        attached file.
+
+        Attaching makes Classroom re-share the file as the teacher, which is the
+        step that gets refused. A plain link asks nothing of the teacher's
+        permissions, so this goes through when the attachment doesn't — and the
+        class still gets the recording tonight.
+
+        Returns None if this fails too, so the caller reports the original error
+        rather than a second, more confusing one.
+        """
+        lines = [description] if description else []
+        lines.append("Recording: " + "  ".join(drive_links))
+        body: Dict[str, Any] = {
+            "title": title,
+            "description": "\n\n".join(lines),
+            "state": state,
+        }
+        if topic_id:
+            body["topicId"] = topic_id
+        if scheduled_time:
+            body["scheduledTime"] = scheduled_time
+
+        try:
+            created = self._client(subject).courses().courseWorkMaterials().create(
+                courseId=course_id, body=body
+            ).execute()
+        except Exception as e:                      # noqa: BLE001
+            logger.warning(f"[CLASSROOM] Link-only fallback also failed: {e}")
+            return None
+
+        logger.info(
+            f"[CLASSROOM] Posted {created.get('id')} to {course_id} as a link "
+            f"(attachment was refused)"
+        )
+        return ClassroomResult(
+            ok=True,
+            material_id=created.get("id"),
+            link=created.get("alternateLink"),
+            state=created.get("state"),
+            reason="posted_as_link",
+            detail=(
+                "Posted, but with the video as a link rather than an attached file — "
+                "Google wouldn't let the teacher account share the file itself. "
+                "Students can still open it."
+            ),
+        )
 
     def is_configured(self, subject: str) -> bool:
         return bool(subject)

@@ -211,10 +211,20 @@ def run_publish_job(job_id: str) -> None:
         )
 
         config = class_config.load()
+
+        # Classroom attaches the file acting as the teacher, so the teacher has
+        # to be able to see it first. The service account owns these uploads, so
+        # without this Google refuses the post with a bare "caller does not have
+        # permission". Best-effort — a failure here is not worth losing the
+        # upload over, and the post may still work.
+        for upload in uploaded:
+            drive_service.grant_access(upload["file_id"], config.classroom_subject)
+
         classroom = classroom_service.post_material(
             subject=config.classroom_subject,
             course_id=req.get("course_id", ""),
             drive_file_ids=[u["file_id"] for u in uploaded],
+            drive_links=[u["link"] for u in uploaded if u.get("link")],
             title=req.get("title") or "Class recording",
             description=req.get("description", ""),
             topic_id=req.get("topic_id") or None,

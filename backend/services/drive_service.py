@@ -770,6 +770,33 @@ class DriveService:
                 f"{file_name} ({e}). Sending again resumes from scratch."
             ) from e
 
+    def grant_access(self, file_id: str, email: str, role: str = "writer") -> bool:
+        """
+        Give a person direct access to a file we own.
+
+        Needed before Classroom can attach it. Classroom posts *as the teacher*,
+        and attaching with shareMode VIEW means Classroom tries to share the file
+        on that teacher's behalf — which Google refuses with PERMISSION_DENIED if
+        the teacher has no rights over a file the service account owns.
+
+        Best-effort: the upload has already succeeded by this point, so a failure
+        here is logged and reported, never fatal.
+        """
+        if not email:
+            return False
+        try:
+            self.drive.permissions().create(
+                fileId=file_id,
+                body={"type": "user", "role": role, "emailAddress": email},
+                sendNotificationEmail=False,
+                supportsAllDrives=True,
+            ).execute()
+            logger.info(f"[DRIVE] Granted {role} on {file_id} to {email}")
+            return True
+        except HttpError as e:
+            logger.warning(f"[DRIVE] Could not grant {role} on {file_id} to {email}: {e}")
+            return False
+
     def get_or_create_view_folder(self, session_folder_id: str, view_type: str) -> Optional[str]:
         """
         Get or create a view type folder (Gallery View or Speaker View).
