@@ -329,6 +329,135 @@ class TestWorksWithoutAClass(unittest.TestCase):
         self.assertGreater(plan["total_size_bytes"], 0)
 
 
+class TestTitleAlwaysHasTheDate(unittest.TestCase):
+    """The date of the recording must survive every combination."""
+
+    def _title(self, **kw):
+        conf = kw.pop("config", config_with(night_class()))
+        return plan_recording(recording(**kw.pop("rec", {})), conf, **kw)
+
+    def test_matched_with_day(self):
+        p = plan_recording(recording(), config_with(night_class()))
+        self.assertEqual(p["title"], "Session 127 (Night) — Day 5 (Nov19)")
+
+    def test_matched_without_day_drops_day_not_date(self):
+        # A Tuesday for an MWF class: no day number, but still a real recording.
+        p = plan_recording(recording(start_time="2025-11-19T04:00:00Z"),
+                           config_with(night_class()))
+        self.assertIsNone(p["day_number"])
+        self.assertNotIn("Day", p["title"])
+        self.assertNotIn("None", p["title"])
+        self.assertIn(p["date_key"], p["title"])
+
+    def test_unmatched_keeps_topic_and_date(self):
+        p = plan_recording(recording(topic="Fifth Meeting | Committee"), PublishConfig())
+        self.assertIn("Fifth Meeting", p["title"])
+        self.assertIn(p["date_key"], p["title"])
+
+    def test_unmatched_with_manual_day(self):
+        p = plan_recording(recording(topic="Makeup class"), PublishConfig(), day_override=9)
+        self.assertIn("Day 9", p["title"])
+        self.assertIn(p["date_key"], p["title"])
+        self.assertIn("Day 9", p["outputs"][0]["filename"])
+
+    def test_date_is_appended_when_the_pattern_omits_it(self):
+        p = plan_recording(recording(), config_with(night_class(title_pattern="{course}")))
+        self.assertIn("Nov19", p["title"])
+
+    def test_never_renders_none(self):
+        for rec_kw, conf in [
+            ({}, config_with(night_class())),
+            ({"start_time": "2025-11-19T04:00:00Z"}, config_with(night_class())),
+            ({"topic": "No code here"}, PublishConfig()),
+            ({"topic": ""}, PublishConfig()),
+        ]:
+            p = plan_recording(recording(**rec_kw), conf)
+            self.assertNotIn("None", p["title"], f"None leaked for {rec_kw}")
+            self.assertIn(p["date_key"], p["title"])
+
+
+class TestManualStartTime(unittest.TestCase):
+    """Unmatched recordings get trimmed by asking when class started."""
+
+    def test_manual_start_trims_five_either_side(self):
+        # Recording opened 13:50 local; class started 14:00 for 3 hours.
+        rec = recording(topic="Committee meeting", start_time="2025-07-24T17:50:00Z", duration=240)
+        p = plan_recording(rec, PublishConfig(), manual_start="14:00")
+        t = p["trim"]
+        self.assertEqual(t["source"], "manual")
+        self.assertAlmostEqual(t["start_seconds"], 5 * 60, delta=1)      # 10 in, 5 before
+        self.assertAlmostEqual(t["end_seconds"], 195 * 60, delta=1)      # 10 + 180 + 5
+        self.assertNotIn("None", t["note"])
+
+    def test_manual_duration_respected(self):
+        rec = recording(topic="Committee", start_time="2025-07-24T17:50:00Z", duration=240)
+        p = plan_recording(rec, PublishConfig(), manual_start="14:00", manual_duration_minutes=90)
+        self.assertAlmostEqual(p["trim"]["end_seconds"], (10 + 90 + 5) * 60, delta=1)
+
+    def test_manual_start_beats_the_class_schedule(self):
+        p = plan_recording(recording(), config_with(night_class()), manual_start="23:30")
+        self.assertEqual(p["trim"]["source"], "manual")
+
+    def test_started_local_is_offered_for_prefill(self):
+        p = plan_recording(recording(), config_with(night_class()))
+        self.assertEqual(p["started_local"], "22:55")   # 03:55 UTC = 10:55pm ET
+
+    def test_bad_manual_time_is_rejected_clearly(self):
+        from services.publish_planner import manual_trim_settings
+        with self.assertRaises(ValueError):
+            manual_trim_settings("not a time")
+
+
+class TestViewNaming(unittest.TestCase):
+    """Zoom's own names are ambiguous; ours must not be."""
+
+    def test_shared_screen_variants_say_they_include_the_screen(self):
+        from services.class_config import VIEW_TYPES
+        self.assertIn("Shared screen", VIEW_TYPES["speaker"]["name"])
+        self.assertIn("Shared screen", VIEW_TYPES["gallery"]["name"])
+
+    def test_no_screen_variants_say_so(self):
+        from services.class_config import VIEW_TYPES
+        self.assertIn("no shared screen", VIEW_TYPES["gallery_only"]["description"])
+        self.assertIn("no shared screen", VIEW_TYPES["active"]["description"])
+
+    def test_gallery_only_is_a_distinct_zoom_type(self):
+        from services.class_config import VIEW_TYPES
+        self.assertEqual(VIEW_TYPES["gallery"]["zoom_type"], "shared_screen_with_gallery_view")
+        self.assertEqual(VIEW_TYPES["gallery_only"]["zoom_type"], "gallery_view")
+
+    def test_every_view_has_a_description(self):
+        from services.class_config import VIEW_TYPES
+        for key, spec in VIEW_TYPES.items():
+            self.assertTrue(spec.get("description"), f"{key} has no description")
+
+
+class TestEveryViewIsNamed(unittest.TestCase):
+    """Ticking a non-default view must still produce a real filename."""
+
+    def test_all_available_views_have_a_filename_and_path(self):
+        plan = plan_recording(recording(), config_with(night_class()))
+        self.assertGreater(len(plan["available_views"]), 1)
+        for v in plan["available_views"]:
+            self.assertTrue(v.get("filename"), f"{v['key']} has no filename")
+            self.assertTrue(v.get("folder"), f"{v['key']} has no folder")
+            self.assertEqual(len(v.get("drive_folders") or []), 2, f"{v['key']} has no path")
+            self.assertTrue(v["filename"].endswith(".mp4"))
+
+    def test_non_default_view_is_named_correctly(self):
+        plan = plan_recording(recording(), config_with(night_class()))   # speaker only by default
+        gallery = next(v for v in plan["available_views"] if v["key"] == "gallery")
+        self.assertNotIn("gallery", plan["outputs"][0]["key"])
+        self.assertIn("Gallery + Screenshare", gallery["filename"])
+        self.assertEqual(gallery["drive_folders"], ["Session 127", "Gallery + Screenshare"])
+
+    def test_unmatched_views_are_named_too(self):
+        plan = plan_recording(recording(topic="Committee"), PublishConfig())
+        for v in plan["available_views"]:
+            self.assertTrue(v.get("filename"))
+            self.assertEqual(v["drive_folders"][0], "Unsorted")
+
+
 class TestFormatTime(unittest.TestCase):
     def test_formats(self):
         self.assertEqual(format_time(0), "0:00:00")

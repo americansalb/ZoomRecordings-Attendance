@@ -163,11 +163,77 @@ def compute_trim(
     }
 
 
+DEFAULT_CLASS_MINUTES = 180        # classes run three hours
+DEFAULT_PAD_MINUTES = 5            # keep five minutes either side
+
+
+def build_title(
+    settings: Optional[ClassSettings],
+    tokens: Dict[str, Any],
+    topic: str,
+    date_key: str,
+    day_number: Optional[int],
+) -> str:
+    """
+    The title students see.
+
+    Two guarantees, in this order:
+      1. The recording date is always in it. Even with no class, no day number
+         and no settings, you can still tell one recording from another.
+      2. "Day N" only appears when N is actually known — never "Day None".
+    """
+    if settings:
+        pattern = settings.title_pattern
+        if day_number is None:
+            # Strip the day fragment rather than rendering "Day None".
+            pattern = re.sub(r"\s*[-—–|]?\s*Day\s*\{day\}", "", pattern).strip()
+        title = _fill(pattern, tokens, "{course} — Day {day} ({date})").strip()
+    else:
+        title = (topic or "Class recording").strip()
+        # A day typed by hand still belongs in the title, class settings or not.
+        if day_number is not None:
+            title = f"{title} — Day {day_number}"
+
+    # Belt and braces: whatever the pattern did, the date ends up in the title.
+    if date_key.lower() not in title.lower():
+        title = f"{title} ({date_key})"
+
+    return re.sub(r"\s{2,}", " ", title).strip(" —-|")
+
+
+def manual_trim_settings(
+    start_local: str,
+    duration_minutes: int = DEFAULT_CLASS_MINUTES,
+    timezone: str = "America/New_York",
+) -> ClassSettings:
+    """
+    A throwaway ClassSettings representing "the class started at HH:MM and ran
+    for N minutes", so a recording with no class can still be trimmed properly
+    by the same code path as a configured one.
+    """
+    try:
+        hour, minute = (int(x) for x in start_local.split(":"))
+    except (ValueError, AttributeError):
+        raise ValueError(f"Start time must look like 14:30, got {start_local!r}")
+
+    end_total = (hour * 60 + minute + duration_minutes) % (24 * 60)
+    return ClassSettings(
+        code="",
+        timezone=timezone,
+        scheduled_start=f"{hour:02d}:{minute:02d}",
+        scheduled_end=f"{end_total // 60:02d}:{end_total % 60:02d}",
+        pad_before_minutes=DEFAULT_PAD_MINUTES,
+        pad_after_minutes=DEFAULT_PAD_MINUTES,
+    )
+
+
 def plan_recording(
     recording: Dict[str, Any],
     config: PublishConfig,
     day_override: Optional[int] = None,
     session_override: Optional[str] = None,
+    manual_start: Optional[str] = None,
+    manual_duration_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Build the full plan for one Zoom recording.
@@ -197,6 +263,7 @@ def plan_recording(
             available[key] = {
                 "key": key,
                 "name": spec["name"],
+                "description": spec.get("description", ""),
                 "zoom_type": spec["zoom_type"],
                 "file_id": match.get("id"),
                 "download_url": match.get("download_url"),
@@ -214,16 +281,31 @@ def plan_recording(
     date_key = f"{MONTHS[local.month - 1]}{local.day}"
     date_label = local.strftime("%a %b %-d") if hasattr(local, "strftime") else str(local.date())
 
-    trim = (
-        compute_trim(settings, start_utc, duration_seconds)
-        if settings and duration_seconds > 0
-        else {
+    # Trim priority: a start time typed by hand beats the class schedule, which
+    # beats keeping the whole recording.
+    if manual_start and duration_seconds > 0:
+        manual = manual_trim_settings(
+            manual_start,
+            manual_duration_minutes or DEFAULT_CLASS_MINUTES,
+            settings.timezone if settings else config.default_timezone,
+        )
+        trim = compute_trim(manual, start_utc, duration_seconds)
+        trim["source"] = "manual"
+        trim["note"] = (
+            f"Class started {manual_start} and ran "
+            f"{(manual_duration_minutes or DEFAULT_CLASS_MINUTES) // 60}h"
+            f"{(manual_duration_minutes or DEFAULT_CLASS_MINUTES) % 60:02d}m. "
+            f"Keeping {DEFAULT_PAD_MINUTES} minutes either side."
+        )
+    elif settings and duration_seconds > 0:
+        trim = compute_trim(settings, start_utc, duration_seconds)
+    else:
+        trim = {
             "start_seconds": 0.0,
             "end_seconds": duration_seconds,
             "source": "full",
-            "note": "Whole recording.",
+            "note": "Whole recording — tell us when the class started to trim it.",
         }
-    )
 
     tokens = {
         "session": session_code or "___",
@@ -238,8 +320,10 @@ def plan_recording(
     # depends on setting a class up first.
     root_folder = f"Session {session_code}" if settings else UNSORTED_FOLDER
 
-    outputs = []
-    for key in wanted:
+    # Name EVERY available view, not just the ones selected by default —
+    # otherwise ticking an extra view in the UI sends a file with no filename
+    # and previews a blank destination.
+    for key, view in available.items():
         spec = VIEW_TYPES[key]
         if settings:
             filename = _fill(
@@ -248,20 +332,18 @@ def plan_recording(
                 "Session {session} - Day {day} - {date} ({view}).mp4",
             )
         else:
-            # No class: keep Zoom's own title so the file is still identifiable.
-            filename = f"{safe_filename(topic)} - {date_key} ({spec['folder']}).mp4"
+            # No class: keep Zoom's own title so the file is still identifiable,
+            # and include the day if one was typed in.
+            day_part = f" - Day {day_number}" if day_number is not None else ""
+            filename = f"{safe_filename(topic)}{day_part} - {date_key} ({spec['folder']}).mp4"
 
-        outputs.append({
-            **available[key],
-            "folder": spec["folder"],
-            "filename": filename,
-            "drive_folders": [root_folder, spec["folder"]],
-        })
+        view["folder"] = spec["folder"]
+        view["filename"] = filename
+        view["drive_folders"] = [root_folder, spec["folder"]]
 
-    title = (
-        _fill(settings.title_pattern, tokens, "{course} — Day {day} ({date})")
-        if settings else (topic or "Class recording")
-    )
+    outputs = [available[key] for key in wanted]
+
+    title = build_title(settings, tokens, topic, date_key, day_number)
 
     # Advisory, not gating. These say what's unresolved, and the UI offers to
     # resolve them — but a recording can always be uploaded to Drive as-is.
@@ -282,6 +364,7 @@ def plan_recording(
         "host_name": recording.get("host_name", ""),
         "start_time": recording.get("start_time"),
         "date_key": date_key,
+        "started_local": local.strftime("%H:%M"),
         "date_label": date_label,
         "duration_seconds": duration_seconds,
         "total_size_bytes": sum(v["size_bytes"] for v in available.values()),
