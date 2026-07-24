@@ -46,11 +46,17 @@ That impersonation must be authorized once by a Workspace super admin:
 4. **OAuth scopes**, comma separated, matching character for character:
 
 ```
-https://www.googleapis.com/auth/drive,
 https://www.googleapis.com/auth/classroom.courses.readonly,
 https://www.googleapis.com/auth/classroom.topics,
 https://www.googleapis.com/auth/classroom.courseworkmaterials
 ```
+
+Three scopes, and deliberately no Drive scope. Uploads run as the service
+account itself (`drive_service` never calls `with_subject`), and attaching an
+already-uploaded file to a course needs no Drive scope on the impersonated
+teacher's token. The optional spike script in `backend/scripts/` does ask for
+Drive as well, because it uploads its own test clip as the teacher — the app
+does not.
 
 Also enable the **Google Classroom API** on the Cloud project.
 

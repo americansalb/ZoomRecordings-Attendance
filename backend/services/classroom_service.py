@@ -29,8 +29,12 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
+# Only what the impersonated teacher actually needs. Drive is deliberately NOT
+# here: uploads run as the service account itself (see drive_service, which
+# never calls with_subject), and attaching an existing file to a course needs
+# no Drive scope on the acting user's token. Asking for it would mean one more
+# scope for an admin to authorise, for nothing.
 SCOPES = [
-    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.topics",
     "https://www.googleapis.com/auth/classroom.courseworkmaterials",
@@ -109,7 +113,7 @@ class ClassroomService:
         "needs to open Admin console → Security → Access and data control → API controls "
         "→ Domain-wide delegation, add the service account's numeric client ID, and grant "
         "these scopes: classroom.courses.readonly, classroom.topics, "
-        "classroom.courseworkmaterials, drive. Full steps are in docs/classroom-setup.md. "
+        "classroom.courseworkmaterials. Full steps are in docs/classroom-setup.md. "
         "Until then everything still uploads to Drive and gives you a link to post by hand."
     )
 
