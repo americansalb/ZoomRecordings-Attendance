@@ -970,12 +970,18 @@ export const publishApi = {
       classroom_subject: string
       webhook_url: string
       webhook_secret_set: boolean
+      default_timezone: string
       view_types: Record<string, { name: string; description: string; zoom_type: string; folder: string }>
       palette: string[]
     }
   },
 
-  saveSettings: async (body: { classroom_subject: string; webhook_url: string; webhook_secret?: string }) => {
+  saveSettings: async (body: {
+    classroom_subject: string
+    webhook_url: string
+    webhook_secret?: string
+    default_timezone?: string
+  }) => {
     const { data } = await api.put('/publish/settings', body)
     return data
   },

@@ -86,6 +86,7 @@ class SettingsPayload(BaseModel):
     classroom_subject: str = ""
     webhook_url: str = ""
     webhook_secret: str = ""
+    default_timezone: str = "America/New_York"
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +276,7 @@ async def get_settings() -> Dict[str, Any]:
         "classroom_subject": config.classroom_subject,
         "webhook_url": config.webhook_url,
         "webhook_secret_set": bool(config.webhook_secret),
+        "default_timezone": config.default_timezone,
         "view_types": VIEW_TYPES,
         "palette": class_config.PALETTE,
     }
@@ -285,6 +287,8 @@ async def put_settings(payload: SettingsPayload) -> Dict[str, Any]:
     config = class_config.load()
     config.classroom_subject = payload.classroom_subject.strip()
     config.webhook_url = payload.webhook_url.strip()
+    if payload.default_timezone:
+        config.default_timezone = payload.default_timezone.strip()
     if payload.webhook_secret:
         config.webhook_secret = payload.webhook_secret
     class_config.save(config)
