@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions, live_tutor
+from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions, live_tutor, publish
 from services.job_store import get_job_store
 from services.scheduler_service import scheduler_service
 
@@ -119,6 +119,7 @@ app.include_router(sheets.router, prefix="/api/sheets", tags=["Sheets"])
 app.include_router(mappings.router, prefix="/api/mappings", tags=["Mappings"])
 app.include_router(proctoring.router, prefix="/api", tags=["Proctoring"])
 app.include_router(video_upload.router, prefix="/api", tags=["Video Upload"])
+app.include_router(publish.router, prefix="/api", tags=["Publish"])
 app.include_router(live_sessions.router, prefix="/api", tags=["Live Sessions"])
 app.include_router(live_tutor.router, prefix="/api", tags=["Live Tutor"])
 

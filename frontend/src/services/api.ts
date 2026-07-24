@@ -805,4 +805,191 @@ export const tutorApi = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// Publish (Zoom -> trim -> Drive -> Google Classroom)
+// ---------------------------------------------------------------------------
+
+export interface PublishOutput {
+  key: string
+  name: string
+  zoom_type: string
+  file_id: string
+  download_url: string
+  size_bytes: number
+  folder: string
+  filename: string
+}
+
+export interface PublishTrim {
+  start_seconds: number
+  end_seconds: number
+  source: 'schedule' | 'full' | 'unmatched'
+  note: string
+}
+
+export interface PublishedRecord {
+  job_id: string
+  published_at?: string
+  files: { key: string; label: string; file_id: string; name: string; link: string }[]
+  classroom?: {
+    ok: boolean
+    material_id?: string
+    link?: string
+    state?: string
+    reason?: string
+    detail?: string
+  }
+}
+
+export interface PublishPlan {
+  recording_id: string
+  meeting_id: string
+  topic: string
+  host_name: string
+  start_time: string
+  date_key: string
+  date_label: string
+  duration_seconds: number
+
+  session_code: string | null
+  class_label: string | null
+  class_color: string
+  day_number: number | null
+
+  trim: PublishTrim
+  available_views: PublishOutput[]
+  outputs: PublishOutput[]
+
+  title: string
+  course_id: string
+  course_name: string
+  topic_id: string
+  topic_name: string
+  post_state: string
+
+  blockers: string[]
+  ready: boolean
+  state: 'ready' | 'needs_attention' | 'published'
+  published: PublishedRecord | null
+}
+
+export interface ClassSettings {
+  code: string
+  label: string
+  color: string
+  timezone: string
+  scheduled_start: string
+  scheduled_end: string
+  meeting_weekdays: number[]
+  first_class_date: string
+  pad_before_minutes: number
+  pad_after_minutes: number
+  views: string[]
+  filename_pattern: string
+  title_pattern: string
+  drive_folder_id: string
+  classroom_course_id: string
+  classroom_course_name: string
+  classroom_topic_id: string
+  classroom_topic_name: string
+  post_state: string
+  share_mode: string
+}
+
+export interface PublishJobStatus {
+  job_id: string
+  status: 'pending' | 'trimming' | 'uploading' | 'posting' | 'completed' | 'failed'
+  progress: number
+  message: string
+  result?: any
+  error?: string
+}
+
+export const publishApi = {
+  queue: async (days = 14) => {
+    const { data } = await api.get('/publish/queue', { params: { days } })
+    return data as {
+      recordings: PublishPlan[]
+      counts: { ready: number; needs_attention: number; published: number }
+      classroom_configured: boolean
+      classes_configured: number
+    }
+  },
+
+  replan: async (recording: any, sessionCode?: string | null, dayNumber?: number | null) => {
+    const { data } = await api.post('/publish/plan', {
+      recording,
+      session_code: sessionCode ?? undefined,
+      day_number: dayNumber ?? undefined,
+    })
+    return data as PublishPlan
+  },
+
+  start: async (body: {
+    recording_id: string
+    session_code: string
+    day_number?: number | null
+    date_key: string
+    title: string
+    description?: string
+    outputs: { key: string; folder: string; download_url: string; filename?: string }[]
+    start_seconds: number
+    end_seconds?: number | null
+    course_id?: string
+    topic_id?: string
+    post_state?: string
+    share_mode?: string
+  }) => {
+    const { data } = await api.post('/publish/start', body)
+    return data as { success: boolean; job_id: string }
+  },
+
+  status: async (jobId: string) => {
+    const { data } = await api.get(`/publish/status/${jobId}`)
+    return data as PublishJobStatus
+  },
+
+  settings: async () => {
+    const { data } = await api.get('/publish/settings')
+    return data as {
+      classes: ClassSettings[]
+      classroom_subject: string
+      webhook_url: string
+      webhook_secret_set: boolean
+      view_types: Record<string, { name: string; zoom_type: string; folder: string }>
+      palette: string[]
+    }
+  },
+
+  saveSettings: async (body: { classroom_subject: string; webhook_url: string; webhook_secret?: string }) => {
+    const { data } = await api.put('/publish/settings', body)
+    return data
+  },
+
+  saveClass: async (settings: ClassSettings) => {
+    const { data } = await api.put(`/publish/classes/${settings.code}`, settings)
+    return data
+  },
+
+  deleteClass: async (code: string) => {
+    const { data } = await api.delete(`/publish/classes/${code}`)
+    return data
+  },
+
+  courses: async () => {
+    const { data } = await api.get('/publish/classroom/courses')
+    return data as {
+      ok: boolean
+      courses: { id: string; name: string; section: string; link: string }[]
+      reason?: string
+      detail?: string
+    }
+  },
+
+  topics: async (courseId: string) => {
+    const { data } = await api.get(`/publish/classroom/topics/${courseId}`)
+    return data as { ok: boolean; topics: { id: string; name: string }[]; reason?: string; detail?: string }
+  },
+}
+
 export default api

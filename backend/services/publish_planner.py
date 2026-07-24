@@ -1,0 +1,281 @@
+"""
+Turns a Zoom recording into a publish plan.
+
+Everything the UI shows for a recording — which class, which day, where to cut,
+which files get created, where they land — is computed here so the frontend
+holds no business logic. The old flow did this arithmetic in React with
+console.logs and magic thresholds; this is the same idea with the maths in one
+testable place.
+
+Nothing here performs I/O against Zoom or Google.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from services.class_config import (
+    PRIMARY_VIEW,
+    VIEW_TYPES,
+    ClassSettings,
+    PublishConfig,
+)
+
+logger = logging.getLogger(__name__)
+
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(f"[PLAN] Unknown timezone {name!r}, falling back to UTC")
+        return ZoneInfo("UTC")
+
+
+def extract_session_code(title: str) -> Optional[str]:
+    match = re.search(r"Session\s*(\d{3})", title or "", re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def format_time(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+
+
+def _fill(pattern: str, values: Dict[str, Any], fallback: str) -> str:
+    """Render a {token} pattern, tolerating typos rather than exploding."""
+    try:
+        return pattern.format(**values)
+    except (KeyError, IndexError, ValueError) as e:
+        logger.warning(f"[PLAN] Bad pattern {pattern!r}: {e}. Using default.")
+        try:
+            return fallback.format(**values)
+        except Exception:                           # noqa: BLE001
+            return values.get("session", "recording")
+
+
+def compute_trim(
+    settings: ClassSettings,
+    recording_start_utc: datetime,
+    video_duration_seconds: float,
+) -> Dict[str, Any]:
+    """
+    Where to cut, based on when the class was actually scheduled.
+
+    Zoom starts recording when the host opens the room, which is usually before
+    class and long after it ends. The scheduled window plus each class's own
+    padding gives the cut. Returns full-length bounds when the class has no
+    schedule configured, so a missing setting never produces a silly cut.
+    """
+    duration_minutes = settings.scheduled_duration_minutes()
+    if not settings.scheduled_start or duration_minutes is None:
+        return {
+            "start_seconds": 0.0,
+            "end_seconds": video_duration_seconds,
+            "source": "full",
+            "note": "No schedule set for this class — keeping the whole recording.",
+        }
+
+    tz = _zone(settings.timezone)
+    local_start = recording_start_utc.astimezone(tz)
+
+    try:
+        hour, minute = (int(x) for x in settings.scheduled_start.split(":"))
+    except ValueError:
+        return {
+            "start_seconds": 0.0,
+            "end_seconds": video_duration_seconds,
+            "source": "full",
+            "note": "Scheduled start time is malformed — keeping the whole recording.",
+        }
+
+    scheduled = local_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    # A recording that begins just after midnight belongs to the previous
+    # evening's class (an 11pm class recorded at 00:05). Pick whichever
+    # candidate the recording actually sits closest to.
+    candidates = [scheduled, scheduled - timedelta(days=1), scheduled + timedelta(days=1)]
+    scheduled = min(candidates, key=lambda c: abs((local_start - c).total_seconds()))
+
+    offset = (scheduled - local_start).total_seconds()
+
+    # Sanity: the room shouldn't open more than 4h early or start more than
+    # 30 min late. Outside that, the schedule probably doesn't match this
+    # recording, so don't pretend to know better than the full video.
+    if offset < -1800 or offset > 14400:
+        return {
+            "start_seconds": 0.0,
+            "end_seconds": video_duration_seconds,
+            "source": "unmatched",
+            "note": (
+                f"Recording started {abs(offset) / 60:.0f} min "
+                f"{'after' if offset < 0 else 'before'} the scheduled class time, "
+                "which looks wrong — keeping the whole recording."
+            ),
+        }
+
+    start = max(0.0, offset - settings.pad_before_minutes * 60)
+    end = offset + duration_minutes * 60 + settings.pad_after_minutes * 60
+    end = min(video_duration_seconds, end)
+    if end <= start:
+        return {
+            "start_seconds": 0.0,
+            "end_seconds": video_duration_seconds,
+            "source": "full",
+            "note": "Computed an empty cut — keeping the whole recording.",
+        }
+
+    return {
+        "start_seconds": round(start, 2),
+        "end_seconds": round(end, 2),
+        "source": "schedule",
+        "note": (
+            f"Class runs {settings.scheduled_start}–{settings.scheduled_end}. "
+            f"Keeping {settings.pad_before_minutes} min before and "
+            f"{settings.pad_after_minutes} min after."
+        ),
+    }
+
+
+def plan_recording(
+    recording: Dict[str, Any],
+    config: PublishConfig,
+    day_override: Optional[int] = None,
+    session_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build the full plan for one Zoom recording.
+
+    The returned dict is exactly what the publish screen renders, and the same
+    shape the worker consumes — one source of truth for both.
+    """
+    topic = recording.get("topic", "") or ""
+    session_code = session_override or extract_session_code(topic)
+    settings = config.classes.get(session_code) if session_code else None
+
+    start_utc = _parse_iso(recording.get("start_time", "")) or datetime.now(tz=ZoneInfo("UTC"))
+    tz = _zone(settings.timezone) if settings else ZoneInfo("UTC")
+    local = start_utc.astimezone(tz)
+
+    # Zoom reports duration in whole minutes; the worker re-clamps against the
+    # real duration once ffprobe has seen the file.
+    duration_seconds = float(recording.get("duration") or 0) * 60
+
+    files = recording.get("recording_files") or []
+    available: Dict[str, Dict[str, Any]] = {}
+    for key, spec in VIEW_TYPES.items():
+        match = next((f for f in files if f.get("recording_type") == spec["zoom_type"]), None)
+        if match:
+            available[key] = {
+                "key": key,
+                "name": spec["name"],
+                "zoom_type": spec["zoom_type"],
+                "file_id": match.get("id"),
+                "download_url": match.get("download_url"),
+                "size_bytes": match.get("file_size") or 0,
+            }
+
+    wanted = [v for v in (settings.views if settings else [PRIMARY_VIEW]) if v in available]
+    if not wanted and PRIMARY_VIEW in available:
+        wanted = [PRIMARY_VIEW]
+
+    day_number = day_override
+    if day_number is None and settings:
+        day_number = settings.day_number_for(local.date())
+
+    date_key = f"{MONTHS[local.month - 1]}{local.day}"
+    date_label = local.strftime("%a %b %-d") if hasattr(local, "strftime") else str(local.date())
+
+    trim = (
+        compute_trim(settings, start_utc, duration_seconds)
+        if settings and duration_seconds > 0
+        else {
+            "start_seconds": 0.0,
+            "end_seconds": duration_seconds,
+            "source": "full",
+            "note": "Whole recording.",
+        }
+    )
+
+    tokens = {
+        "session": session_code or "___",
+        "day": day_number if day_number is not None else "_",
+        "date": date_key,
+        "course": (settings.classroom_course_name or settings.label) if settings else "",
+        "view": "",
+    }
+
+    outputs = []
+    for key in wanted:
+        spec = VIEW_TYPES[key]
+        outputs.append({
+            **available[key],
+            "folder": spec["folder"],
+            "filename": _fill(
+                settings.filename_pattern if settings else "",
+                {**tokens, "view": spec["folder"]},
+                "Session {session} - Day {day} - {date} ({view}).mp4",
+            ) if settings else f"Session {tokens['session']} - {date_key} ({spec['folder']}).mp4",
+        })
+
+    title = (
+        _fill(settings.title_pattern, tokens, "{course} — Day {day} ({date})")
+        if settings else topic
+    )
+
+    # Why this recording can't be published yet, in the order worth fixing.
+    blockers: List[str] = []
+    if not session_code:
+        blockers.append("no_session_code")
+    elif not settings:
+        blockers.append("class_not_configured")
+    if settings and day_number is None:
+        blockers.append("no_day_number")
+    if not available:
+        blockers.append("no_video_files")
+
+    return {
+        "recording_id": recording.get("id"),
+        "meeting_id": recording.get("meeting_id"),
+        "topic": topic,
+        "host_name": recording.get("host_name", ""),
+        "start_time": recording.get("start_time"),
+        "date_key": date_key,
+        "date_label": date_label,
+        "duration_seconds": duration_seconds,
+
+        "session_code": session_code,
+        "class_label": settings.label if settings else None,
+        "class_color": settings.color if settings else "amber",
+        "day_number": day_number,
+
+        "trim": trim,
+        "available_views": list(available.values()),
+        "outputs": outputs,
+
+        "title": title,
+        "course_id": settings.classroom_course_id if settings else "",
+        "course_name": settings.classroom_course_name if settings else "",
+        "topic_id": settings.classroom_topic_id if settings else "",
+        "topic_name": settings.classroom_topic_name if settings else "",
+        "post_state": settings.post_state if settings else "PUBLISHED",
+
+        "blockers": blockers,
+        "ready": not blockers,
+    }

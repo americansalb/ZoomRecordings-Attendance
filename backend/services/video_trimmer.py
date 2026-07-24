@@ -346,6 +346,137 @@ class VideoTrimmerService:
             logger.error(f"[TRIM] Error in accurate trim: {e}")
             return None
 
+    def trim_from_source(
+        self,
+        source: str,
+        start_time: float,
+        end_time: Optional[float] = None,
+        output_filename: Optional[str] = None,
+        progress_callback=None
+    ) -> Optional[str]:
+        """
+        Trim straight from a URL (or path) without staging the whole file.
+
+        ffmpeg reads the source over HTTP and, because -ss comes before -i,
+        seeks with a range request instead of pulling everything from byte
+        zero. Only the trimmed result touches disk — so publishing a 1.8 GB
+        recording no longer needs ~4 GB free, which is what made the old
+        download-then-trim path fail on small disks.
+
+        Falls back to download-then-trim if the streaming attempt fails
+        (some URLs don't support range requests).
+
+        Args:
+            source: HTTP(S) URL or local path
+            start_time: seconds from the start of the recording
+            end_time: seconds; None means "to the end"
+            output_filename: name within output_dir
+            progress_callback: called with 0-100
+
+        Returns:
+            Path to the trimmed file, or None on error.
+        """
+        output_path = os.path.join(
+            self.output_dir, output_filename or "trimmed.mp4"
+        )
+        start_time = max(0.0, start_time)
+        duration = (end_time - start_time) if end_time is not None else None
+        if duration is not None and duration <= 0:
+            logger.error("[TRIM] Invalid trim duration")
+            return None
+
+        cmd = [
+            'ffmpeg', '-y',
+            # Let ffmpeg follow Zoom's redirect to the CDN.
+            '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '30',
+            '-ss', str(start_time),
+            '-i', source,
+        ]
+        if duration is not None:
+            cmd += ['-t', str(duration)]
+        cmd += [
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            '-avoid_negative_ts', 'make_zero',
+            output_path,
+        ]
+
+        logger.info(
+            f"[TRIM] Streaming trim from source, "
+            f"{start_time:.1f}s for {duration if duration else 'rest'}s"
+        )
+
+        if self._run_ffmpeg(cmd, duration, progress_callback):
+            size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            if size > 0:
+                logger.info(f"[TRIM] Streaming trim succeeded: {size} bytes")
+                return output_path
+
+        # Streaming didn't work — fall back to the old, disk-hungry path.
+        if not str(source).lower().startswith("http"):
+            return None
+
+        logger.warning("[TRIM] Streaming trim failed; falling back to full download")
+        try:
+            import requests
+            local = os.path.join(self.output_dir, "source.mp4")
+            with requests.get(source, stream=True, timeout=3600) as r:
+                r.raise_for_status()
+                with open(local, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+        except Exception as e:
+            logger.error(f"[TRIM] Fallback download failed: {e}")
+            return None
+
+        real_duration = self.get_video_duration(local)
+        end = end_time if end_time is not None else (real_duration or 0)
+        result = self.trim_video(
+            local, start_time, end,
+            output_filename=os.path.basename(output_path),
+            progress_callback=progress_callback,
+        )
+        try:
+            os.remove(local)
+        except OSError:
+            pass
+        return result
+
+    def _run_ffmpeg(self, cmd, duration: Optional[float], progress_callback) -> bool:
+        """Run ffmpeg, forwarding progress. Returns True on exit code 0."""
+        import re as _re
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+        except FileNotFoundError:
+            logger.error("[TRIM] ffmpeg not installed")
+            return False
+
+        tail = []
+        while True:
+            line = process.stderr.readline()
+            if not line and process.poll() is not None:
+                break
+            tail.append(line)
+            if len(tail) > 40:
+                tail.pop(0)
+            if duration and progress_callback and 'time=' in line:
+                match = _re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+                if match:
+                    h, m, s, cs = map(int, match.groups())
+                    current = h * 3600 + m * 60 + s + cs / 100
+                    try:
+                        progress_callback(min(100, (current / duration) * 100))
+                    except Exception:
+                        pass
+
+        code = process.wait()
+        if code != 0:
+            logger.error(f"[TRIM] ffmpeg exited {code}: {''.join(tail)[-800:]}")
+        return code == 0
+
     def format_time(self, seconds: float) -> str:
         """Format seconds as HH:MM:SS."""
         hours = int(seconds // 3600)
