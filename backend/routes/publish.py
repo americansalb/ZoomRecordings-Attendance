@@ -279,6 +279,7 @@ async def get_settings() -> Dict[str, Any]:
         "default_timezone": config.default_timezone,
         "view_types": VIEW_TYPES,
         "palette": class_config.PALETTE,
+        "storage": class_config.storage_status(),
     }
 
 

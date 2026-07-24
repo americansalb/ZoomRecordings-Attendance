@@ -78,8 +78,37 @@ PRIMARY_VIEW = "speaker"
 
 
 def _config_path() -> str:
+    """
+    Where settings live on disk.
+
+    On Render this sits inside the mounted disk declared in render.yaml. If that
+    disk isn't actually attached to the service, the directory is ephemeral and
+    every deploy wipes it — which looks like "it made me reconnect again".
+    Set PUBLISH_CONFIG_PATH to point somewhere durable instead.
+    """
+    override = os.getenv("PUBLISH_CONFIG_PATH")
+    if override:
+        return override
     db = os.getenv("UPLOAD_JOBS_DB", "data/upload_jobs.db")
     return os.path.join(os.path.dirname(db) or ".", "publish_classes.json")
+
+
+def storage_status() -> Dict[str, Any]:
+    """
+    Whether settings are actually persisting, so the UI can say so plainly
+    rather than leaving someone to notice they've been logged out again.
+    """
+    path = os.path.abspath(_config_path())
+    directory = os.path.dirname(path) or "."
+    exists = os.path.exists(path)
+    writable = os.access(directory, os.W_OK) if os.path.isdir(directory) else False
+    return {
+        "path": path,
+        "exists": exists,
+        "writable": writable,
+        # Env vars survive redeploys even when the disk doesn't.
+        "env_fallback_in_use": bool(os.getenv("CLASSROOM_SUBJECT")),
+    }
 
 
 @dataclass
@@ -219,9 +248,13 @@ def load() -> PublishConfig:
     if _cache is not None:
         return _cache
 
-    path = _config_path()
+    path = os.path.abspath(_config_path())
     if not os.path.exists(path):
-        _cache = PublishConfig()
+        logger.warning(
+            f"[PUBLISH] No settings file at {path} — starting empty. If you saved "
+            f"settings before, that directory isn't persisting across deploys."
+        )
+        _cache = _apply_env_fallbacks(PublishConfig())
         return _cache
 
     try:
@@ -232,7 +265,25 @@ def load() -> PublishConfig:
         # Never take the app down over a bad config file.
         logger.error(f"[PUBLISH] Could not read {path}: {e}. Starting empty.")
         _cache = PublishConfig()
+    _cache = _apply_env_fallbacks(_cache)
     return _cache
+
+
+def _apply_env_fallbacks(config: PublishConfig) -> PublishConfig:
+    """
+    Environment variables fill in account-level settings the stored file
+    doesn't have. They survive a wiped disk, so setting CLASSROOM_SUBJECT on
+    the service means the Classroom connection never needs re-entering even if
+    the settings file is lost.
+    """
+    if not config.classroom_subject and os.getenv("CLASSROOM_SUBJECT"):
+        config.classroom_subject = os.environ["CLASSROOM_SUBJECT"].strip()
+        logger.info("[PUBLISH] Using CLASSROOM_SUBJECT from the environment")
+    if not config.webhook_url and os.getenv("PUBLISH_WEBHOOK_URL"):
+        config.webhook_url = os.environ["PUBLISH_WEBHOOK_URL"].strip()
+    if os.getenv("PUBLISH_DEFAULT_TIMEZONE"):
+        config.default_timezone = os.environ["PUBLISH_DEFAULT_TIMEZONE"].strip()
+    return config
 
 
 def save(config: PublishConfig) -> None:
@@ -247,7 +298,9 @@ def save(config: PublishConfig) -> None:
             json.dump(config.to_dict(), f, indent=2)
         os.replace(tmp, path)      # atomic; a crash mid-write can't truncate it
         _cache = config
-    logger.info(f"[PUBLISH] Saved {len(config.classes)} class setting(s) to {path}")
+    logger.info(
+        f"[PUBLISH] Saved {len(config.classes)} class setting(s) to {os.path.abspath(path)}"
+    )
 
 
 def get_class(session_code: str) -> Optional[ClassSettings]:

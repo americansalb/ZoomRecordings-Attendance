@@ -971,6 +971,12 @@ export const publishApi = {
       webhook_url: string
       webhook_secret_set: boolean
       default_timezone: string
+      storage: {
+        path: string
+        exists: boolean
+        writable: boolean
+        env_fallback_in_use: boolean
+      }
       view_types: Record<string, { name: string; description: string; zoom_type: string; folder: string }>
       palette: string[]
     }
