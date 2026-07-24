@@ -95,20 +95,14 @@ def _config_path() -> str:
 
 def storage_status() -> Dict[str, Any]:
     """
-    Whether settings are actually persisting, so the UI can say so plainly
-    rather than leaving someone to notice they've been logged out again.
+    Where settings are stored and whether that survives a deploy, so the UI can
+    say so plainly rather than leaving someone to notice they've been logged
+    out again.
     """
-    path = os.path.abspath(_config_path())
-    directory = os.path.dirname(path) or "."
-    exists = os.path.exists(path)
-    writable = os.access(directory, os.W_OK) if os.path.isdir(directory) else False
-    return {
-        "path": path,
-        "exists": exists,
-        "writable": writable,
-        # Env vars survive redeploys even when the disk doesn't.
-        "env_fallback_in_use": bool(os.getenv("CLASSROOM_SUBJECT")),
-    }
+    from services.config_store import get_config_store
+    status = dict(get_config_store().describe())
+    status["env_fallback_in_use"] = bool(os.getenv("CLASSROOM_SUBJECT"))
+    return status
 
 
 @dataclass
@@ -248,22 +242,23 @@ def load() -> PublishConfig:
     if _cache is not None:
         return _cache
 
-    path = os.path.abspath(_config_path())
-    if not os.path.exists(path):
-        logger.warning(
-            f"[PUBLISH] No settings file at {path} — starting empty. If you saved "
-            f"settings before, that directory isn't persisting across deploys."
-        )
+    from services.config_store import get_config_store
+
+    store = get_config_store()
+    raw = store.read()
+    if raw is None:
+        logger.info(f"[PUBLISH] No settings stored yet (backend: {store.name})")
         _cache = _apply_env_fallbacks(PublishConfig())
         return _cache
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            _cache = PublishConfig.from_dict(json.load(f))
-        logger.info(f"[PUBLISH] Loaded {len(_cache.classes)} class setting(s) from {path}")
-    except (json.JSONDecodeError, OSError) as e:
-        # Never take the app down over a bad config file.
-        logger.error(f"[PUBLISH] Could not read {path}: {e}. Starting empty.")
+        _cache = PublishConfig.from_dict(raw)
+        logger.info(
+            f"[PUBLISH] Loaded {len(_cache.classes)} class setting(s) "
+            f"from {store.name}"
+        )
+    except Exception as e:                          # noqa: BLE001 - never 500 on bad data
+        logger.error(f"[PUBLISH] Stored settings were unreadable: {e}. Starting empty.")
         _cache = PublishConfig()
     _cache = _apply_env_fallbacks(_cache)
     return _cache
@@ -287,20 +282,26 @@ def _apply_env_fallbacks(config: PublishConfig) -> PublishConfig:
 
 
 def save(config: PublishConfig) -> None:
-    """Write config to disk atomically and refresh the cache."""
+    """Persist config through the configured store and refresh the cache."""
     global _cache
-    path = _config_path()
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    from services.config_store import get_config_store
 
+    store = get_config_store()
     with _LOCK:
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(config.to_dict(), f, indent=2)
-        os.replace(tmp, path)      # atomic; a crash mid-write can't truncate it
+        ok = store.write(config.to_dict())
         _cache = config
-    logger.info(
-        f"[PUBLISH] Saved {len(config.classes)} class setting(s) to {os.path.abspath(path)}"
-    )
+    if ok:
+        logger.info(
+            f"[PUBLISH] Saved {len(config.classes)} class setting(s) to {store.name}"
+        )
+    else:
+        # The caller already has the values in memory; make the failure loud so
+        # it doesn't look saved when it isn't.
+        logger.error(f"[PUBLISH] FAILED to persist settings to {store.name}")
+        raise RuntimeError(
+            f"Settings could not be saved to {store.name}. They are active for now "
+            f"but will be lost on restart."
+        )
 
 
 def get_class(session_code: str) -> Optional[ClassSettings]:
