@@ -5,6 +5,7 @@ Handles uploading trimmed recordings to a shared Google Drive folder
 with specific folder structure and permissions.
 """
 
+import json
 import os
 import logging
 from typing import Optional, Dict, Any, List
@@ -14,6 +15,77 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
+
+
+class DriveUploadError(Exception):
+    """
+    An upload failed for a reason a person can act on.
+
+    The publish flow shows this text verbatim, so it says what went wrong and
+    what to do about it — not "Drive upload failed", which sends you to the
+    server logs to find out anything at all.
+    """
+
+
+def _reason_and_message(error: HttpError) -> tuple:
+    """Pull Google's own reason code and message out of an HttpError."""
+    reason, message = "", ""
+    try:
+        body = json.loads(error.content.decode("utf-8"))
+        err = body.get("error", {})
+        message = err.get("message", "") or ""
+        errors = err.get("errors") or []
+        if errors:
+            reason = errors[0].get("reason", "") or ""
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        pass
+    return reason, message
+
+
+def _explain_drive_error(error: HttpError, what: str) -> str:
+    """
+    Turn a Drive API error into a sentence that names the fix.
+
+    Everything here is a failure we have actually hit or can plainly expect
+    with a service account writing into a shared folder.
+    """
+    status = getattr(getattr(error, "resp", None), "status", 0)
+    reason, message = _reason_and_message(error)
+    account = os.getenv("GOOGLE_CLIENT_EMAIL", "the service account")
+
+    if reason in ("storageQuotaExceeded", "quotaExceeded") and status == 403:
+        return (
+            f"Google Drive is out of storage, so {what} could not be saved. "
+            f"Free up space in the shared drive (a few 3-hour recordings fill a "
+            f"lot) or raise the storage limit, then send again."
+        )
+    if reason in ("insufficientFilePermissions", "forbidden") or status == 403:
+        return (
+            f"{account} is not allowed to write {what} into that Drive folder. "
+            f"Give it Content manager access on the shared drive "
+            f"(Manager if files need replacing). Google said: {message or 'permission denied'}"
+        )
+    if status == 404 or reason == "notFound":
+        return (
+            f"The Drive folder for {what} no longer exists, or is not shared "
+            f"with {account}. Check the shared folder is still there and shared."
+        )
+    if status == 401:
+        return (
+            f"Google rejected the credentials while saving {what}. The service "
+            f"account key may have been rotated or disabled."
+        )
+    if reason in ("userRateLimitExceeded", "rateLimitExceeded") or status == 429:
+        return (
+            f"Google is rate-limiting uploads, so {what} did not finish. "
+            f"Wait a minute and send again."
+        )
+    if status >= 500:
+        return (
+            f"Google Drive had a server error while saving {what} and did not "
+            f"recover after retrying. Sending again usually works."
+        )
+    return f"Drive rejected {what}: {message or error}"
 
 
 class DriveService:
@@ -516,13 +588,16 @@ class DriveService:
             logger.error(f"[DRIVE] Error creating session folder: {e}")
             return None
 
-    def get_or_create_folder(self, name: str, parent_id: str) -> Optional[str]:
+    def get_or_create_folder(self, name: str, parent_id: str) -> str:
         """
         Get or create a folder by name under a given parent.
 
         Generic version of the session/view helpers below, used by the publish
         flow so folder names come from the plan rather than being hard-coded to
         the "Session N / Speaker View" convention.
+
+        Raises DriveUploadError rather than returning None, so the reason
+        reaches the person waiting on the publish instead of only the logs.
         """
         cache_key = f"path_{parent_id}_{name}"
         if cache_key in self._folder_cache:
@@ -565,7 +640,34 @@ class DriveService:
 
         except HttpError as e:
             logger.error(f"[DRIVE] Error creating folder {name}: {e}")
-            return None
+            raise DriveUploadError(_explain_drive_error(e, f"the folder '{name}'")) from e
+
+    def ensure_path(self, folder_names: List[str]) -> str:
+        """
+        Resolve a folder path under the shared folder, creating what's missing,
+        and return the innermost folder's ID.
+
+        Worth calling before a long trim: it is a couple of cheap API calls
+        that prove we can actually write there, so a permissions or sharing
+        problem surfaces in seconds instead of after twenty minutes of work.
+        Results are cached, so the upload's own resolution costs nothing.
+        """
+        parent = self.SHARED_FOLDER_ID
+        for name in folder_names:
+            parent = self.get_or_create_folder(name, parent)
+        return parent
+
+    def _find_file(self, file_name: str, parent_id: str) -> Optional[Dict[str, Any]]:
+        """The file of this name already in this folder, if there is one."""
+        safe_name = file_name.replace("'", "\\'")
+        found = self.drive.files().list(
+            q=f"name='{safe_name}' and '{parent_id}' in parents and trashed=false",
+            spaces='drive',
+            fields='files(id, name)',
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute().get('files', [])
+        return found[0] if found else None
 
     def upload_to_path(
         self,
@@ -573,35 +675,42 @@ class DriveService:
         folder_names: List[str],
         file_name: str,
         progress_callback=None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Upload a file to an arbitrary folder path under the shared folder,
-        creating folders as needed. Replaces an existing file of the same name.
+        creating folders as needed.
+
+        Re-publishing the same recording replaces the file *in place* — a new
+        revision of the existing file rather than delete-then-create. Three
+        reasons that matters:
+
+          * deleting first means a failed upload leaves you with neither the
+            old file nor the new one;
+          * permanently deleting in a shared drive needs Manager rights, while
+            updating only needs Content manager, so the delete was failing for
+            exactly the files most likely to be re-sent;
+          * the file ID survives, so anything already pointing at it — the
+            Classroom attachment, a link someone shared — keeps working.
 
         Used by the publish flow, where both the path and the filename come
         from the class's own settings (or an Unsorted fallback when the
         recording isn't matched to a class).
+
+        Raises DriveUploadError with a readable reason on failure.
         """
+        if not os.path.exists(file_path):
+            raise DriveUploadError(f"The trimmed file for {file_name} is missing.")
+        size = os.path.getsize(file_path)
+        if size == 0:
+            raise DriveUploadError(
+                f"The trimmed file for {file_name} is empty — the trim produced "
+                f"nothing. Check the start and end times cover part of the recording."
+            )
+
+        parent = self.ensure_path(folder_names)
+
         try:
-            parent = self.SHARED_FOLDER_ID
-            for name in folder_names:
-                parent = self.get_or_create_folder(name, parent)
-                if not parent:
-                    logger.error(f"[DRIVE] Could not resolve folder {name}")
-                    return None
-
-            safe_name = file_name.replace("'", "\\'")
-            existing = self.drive.files().list(
-                q=f"name='{safe_name}' and '{parent}' in parents and trashed=false",
-                spaces='drive',
-                fields='files(id, name)',
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute().get('files', [])
-
-            for old in existing:
-                logger.info(f"[DRIVE] Replacing existing file: {file_name}")
-                self.drive.files().delete(fileId=old['id'], supportsAllDrives=True).execute()
+            existing = self._find_file(file_name, parent)
 
             media = MediaFileUpload(
                 file_path,
@@ -609,33 +718,57 @@ class DriveService:
                 resumable=True,
                 chunksize=1024 * 1024 * 5,
             )
-            request = self.drive.files().create(
-                body={'name': file_name, 'parents': [parent]},
-                media_body=media,
-                fields='id, name, webViewLink',
-                supportsAllDrives=True
-            )
+
+            if existing:
+                logger.info(
+                    f"[DRIVE] Replacing contents of existing file: {file_name} "
+                    f"({existing['id']})"
+                )
+                request = self.drive.files().update(
+                    fileId=existing['id'],
+                    media_body=media,
+                    fields='id, name, webViewLink',
+                    supportsAllDrives=True
+                )
+            else:
+                request = self.drive.files().create(
+                    body={'name': file_name, 'parents': [parent]},
+                    media_body=media,
+                    fields='id, name, webViewLink',
+                    supportsAllDrives=True
+                )
 
             response = None
             while response is None:
-                status, response = request.next_chunk()
+                # num_retries makes the client ride out the 5xx and 429 blips
+                # that a multi-gigabyte upload will otherwise hit sooner or later.
+                status, response = request.next_chunk(num_retries=5)
                 if status and progress_callback:
                     progress_callback(status.resumable_progress, status.total_size)
 
             file_id = response.get('id')
             self._set_file_permissions(file_id)
-            logger.info(f"[DRIVE] Uploaded {file_name} ({file_id})")
+            logger.info(f"[DRIVE] Uploaded {file_name} ({file_id}, {size} bytes)")
 
             return {
                 'file_id': file_id,
                 'name': response.get('name', file_name),
                 'web_view_link': response.get('webViewLink'),
                 'folder_path': folder_names,
+                'replaced': bool(existing),
             }
 
         except HttpError as e:
             logger.error(f"[DRIVE] Error uploading {file_name}: {e}")
-            return None
+            raise DriveUploadError(_explain_drive_error(e, file_name)) from e
+        except OSError as e:
+            # A dropped connection or a full disk mid-upload. Neither is an
+            # HttpError, and both used to surface as a bare "upload failed".
+            logger.error(f"[DRIVE] Transport error uploading {file_name}: {e}")
+            raise DriveUploadError(
+                f"The connection to Google Drive failed while uploading "
+                f"{file_name} ({e}). Sending again resumes from scratch."
+            ) from e
 
     def get_or_create_view_folder(self, session_folder_id: str, view_type: str) -> Optional[str]:
         """
