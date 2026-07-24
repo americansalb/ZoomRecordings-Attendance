@@ -285,6 +285,50 @@ class TestPlanRecording(unittest.TestCase):
         self.assertIn("Day 5", plan["outputs"][0]["filename"])
 
 
+class TestWorksWithoutAClass(unittest.TestCase):
+    """A recording must always be uploadable, matched or not."""
+
+    def test_unmatched_can_still_be_sent(self):
+        plan = plan_recording(recording(topic="Fifth Meeting | Participants Experience Committee"),
+                              config_with(night_class()))
+        self.assertFalse(plan["ready"])          # not fully resolved
+        self.assertTrue(plan["can_send"])        # but still publishable
+        self.assertEqual(plan["drive_root"], "Unsorted")
+
+    def test_unmatched_filename_keeps_the_zoom_title(self):
+        plan = plan_recording(recording(topic="Fifth Meeting | Participants Experience Committee"),
+                              config_with(night_class()))
+        name = plan["outputs"][0]["filename"]
+        self.assertIn("Fifth Meeting", name)
+        self.assertIn("Nov19", name)
+        self.assertTrue(name.endswith("(Speaker + Screenshare).mp4"))
+
+    def test_unmatched_drive_path_is_unsorted(self):
+        plan = plan_recording(recording(topic="Random meeting"), config_with(night_class()))
+        self.assertEqual(plan["outputs"][0]["drive_folders"], ["Unsorted", "Speaker + Screenshare"])
+
+    def test_matched_drive_path_uses_the_session(self):
+        plan = plan_recording(recording(), config_with(night_class()))
+        self.assertEqual(plan["outputs"][0]["drive_folders"], ["Session 127", "Speaker + Screenshare"])
+
+    def test_illegal_filename_characters_are_stripped(self):
+        plan = plan_recording(recording(topic='Meeting: "notes" / draft <1>'), config_with(night_class()))
+        name = plan["outputs"][0]["filename"]
+        for ch in '\\/:*?"<>|':
+            self.assertNotIn(ch, name.replace(".mp4", ""))
+
+    def test_no_files_cannot_be_sent(self):
+        plan = plan_recording(recording(recording_files=[]), config_with(night_class()))
+        self.assertFalse(plan["can_send"])
+
+    def test_total_size_reported_for_junk_detection(self):
+        # The list needs length and size to distinguish a real class from a
+        # one-minute misfire without opening it.
+        plan = plan_recording(recording(duration=1), config_with(night_class()))
+        self.assertEqual(plan["duration_seconds"], 60)
+        self.assertGreater(plan["total_size_bytes"], 0)
+
+
 class TestFormatTime(unittest.TestCase):
     def test_formats(self):
         self.assertEqual(format_time(0), "0:00:00")

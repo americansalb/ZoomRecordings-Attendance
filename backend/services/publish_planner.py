@@ -58,6 +58,16 @@ def format_time(seconds: float) -> str:
     return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
 
 
+UNSORTED_FOLDER = "Unsorted"
+
+
+def safe_filename(text: str, limit: int = 80) -> str:
+    """Make a Zoom topic usable as a filename without mangling it beyond recognition."""
+    cleaned = re.sub(r'[\\/:*?"<>|]+', " ", text or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return (cleaned[:limit].rstrip() or "Recording")
+
+
 def _fill(pattern: str, values: Dict[str, Any], fallback: str) -> str:
     """Render a {token} pattern, tolerating typos rather than exploding."""
     try:
@@ -170,7 +180,9 @@ def plan_recording(
     settings = config.classes.get(session_code) if session_code else None
 
     start_utc = _parse_iso(recording.get("start_time", "")) or datetime.now(tz=ZoneInfo("UTC"))
-    tz = _zone(settings.timezone) if settings else ZoneInfo("UTC")
+    # Unmatched recordings still need a real local date: falling back to UTC
+    # dates an 11pm class to the following day in every filename.
+    tz = _zone(settings.timezone if settings else config.default_timezone)
     local = start_utc.astimezone(tz)
 
     # Zoom reports duration in whole minutes; the worker re-clamps against the
@@ -221,25 +233,38 @@ def plan_recording(
         "view": "",
     }
 
+    # Where files land. A recording with no class still has somewhere to go —
+    # an Unsorted folder named after the Zoom topic — so publishing never
+    # depends on setting a class up first.
+    root_folder = f"Session {session_code}" if settings else UNSORTED_FOLDER
+
     outputs = []
     for key in wanted:
         spec = VIEW_TYPES[key]
+        if settings:
+            filename = _fill(
+                settings.filename_pattern,
+                {**tokens, "view": spec["folder"]},
+                "Session {session} - Day {day} - {date} ({view}).mp4",
+            )
+        else:
+            # No class: keep Zoom's own title so the file is still identifiable.
+            filename = f"{safe_filename(topic)} - {date_key} ({spec['folder']}).mp4"
+
         outputs.append({
             **available[key],
             "folder": spec["folder"],
-            "filename": _fill(
-                settings.filename_pattern if settings else "",
-                {**tokens, "view": spec["folder"]},
-                "Session {session} - Day {day} - {date} ({view}).mp4",
-            ) if settings else f"Session {tokens['session']} - {date_key} ({spec['folder']}).mp4",
+            "filename": filename,
+            "drive_folders": [root_folder, spec["folder"]],
         })
 
     title = (
         _fill(settings.title_pattern, tokens, "{course} — Day {day} ({date})")
-        if settings else topic
+        if settings else (topic or "Class recording")
     )
 
-    # Why this recording can't be published yet, in the order worth fixing.
+    # Advisory, not gating. These say what's unresolved, and the UI offers to
+    # resolve them — but a recording can always be uploaded to Drive as-is.
     blockers: List[str] = []
     if not session_code:
         blockers.append("no_session_code")
@@ -259,6 +284,7 @@ def plan_recording(
         "date_key": date_key,
         "date_label": date_label,
         "duration_seconds": duration_seconds,
+        "total_size_bytes": sum(v["size_bytes"] for v in available.values()),
 
         "session_code": session_code,
         "class_label": settings.label if settings else None,
@@ -276,6 +302,10 @@ def plan_recording(
         "topic_name": settings.classroom_topic_name if settings else "",
         "post_state": settings.post_state if settings else "PUBLISHED",
 
+        "drive_root": root_folder,
         "blockers": blockers,
+        # Fully resolved: class known, day known, files present.
         "ready": not blockers,
+        # Anything with a video can be uploaded to Drive right now, class or no class.
+        "can_send": bool(available),
     }
