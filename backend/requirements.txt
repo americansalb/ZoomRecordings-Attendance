@@ -17,6 +17,7 @@ redis>=5.0.0
 rq>=1.16.2
 anthropic>=0.107.0  # needs output_config (structured outputs) + adaptive thinking
 tzdata>=2024.1  # zoneinfo needs this on slim images (publish trim maths)
+psycopg2-binary>=2.9.9  # shared Postgres store for publish settings (DATABASE_URL)
 
 # System dependencies (install separately):
 # - ffmpeg (for video trimming): apt-get install ffmpeg
