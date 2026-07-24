@@ -29,7 +29,7 @@ import requests
 
 from services import class_config
 from services.classroom_service import classroom_service
-from services.drive_service import drive_service
+from services.drive_service import DriveUploadError, drive_service
 from services.job_store import get_job_store
 from services.video_trimmer import VideoTrimmerService
 
@@ -49,6 +49,20 @@ def _human(n: float) -> str:
             return f"{f:.1f} {u}"
         f /= 1024
     return f"{n} B"
+
+
+def _folders_for(output: Dict[str, Any], req: Dict[str, Any]) -> List[str]:
+    """
+    Where in Drive this video goes.
+
+    The path comes from the plan, so an unmatched recording lands in
+    Unsorted/<view> under its Zoom title rather than being blocked on someone
+    configuring a class first.
+    """
+    return output.get("drive_folders") or [
+        f"Session {req['session_code']}" if req.get("session_code") else "Unsorted",
+        output.get("folder") or "Speaker + Screenshare",
+    ]
 
 
 def _notify_webhook(url: str, secret: str, payload: Dict[str, Any]) -> None:
@@ -95,6 +109,19 @@ def run_publish_job(job_id: str) -> None:
 
         per_video = 1.0 / len(outputs)
 
+        # Prove we can write to Drive before spending twenty minutes trimming.
+        # Two cheap calls per folder, and the result is cached for the upload.
+        store.update_job(
+            job_id, status="preparing", progress=0.0,
+            message="Checking the Drive folder...",
+        )
+        for output in outputs:
+            label = output.get("folder") or output.get("key") or "video"
+            try:
+                drive_service.ensure_path(_folders_for(output, req))
+            except DriveUploadError as e:
+                raise RuntimeError(f"{label} — {e}") from e
+
         for index, output in enumerate(outputs):
             base = index * per_video
             label = output.get("folder") or output.get("key") or "video"
@@ -122,7 +149,14 @@ def run_publish_job(job_id: str) -> None:
                     f"Could not trim {label}. The recording may still be processing in Zoom."
                 )
 
-            logger.info(f"[PUBLISH] {job_id}: trimmed {label} -> {_human(os.path.getsize(local_path))}")
+            # Free space is logged alongside the size because the two failures
+            # that look alike from the UI — a trim that ran out of room and an
+            # upload Google refused — are told apart by this line.
+            free = shutil.disk_usage(temp_dir).free
+            logger.info(
+                f"[PUBLISH] {job_id}: trimmed {label} -> "
+                f"{_human(os.path.getsize(local_path))} ({_human(free)} disk free)"
+            )
 
             # ---- Drive ---------------------------------------------------
             store.update_job(
@@ -139,19 +173,18 @@ def run_publish_job(job_id: str) -> None:
                         progress=_base + _share * (_TRIM_SHARE + (done / total) * _UPLOAD_SHARE),
                     )
 
-            # Folder path and filename come from the plan, so an unmatched
-            # recording lands in Unsorted/<view> under its Zoom title rather
-            # than being blocked on someone configuring a class first.
-            folders = output.get("drive_folders") or [
-                f"Session {req['session_code']}" if req.get("session_code") else "Unsorted",
-                output.get("folder") or "Speaker + Screenshare",
-            ]
-            result = drive_service.upload_to_path(
-                file_path=local_path,
-                folder_names=folders,
-                file_name=output.get("filename") or os.path.basename(local_path),
-                progress_callback=on_upload,
-            )
+            folders = _folders_for(output, req)
+            try:
+                result = drive_service.upload_to_path(
+                    file_path=local_path,
+                    folder_names=folders,
+                    file_name=output.get("filename") or os.path.basename(local_path),
+                    progress_callback=on_upload,
+                )
+            except DriveUploadError as e:
+                # DriveUploadError already says what to do about it; keep the
+                # view name on the front so it's clear which video stopped.
+                raise RuntimeError(f"{label} — {e}") from e
             if not result:
                 raise RuntimeError(f"Drive upload failed for {label}.")
 
