@@ -379,20 +379,28 @@ class TestTitleAlwaysHasTheDate(unittest.TestCase):
 class TestManualStartTime(unittest.TestCase):
     """Unmatched recordings get trimmed by asking when class started."""
 
-    def test_manual_start_trims_five_either_side(self):
+    def test_manual_start_trims_five_before_ten_after(self):
         # Recording opened 13:50 local; class started 14:00 for 3 hours.
         rec = recording(topic="Committee meeting", start_time="2025-07-24T17:50:00Z", duration=240)
         p = plan_recording(rec, PublishConfig(), manual_start="14:00")
         t = p["trim"]
         self.assertEqual(t["source"], "manual")
         self.assertAlmostEqual(t["start_seconds"], 5 * 60, delta=1)      # 10 in, 5 before
-        self.assertAlmostEqual(t["end_seconds"], 195 * 60, delta=1)      # 10 + 180 + 5
+        self.assertAlmostEqual(t["end_seconds"], 200 * 60, delta=1)      # 10 + 180 + 10
         self.assertNotIn("None", t["note"])
 
     def test_manual_duration_respected(self):
         rec = recording(topic="Committee", start_time="2025-07-24T17:50:00Z", duration=240)
         p = plan_recording(rec, PublishConfig(), manual_start="14:00", manual_duration_minutes=90)
-        self.assertAlmostEqual(p["trim"]["end_seconds"], (10 + 90 + 5) * 60, delta=1)
+        self.assertAlmostEqual(p["trim"]["end_seconds"], (10 + 90 + 10) * 60, delta=1)
+
+    def test_trailing_padding_is_best_effort(self):
+        # "10 minutes after, if available" — a recording that stops right at the
+        # end of class keeps what exists rather than over-running.
+        rec = recording(topic="Committee", start_time="2025-07-24T17:50:00Z", duration=192)
+        p = plan_recording(rec, PublishConfig(), manual_start="14:00")
+        self.assertAlmostEqual(p["trim"]["end_seconds"], 192 * 60, delta=1)   # the whole file
+        self.assertLess(p["trim"]["start_seconds"], p["trim"]["end_seconds"])
 
     def test_manual_start_beats_the_class_schedule(self):
         p = plan_recording(recording(), config_with(night_class()), manual_start="23:30")
