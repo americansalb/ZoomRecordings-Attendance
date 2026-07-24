@@ -31,6 +31,22 @@ const color = (name: string) => COLORS[name] || COLORS.teal
 const ACCENT = '#0A4F4B'
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
+// Every trim, day number and date is computed in the class's own timezone,
+// so it needs to be visible and changeable rather than assumed.
+const TIMEZONES = [
+  ['America/New_York', 'Eastern (New York)'],
+  ['America/Chicago', 'Central (Chicago)'],
+  ['America/Denver', 'Mountain (Denver)'],
+  ['America/Phoenix', 'Arizona (no DST)'],
+  ['America/Los_Angeles', 'Pacific (Los Angeles)'],
+  ['America/Anchorage', 'Alaska'],
+  ['Pacific/Honolulu', 'Hawaii'],
+  ['America/Puerto_Rico', 'Puerto Rico'],
+  ['America/Santo_Domingo', 'Dominican Republic'],
+  ['Europe/London', 'UK'],
+  ['UTC', 'UTC'],
+]
+
 const hm = (s: number) => {
   const t = Math.round(s / 60)
   const h = Math.floor(t / 60)
@@ -307,6 +323,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<PublishJobStatus | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
+  const outcomeRef = useRef<HTMLDivElement | null>(null)
 
   const { data: settings } = useQuery({
     queryKey: ['publish-settings'],
@@ -315,6 +332,13 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
 
   const readOnly = draft.state === 'published' && !jobId
   const cls = settings?.classes.find((c) => c.code === draft.session_code)
+
+  // Bring the result into view the moment it lands.
+  useEffect(() => {
+    if (job?.status === 'completed') {
+      outcomeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [job?.status])
 
   // poll while a job runs
   useEffect(() => {
@@ -418,6 +442,14 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         {draft.date_label} · {hm(draft.duration_seconds)} recorded · hosted by {draft.host_name}
         {draft.day_number != null && ` · Day ${draft.day_number}`}
       </p>
+
+      {/* Result sits at the top: after sending, the link is the thing you want,
+          and it shouldn't be below three screens of settings. */}
+      {(job?.status === 'completed' || draft.published) && (
+        <div ref={outcomeRef}>
+          <Outcome result={job?.result || draft.published} />
+        </div>
+      )}
 
       {/* Class and day: always shown, always editable. Auto-detected when we
           can, but never assumed — the day ends up in the title and filename. */}
@@ -740,9 +772,6 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         </div>
       )}
 
-      {(job?.status === 'completed' || draft.published) && (
-        <Outcome result={job?.result || draft.published} />
-      )}
       {job?.status === 'failed' && (
         <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
           <b>Publish failed.</b> {job.error || job.message}
@@ -757,7 +786,7 @@ function Outcome({ result }: { result: any }) {
   const classroom = result.classroom
   const files = result.files || []
   return (
-    <div className="mt-4 rounded-lg border p-4"
+    <div className="mb-5 rounded-lg border p-4"
       style={{ borderColor: COLORS.green.ink, background: COLORS.green.soft }}>
       <b className="block mb-2" style={{ color: COLORS.green.ink }}>
         {classroom?.ok ? 'Published to Classroom' : 'Uploaded to Drive'}
@@ -925,6 +954,7 @@ function Settings({ onDone }: { onDone: () => void }) {
 
   const [subject, setSubject] = useState('')
   const [webhook, setWebhook] = useState('')
+  const [timezone, setTimezone] = useState('America/New_York')
   const [saved, setSaved] = useState(false)
   // Every hook must run on every render — declaring this below the `isLoading`
   // early return changed the hook count between renders and blanked the page.
@@ -934,6 +964,7 @@ function Settings({ onDone }: { onDone: () => void }) {
     if (data) {
       setSubject(data.classroom_subject)
       setWebhook(data.webhook_url)
+      setTimezone(data.default_timezone || 'America/New_York')
     }
   }, [data])
 
@@ -942,7 +973,11 @@ function Settings({ onDone }: { onDone: () => void }) {
   if (isLoading) return <p className="text-gray-500 py-10 text-center">Loading settings…</p>
 
   const saveTop = async () => {
-    await publishApi.saveSettings({ classroom_subject: subject, webhook_url: webhook })
+    await publishApi.saveSettings({
+      classroom_subject: subject,
+      webhook_url: webhook,
+      default_timezone: timezone,
+    })
     setSaved(true)
     queryClient.invalidateQueries({ queryKey: ['publish-settings'] })
     queryClient.invalidateQueries({ queryKey: ['classroom-courses'] })
@@ -991,6 +1026,15 @@ function Settings({ onDone }: { onDone: () => void }) {
             </span>
             <input className="input" value={webhook} placeholder="https://…"
               onChange={(e) => setWebhook(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="block text-sm font-semibold mb-1">Default time zone</span>
+            <select className="input" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+              {TIMEZONES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </select>
+            <span className="block text-xs text-gray-500 mt-1">
+              Used for recordings that aren't matched to a class. Each class can override it.
+            </span>
           </label>
         </div>
         {courses && !courses.ok && subject && (
@@ -1106,16 +1150,26 @@ function ClassCard({
         </label>
       </div>
 
-      <div className="grid sm:grid-cols-2 gap-4 mb-4">
+      <div className="grid sm:grid-cols-3 gap-4 mb-4">
         <label className="block">
-          <span className="block text-sm font-semibold mb-1">Class starts (local)</span>
+          <span className="block text-sm font-semibold mb-1">Class starts</span>
           <input type="time" className="input" value={s.scheduled_start}
             onChange={(e) => set({ scheduled_start: e.target.value })} />
         </label>
         <label className="block">
-          <span className="block text-sm font-semibold mb-1">Class ends (local)</span>
+          <span className="block text-sm font-semibold mb-1">Class ends</span>
           <input type="time" className="input" value={s.scheduled_end}
             onChange={(e) => set({ scheduled_end: e.target.value })} />
+        </label>
+        <label className="block">
+          <span className="block text-sm font-semibold mb-1">Time zone</span>
+          <select className="input" value={s.timezone}
+            onChange={(e) => set({ timezone: e.target.value })}>
+            {TIMEZONES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+          </select>
+          <span className="block text-xs text-gray-500 mt-1">
+            The times above are in this zone.
+          </span>
         </label>
       </div>
 
