@@ -813,6 +813,7 @@ export interface PublishOutput {
   key: string
   name: string
   zoom_type: string
+  description: string
   file_id: string
   download_url: string
   size_bytes: number
@@ -850,6 +851,7 @@ export interface PublishPlan {
   start_time: string
   date_key: string
   date_label: string
+  started_local: string
   duration_seconds: number
   total_size_bytes: number
 
@@ -920,11 +922,19 @@ export const publishApi = {
     }
   },
 
-  replan: async (recording: any, sessionCode?: string | null, dayNumber?: number | null) => {
+  replan: async (
+    recording: any,
+    sessionCode?: string | null,
+    dayNumber?: number | null,
+    manualStart?: string | null,
+    manualDuration?: number | null,
+  ) => {
     const { data } = await api.post('/publish/plan', {
       recording,
       session_code: sessionCode ?? undefined,
       day_number: dayNumber ?? undefined,
+      manual_start: manualStart ?? undefined,
+      manual_duration_minutes: manualDuration ?? undefined,
     })
     return data as PublishPlan
   },
@@ -960,7 +970,7 @@ export const publishApi = {
       classroom_subject: string
       webhook_url: string
       webhook_secret_set: boolean
-      view_types: Record<string, { name: string; zoom_type: string; folder: string }>
+      view_types: Record<string, { name: string; description: string; zoom_type: string; folder: string }>
       palette: string[]
     }
   },

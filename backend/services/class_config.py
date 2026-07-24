@@ -29,26 +29,46 @@ PALETTE = ["teal", "blue", "plum", "amber", "green"]
 DEFAULT_FILENAME_PATTERN = "Session {session} - Day {day} - {date} ({view}).mp4"
 DEFAULT_TITLE_PATTERN = "{course} — Day {day} ({date})"
 
-# Zoom recording_type -> our short key. Speaker-with-screenshare is the one
-# that matters day to day; the rest are opt-in.
+# Zoom recording_type -> our short key.
+#
+# Zoom's own names are ambiguous: "shared_screen_with_gallery_view" DOES include
+# the shared screen (it's the screen plus a strip of faces), while plain
+# "gallery_view" is the one with no screen share at all. The labels below say
+# which is which in plain words so nobody has to guess from the raw type.
 VIEW_TYPES: Dict[str, Dict[str, str]] = {
     "speaker": {
-        "name": "Speaker view with screenshare",
+        "name": "Shared screen + active speaker",
+        "description": "What you share, with whoever is talking in a small tile. The usual one.",
         "zoom_type": "shared_screen_with_speaker_view",
         "folder": "Speaker + Screenshare",
     },
     "gallery": {
-        "name": "Gallery view with screenshare",
+        "name": "Shared screen + gallery of faces",
+        "description": "What you share, with a strip of everyone's cameras alongside it.",
         "zoom_type": "shared_screen_with_gallery_view",
-        "folder": "Gallery",
+        "folder": "Gallery + Screenshare",
+    },
+    "gallery_only": {
+        "name": "Gallery of faces only",
+        "description": "Just the grid of cameras — no shared screen at all.",
+        "zoom_type": "gallery_view",
+        "folder": "Gallery Only",
+    },
+    "screen_only": {
+        "name": "Shared screen only",
+        "description": "Just what was shared — no cameras.",
+        "zoom_type": "shared_screen",
+        "folder": "Screen Only",
     },
     "active": {
         "name": "Active speaker only",
+        "description": "Just the camera of whoever is talking — no shared screen.",
         "zoom_type": "active_speaker",
         "folder": "Active Speaker",
     },
     "audio": {
         "name": "Audio only",
+        "description": "Sound with no picture.",
         "zoom_type": "audio_only",
         "folder": "Audio",
     },
@@ -76,7 +96,8 @@ class ClassSettings:
     scheduled_end: str = ""                     # "02:00" local (may cross midnight)
     meeting_weekdays: List[int] = field(default_factory=list)  # 0=Mon .. 6=Sun
     first_class_date: str = ""                  # "2025-11-10", day 1
-    pad_before_minutes: int = 1
+    # Classes run ~3 hours; keep 5 minutes either side of the scheduled window.
+    pad_before_minutes: int = 5
     pad_after_minutes: int = 5
 
     # --- what to publish ---

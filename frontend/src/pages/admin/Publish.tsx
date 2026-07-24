@@ -302,6 +302,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
   const [title, setTitle] = useState(plan.title)
   const [note, setNote] = useState('')
   const [postState, setPostState] = useState(plan.post_state || 'PUBLISHED')
+  const [manualStart, setManualStart] = useState<string | null>(null)
+  const [manualDuration, setManualDuration] = useState<number>(180)
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<PublishJobStatus | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -327,7 +329,17 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
     return () => clearInterval(timer)
   }, [jobId, job?.status])
 
-  const assign = async (sessionCode: string, dayNumber: number | null) => {
+  /**
+   * Re-ask the backend for the plan with whatever the user changed. Class, day
+   * and a hand-typed start time all feed the same call, so the title, filenames
+   * and trim stay consistent with each other instead of drifting.
+   */
+  const replan = async (patch: {
+    sessionCode?: string | null
+    dayNumber?: number | null
+    manualStart?: string | null
+    manualDuration?: number | null
+  }) => {
     const replanned = await publishApi.replan(
       {
         id: draft.recording_id,
@@ -344,8 +356,10 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
           recording_type: v.zoom_type,
         })),
       },
-      sessionCode,
-      dayNumber,
+      patch.sessionCode !== undefined ? patch.sessionCode : draft.session_code,
+      patch.dayNumber !== undefined ? patch.dayNumber : draft.day_number,
+      patch.manualStart !== undefined ? patch.manualStart : manualStart,
+      patch.manualDuration !== undefined ? patch.manualDuration : manualDuration,
     )
     setDraft({ ...replanned, state: replanned.ready ? 'ready' : 'needs_attention', published: null })
     setStart(replanned.trim.start_seconds)
@@ -405,8 +419,120 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         {draft.day_number != null && ` · Day ${draft.day_number}`}
       </p>
 
-      {/* unmatched -> offer to assign, but never require it */}
-      {!draft.ready && draft.blockers.length > 0 && (
+      {/* Class and day: always shown, always editable. Auto-detected when we
+          can, but never assumed — the day ends up in the title and filename. */}
+      <Card title="Class and day" tone={draft.session_code ? 'teal' : 'amber'}>
+        {!draft.ready && draft.blockers.length > 0 && (
+          <p className="text-sm mb-3" style={{ color: COLORS.amber.ink }}>
+            {BLOCKER_TEXT[draft.blockers[0]]}
+          </p>
+        )}
+        <p className="text-sm text-gray-600 mb-4">
+          The date is always in the title. Set the day number too and it goes in as
+          <span className="font-mono text-xs"> Day N</span>. Leave the class blank and it still
+          uploads to Drive under <span className="font-mono text-xs">{draft.drive_root}/</span>.
+        </p>
+
+        <div className="grid sm:grid-cols-3 gap-4">
+          <label className="block">
+            <span className="block text-sm font-semibold mb-1">Class</span>
+            <select
+              className="input"
+              value={draft.session_code || ''}
+              disabled={readOnly}
+              onChange={(e) => replan({ sessionCode: e.target.value || null })}
+            >
+              <option value="">No class — Drive only</option>
+              {settings?.classes.map((c) => (
+                <option key={c.code} value={c.code}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="block text-sm font-semibold mb-1">
+              Class day
+              {draft.day_number != null && !readOnly && (
+                <span className="font-normal text-xs ml-1" style={{ color: COLORS.green.ink }}>
+                  auto-detected
+                </span>
+              )}
+            </span>
+            <input
+              type="number"
+              min={1}
+              className="input"
+              placeholder="e.g. 5"
+              defaultValue={draft.day_number ?? ''}
+              disabled={readOnly}
+              key={`day-${draft.day_number}`}
+              onBlur={(e) =>
+                replan({ dayNumber: e.target.value ? parseInt(e.target.value, 10) : null })
+              }
+            />
+          </label>
+
+          <div>
+            <span className="block text-sm font-semibold mb-1">Recording date</span>
+            <div className="input bg-gray-50 text-gray-700">{draft.date_label}</div>
+            <p className="hint text-xs text-gray-500 mt-1">Always included in the title.</p>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+          <span className="block text-sm font-semibold mb-1">Title students will see</span>
+          <p className="font-mono text-xs text-gray-800 break-words">{title}</p>
+        </div>
+      </Card>
+
+      {/* When there's no schedule to trim against, ask for the start time. */}
+      {draft.trim.source !== 'schedule' && (
+        <Card title="When did the class start?" tone="amber">
+          <p className="text-sm text-gray-600 mb-4">
+            There's no schedule to trim against, so tell us when class actually started. We'll keep
+            5 minutes before it and 5 minutes after it ends. Recording began at{' '}
+            <b className="font-mono">{draft.started_local}</b>.
+          </p>
+          <div className="grid sm:grid-cols-3 gap-4 items-end">
+            <label className="block">
+              <span className="block text-sm font-semibold mb-1">Class started at</span>
+              <input
+                type="time"
+                className="input"
+                value={manualStart ?? ''}
+                disabled={readOnly}
+                onChange={(e) => setManualStart(e.target.value || null)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-sm font-semibold mb-1">Class length</span>
+              <select
+                className="input"
+                value={manualDuration}
+                disabled={readOnly}
+                onChange={(e) => setManualDuration(parseInt(e.target.value, 10))}
+              >
+                {[60, 90, 120, 150, 180, 210, 240].map((m) => (
+                  <option key={m} value={m}>
+                    {Math.floor(m / 60)}h{m % 60 ? ` ${m % 60}m` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={!manualStart || readOnly}
+              onClick={() => replan({ manualStart, manualDuration })}
+              className="px-4 py-2 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
+              style={{ background: ACCENT }}
+            >
+              Apply trim
+            </button>
+          </div>
+        </Card>
+      )}
+
+      {false && (
         <Card title="Which class is this? (optional)" tone="amber">
           <p className="text-sm text-gray-600 mb-2">
             {BLOCKER_TEXT[draft.blockers[0]]}
@@ -423,7 +549,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
               <select
                 className="input"
                 defaultValue={draft.session_code || ''}
-                onChange={(e) => e.target.value && assign(e.target.value, draft.day_number)}
+                onChange={(e) => e.target.value && replan({ sessionCode: e.target.value })}
               >
                 <option value="">Choose a class…</option>
                 {settings?.classes.map((c) => (
@@ -439,8 +565,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
                 className="input"
                 defaultValue={draft.day_number ?? ''}
                 onBlur={(e) =>
-                  draft.session_code &&
-                  assign(draft.session_code, e.target.value ? parseInt(e.target.value, 10) : null)
+                  replan({ dayNumber: e.target.value ? parseInt(e.target.value, 10) : null })
                 }
               />
             </label>
@@ -508,7 +633,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
               />
               <span className="flex-1 min-w-0">
                 <b className="block text-sm font-semibold">{v.name}</b>
-                <span className="block text-xs text-gray-500 font-mono">{v.zoom_type}</span>
+                <span className="block text-xs text-gray-500">{v.description}</span>
               </span>
               <span className="text-sm text-gray-600 tabular-nums">{gb(v.size_bytes)}</span>
             </label>
@@ -561,7 +686,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
             .map((v) => (
               <div key={v.key}>
                 <span className="text-gray-500">
-                  Drive / Session {draft.session_code || '___'} / {v.folder} /{' '}
+                  Drive / {(v.drive_folders || []).join(' / ')} /{' '}
                 </span>
                 {v.filename}
               </div>
@@ -920,7 +1045,7 @@ function ClassCard({
   settings: ClassSettings
   courses: { id: string; name: string; section: string }[]
   viewKeys: string[]
-  viewTypes: Record<string, { name: string; zoom_type: string; folder: string }>
+  viewTypes: Record<string, { name: string; description: string; zoom_type: string; folder: string }>
   isNew?: boolean
   onDone?: () => void
 }) {
@@ -1055,7 +1180,10 @@ function ClassCard({
                 onChange={(e) =>
                   set({ views: e.target.checked ? [...s.views, k] : s.views.filter((v) => v !== k) })
                 } />
-              <span className="text-sm font-medium">{viewTypes[k]?.name || k}</span>
+              <span className="text-sm">
+                <b className="block font-medium">{viewTypes[k]?.name || k}</b>
+                <span className="block text-xs text-gray-500">{viewTypes[k]?.description}</span>
+              </span>
             </label>
           )
         })}

@@ -68,7 +68,7 @@ class ClassPayload(BaseModel):
     scheduled_end: str = ""
     meeting_weekdays: List[int] = []
     first_class_date: str = ""
-    pad_before_minutes: int = 1
+    pad_before_minutes: int = 5
     pad_after_minutes: int = 5
     views: List[str] = ["speaker"]
     filename_pattern: str = class_config.DEFAULT_FILENAME_PATTERN
@@ -201,6 +201,8 @@ async def replan(payload: Dict[str, Any]) -> Dict[str, Any]:
         class_config.load(),
         day_override=payload.get("day_number"),
         session_override=payload.get("session_code"),
+        manual_start=payload.get("manual_start"),
+        manual_duration_minutes=payload.get("manual_duration_minutes"),
     )
 
 
