@@ -959,27 +959,27 @@ class DriveService:
 
     def _set_file_permissions(self, file_id: str) -> bool:
         """
-        Set file permissions: viewable with link, not downloadable.
+        Anyone with the link can watch it; downloading and copying are off.
 
-        Note: Google Drive API doesn't have a direct "prevent download" option.
-        The best we can do is set "reader" access which allows viewing.
-        For true download prevention, you'd need to use Google Workspace settings.
+        This is how students reach the recording — no AALB sign-in, no Classroom
+        attachment, no per-student sharing. "anyone" is deliberate rather than
+        domain-restricted, because a link that demands a sign-in is not a link
+        anyone can watch.
+
+        The download restriction is best-effort by nature: Drive has no hard
+        "no downloads" switch, only copyRequiresWriterPermission, which hides
+        the download and copy controls from viewers. Anyone determined can still
+        capture the stream. Replacing this with a player that streams without
+        exposing the file is the real fix, and the seam for it is here — swap
+        what this returns a link to, and nothing upstream changes.
         """
         try:
-            # Create permission for anyone with the link to view
-            permission = {
-                'type': 'anyone',
-                'role': 'reader'
-            }
-
             self.drive.permissions().create(
                 fileId=file_id,
-                body=permission,
+                body={'type': 'anyone', 'role': 'reader'},
                 supportsAllDrives=True
             ).execute()
 
-            # Update file to restrict download/copy (Workspace feature)
-            # This may not work for all accounts
             try:
                 self.drive.files().update(
                     fileId=file_id,
@@ -989,11 +989,14 @@ class DriveService:
                     },
                     supportsAllDrives=True
                 ).execute()
-            except HttpError:
-                # This feature might not be available for all account types
-                logger.warning("[DRIVE] Could not set download restriction (Workspace feature)")
-
-            logger.info(f"[DRIVE] Set permissions for file {file_id}")
+                logger.info(f"[DRIVE] {file_id}: link-viewable, download restricted")
+            except HttpError as e:
+                # Not fatal, but say which of the two properties is missing
+                # rather than implying both are in place.
+                logger.warning(
+                    f"[DRIVE] {file_id}: link-viewable, but the download restriction "
+                    f"was refused — viewers will be able to download it ({e})"
+                )
             return True
 
         except HttpError as e:

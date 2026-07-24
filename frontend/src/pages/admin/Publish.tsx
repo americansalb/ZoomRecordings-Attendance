@@ -903,7 +903,7 @@ function Outcome({ result }: { result: any }) {
       {classroom?.ok && classroom.reason === 'posted_as_link' && (
         <div className="mt-3 rounded-lg border p-3 text-sm"
           style={{ borderColor: COLORS.amber.ink, background: '#fff', color: COLORS.amber.ink }}>
-          <b>Posted as a link, not an attached file.</b> {classroom.detail}
+          <b>Posted.</b> {classroom.detail}
         </div>
       )}
       {classroom && !classroom.ok && (

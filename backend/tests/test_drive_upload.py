@@ -215,6 +215,49 @@ class TestReplacingAnExistingRecording(unittest.TestCase):
                         "a multi-GB upload must ride out 5xx blips")
 
 
+class TestHowStudentsReachTheVideo(unittest.TestCase):
+    """
+    The whole posting model rests on this: the link works for anyone, with no
+    AALB sign-in. Domain-restricted sharing would silently break every student
+    who isn't on the domain.
+    """
+
+    def setUp(self):
+        self.granted = []
+        self.updates = []
+        outer = self
+
+        class RecordingPermissions:
+            def create(self, **kw):
+                outer.granted.append(kw["body"])
+                return FakeRequest({"id": "perm"})
+
+        files = FakeFiles(existing=[])
+        drive = FakeDrive(files)
+        drive._permissions = RecordingPermissions()
+        self.svc = DriveService()
+        self.svc._drive_service = drive
+        self.svc._folder_cache["path_%s_Session 139" % DriveService.SHARED_FOLDER_ID] = "f1"
+        self.svc._folder_cache["path_f1_Gallery + Screenshare"] = "f2"
+        self.files = files
+        self.svc.upload_to_path(a_video(), PATH, NAME)
+
+    def test_anyone_with_the_link_can_view_without_signing_in(self):
+        self.assertIn({"type": "anyone", "role": "reader"}, self.granted)
+
+    def test_sharing_is_not_restricted_to_the_domain(self):
+        for body in self.granted:
+            self.assertNotIn("domain", body.get("type", ""))
+
+    def test_downloading_and_copying_are_restricted(self):
+        restriction = next(
+            kw for verb, kw in self.files.records
+            if verb == "update" and "copyRequiresWriterPermission" in kw.get("body", {})
+        )
+        self.assertTrue(restriction["body"]["copyRequiresWriterPermission"])
+        self.assertFalse(restriction["body"]["viewersCanCopyContent"])
+
+
 class TestFailuresExplainThemselves(unittest.TestCase):
     def _message_for(self, error: HttpError) -> str:
         files = FakeFiles(existing=[], errors={"create": error})

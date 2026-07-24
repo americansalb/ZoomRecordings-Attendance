@@ -315,20 +315,23 @@ class ClassroomService:
         description: str = "",
         topic_id: Optional[str] = None,
         state: str = "PUBLISHED",
-        share_mode: str = "VIEW",
         scheduled_time: Optional[str] = None,
         drive_links: Optional[List[str]] = None,
     ) -> ClassroomResult:
         """
-        Attach one or more already-uploaded Drive files to a course.
+        Post a link to an already-uploaded recording on a course.
+
+        The video goes up as a *link* to the Drive file, not as an attached
+        Drive file. That is deliberate. Attaching makes Classroom re-share the
+        file on the teacher's behalf, and the teacher has no rights over a file
+        the service account owns — which is what Google was refusing with a bare
+        "The caller does not have permission". A link asks nothing of anyone's
+        permissions. The file itself is already set to "anyone with the link can
+        view", with copying and downloading restricted, so the sharing is done
+        by Drive rather than by Classroom.
 
         Returns a ClassroomResult; never raises. A failure here must not lose
         the upload that already succeeded.
-
-        If Google refuses because it can't share the attachment, this falls back
-        to posting the same material with the Drive links written into the
-        description. Students still get to the video, and the result says plainly
-        which of the two happened.
         """
         if not course_id:
             return ClassroomResult(
@@ -336,15 +339,18 @@ class ClassroomService:
                 reason="no_course",
                 detail="This class has no Classroom course selected in Class settings.",
             )
-        if not drive_file_ids:
-            return ClassroomResult(ok=False, reason="no_files", detail="Nothing to attach.")
+        if not drive_file_ids and not drive_links:
+            return ClassroomResult(ok=False, reason="no_files", detail="Nothing to post.")
+
+        links = list(drive_links or [])
+        if not links:
+            # Every uploaded file has a webViewLink, but fall back to building
+            # one so a missing link never costs us the post.
+            links = [f"https://drive.google.com/file/d/{fid}/view" for fid in drive_file_ids]
 
         body: Dict[str, Any] = {
             "title": title,
-            "materials": [
-                {"driveFile": {"driveFile": {"id": fid}, "shareMode": share_mode}}
-                for fid in drive_file_ids
-            ],
+            "materials": [{"link": {"url": url}} for url in links],
             "state": state if state in ("PUBLISHED", "DRAFT") else "PUBLISHED",
         }
         if description:
@@ -404,13 +410,12 @@ class ClassroomService:
         drive_links: List[str],
     ) -> Optional[ClassroomResult]:
         """
-        Post the material with the video as a link in the text instead of an
-        attached file.
+        Last resort: the link in the description, with no materials at all.
 
-        Attaching makes Classroom re-share the file as the teacher, which is the
-        step that gets refused. A plain link asks nothing of the teacher's
-        permissions, so this goes through when the attachment doesn't — and the
-        class still gets the recording tonight.
+        Classroom can sometimes recognise a Drive URL in a link material and try
+        to resolve it back into a Drive file, which puts us back on the sharing
+        path that gets refused. Plain text in the description cannot be resolved
+        into anything, so it always goes through.
 
         Returns None if this fails too, so the caller reports the original error
         rather than a second, more confusing one.
@@ -446,9 +451,8 @@ class ClassroomService:
             state=created.get("state"),
             reason="posted_as_link",
             detail=(
-                "Posted, but with the video as a link rather than an attached file — "
-                "Google wouldn't let the teacher account share the file itself. "
-                "Students can still open it."
+                "Posted, but the video link is written into the post's text rather than "
+                "shown as a link card — Google refused the card. Students can still open it."
             ),
         )
 

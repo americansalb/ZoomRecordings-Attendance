@@ -212,11 +212,10 @@ def run_publish_job(job_id: str) -> None:
 
         config = class_config.load()
 
-        # Classroom attaches the file acting as the teacher, so the teacher has
-        # to be able to see it first. The service account owns these uploads, so
-        # without this Google refuses the post with a bare "caller does not have
-        # permission". Best-effort — a failure here is not worth losing the
-        # upload over, and the post may still work.
+        # Students reach the video through the "anyone with the link" permission
+        # set at upload, so this is not what makes the post work. It gives the
+        # teacher the recording in their own Drive, and covers the case where
+        # Classroom resolves the link back into the file. Best-effort.
         for upload in uploaded:
             drive_service.grant_access(upload["file_id"], config.classroom_subject)
 
@@ -229,7 +228,6 @@ def run_publish_job(job_id: str) -> None:
             description=req.get("description", ""),
             topic_id=req.get("topic_id") or None,
             state=req.get("post_state", "PUBLISHED"),
-            share_mode=req.get("share_mode", "VIEW"),
             scheduled_time=req.get("scheduled_time") or None,
         )
 

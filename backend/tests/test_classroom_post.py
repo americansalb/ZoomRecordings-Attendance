@@ -1,14 +1,12 @@
 """
 Tests for posting a recording to Google Classroom.
 
-The failure being protected against: Classroom posts *as the teacher*, and
-attaching a Drive file makes it re-share that file on the teacher's behalf. The
-service account owns these uploads, so Google refuses with a bare 403
-"The caller does not have permission" — which says nothing about the real cause.
-
-Two answers, both tested here: give the teacher access to the file before
-posting, and if Google still refuses, post the link instead of the attachment so
-the class gets the recording anyway.
+The video is posted as a *link* to the Drive file, never as an attached Drive
+file. Attaching makes Classroom re-share the file on the teacher's behalf, and
+the teacher has no rights over a file the service account owns — which is what
+Google was refusing with a bare 403 "The caller does not have permission".
+Sharing is Drive's job here: the file is already "anyone with the link can
+view", so students need no sign-in and Classroom needs no permission.
 
 Runs against a fake Classroom API, so no credentials and no network.
 """
@@ -59,17 +57,17 @@ class FakeCreate:
 
 
 class FakeMaterials:
-    """Refuses attachments if `refuse_attachments`, accepts plain posts."""
+    """Refuses posts carrying materials if `refuse_materials`."""
 
-    def __init__(self, refuse_attachments: bool = False, refuse_everything: bool = False):
+    def __init__(self, refuse_materials: bool = False, refuse_everything: bool = False):
         self.bodies: List[Dict[str, Any]] = []
-        self.refuse_attachments = refuse_attachments
+        self.refuse_materials = refuse_materials
         self.refuse_everything = refuse_everything
 
     def error_for(self, body) -> Optional[HttpError]:
         if self.refuse_everything:
             return http_error(403, "The caller does not have permission")
-        if self.refuse_attachments and body.get("materials"):
+        if self.refuse_materials and body.get("materials"):
             return http_error(403, "The caller does not have permission")
         return None
 
@@ -111,14 +109,36 @@ def post(svc: ClassroomService, **overrides):
     return svc.post_material(**args)
 
 
-class TestTheNormalPath(unittest.TestCase):
-    def test_attaches_the_drive_file(self):
+class TestThePostIsALink(unittest.TestCase):
+    def test_posts_a_link_material(self):
         materials = FakeMaterials()
         result = post(service_with(materials))
         self.assertTrue(result.ok)
-        attached = materials.bodies[0]["materials"][0]["driveFile"]
-        self.assertEqual(attached["driveFile"]["id"], "file-1")
-        self.assertEqual(attached["shareMode"], "VIEW")
+        self.assertEqual(
+            materials.bodies[0]["materials"],
+            [{"link": {"url": "https://drive.google.com/file/d/file-1/view"}}],
+        )
+
+    def test_never_attaches_the_drive_file(self):
+        """The attachment is the thing Google refuses — it must not come back."""
+        materials = FakeMaterials()
+        post(service_with(materials))
+        for body in materials.bodies:
+            for material in body.get("materials", []):
+                self.assertNotIn("driveFile", material)
+
+    def test_a_link_is_built_from_the_file_id_when_none_was_given(self):
+        materials = FakeMaterials()
+        post(service_with(materials), drive_links=None)
+        self.assertEqual(
+            materials.bodies[0]["materials"][0]["link"]["url"],
+            "https://drive.google.com/file/d/file-1/view",
+        )
+
+    def test_posts_every_video_that_was_uploaded(self):
+        materials = FakeMaterials()
+        post(service_with(materials), drive_links=["https://a/1", "https://b/2"])
+        self.assertEqual(len(materials.bodies[0]["materials"]), 2)
 
     def test_only_posts_once_when_it_works(self):
         materials = FakeMaterials()
@@ -130,11 +150,13 @@ class TestTheNormalPath(unittest.TestCase):
         self.assertIsNone(result.reason)
 
 
-class TestWhenGoogleRefusesTheAttachment(unittest.TestCase):
-    """The observed production failure."""
+class TestWhenEvenTheLinkMaterialIsRefused(unittest.TestCase):
+    """Classroom can resolve a Drive URL back into the file it points at, which
+    lands on the sharing path again. Plain text in the description cannot be
+    resolved into anything."""
 
-    def test_falls_back_to_posting_the_link(self):
-        materials = FakeMaterials(refuse_attachments=True)
+    def test_falls_back_to_the_link_in_the_description(self):
+        materials = FakeMaterials(refuse_materials=True)
         result = post(service_with(materials))
 
         self.assertTrue(result.ok, "the class should still get the recording")
@@ -143,20 +165,15 @@ class TestWhenGoogleRefusesTheAttachment(unittest.TestCase):
         self.assertNotIn("materials", second)
         self.assertIn("https://drive.google.com/file/d/file-1/view", second["description"])
 
-    def test_says_plainly_that_it_is_a_link_not_an_attachment(self):
-        result = post(service_with(FakeMaterials(refuse_attachments=True)))
-        self.assertIn("link", result.detail.lower())
-        self.assertIn("attach", result.detail.lower())
-
     def test_the_title_and_topic_survive_the_fallback(self):
-        materials = FakeMaterials(refuse_attachments=True)
+        materials = FakeMaterials(refuse_materials=True)
         post(service_with(materials), topic_id="topic-9")
         second = materials.bodies[1]
         self.assertEqual(second["title"], "Session 139 — Day 2 (Jul 22)")
         self.assertEqual(second["topicId"], "topic-9")
 
     def test_an_existing_description_is_kept_above_the_link(self):
-        materials = FakeMaterials(refuse_attachments=True)
+        materials = FakeMaterials(refuse_materials=True)
         post(service_with(materials), description="Recorded 22 July.")
         text = materials.bodies[1]["description"]
         self.assertTrue(text.startswith("Recorded 22 July."))
@@ -167,12 +184,6 @@ class TestWhenGoogleRefusesTheAttachment(unittest.TestCase):
         result = post(service_with(FakeMaterials(refuse_everything=True)))
         self.assertFalse(result.ok)
         self.assertEqual(result.reason, "permission_denied")
-
-    def test_no_fallback_without_links_to_fall_back_to(self):
-        materials = FakeMaterials(refuse_attachments=True)
-        result = post(service_with(materials), drive_links=None)
-        self.assertFalse(result.ok)
-        self.assertEqual(len(materials.bodies), 1)
 
 
 class TestThe403Explanation(unittest.TestCase):
