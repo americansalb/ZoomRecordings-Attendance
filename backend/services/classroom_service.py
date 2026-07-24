@@ -22,6 +22,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -100,6 +101,43 @@ class ClassroomService:
             )
         return self._clients[subject]
 
+    # Delegation failures surface as an OAuth RefreshError during token
+    # exchange, not as an HttpError from the API call — so they need catching
+    # separately or the raw Google string reaches the user.
+    DELEGATION_HELP = (
+        "Google hasn't authorised this app to post as a teacher yet. A Workspace admin "
+        "needs to open Admin console → Security → Access and data control → API controls "
+        "→ Domain-wide delegation, add the service account's numeric client ID, and grant "
+        "these scopes: classroom.courses.readonly, classroom.topics, "
+        "classroom.courseworkmaterials, drive. Full steps are in docs/classroom-setup.md. "
+        "Until then everything still uploads to Drive and gives you a link to post by hand."
+    )
+
+    @staticmethod
+    def _explain_auth(e: Exception) -> ClassroomResult:
+        text = str(e)
+        if "unauthorized_client" in text:
+            return ClassroomResult(
+                ok=False,
+                reason="delegation_not_authorized",
+                detail=ClassroomService.DELEGATION_HELP,
+            )
+        if "invalid_grant" in text or "Invalid email" in text:
+            return ClassroomResult(
+                ok=False,
+                reason="bad_subject",
+                detail=(
+                    "Google rejected that teacher email. Check it's a real account on your "
+                    "Workspace domain, spelled exactly as it appears in the admin console."
+                ),
+            )
+        logger.error(f"[CLASSROOM] Auth error: {text[:400]}")
+        return ClassroomResult(
+            ok=False,
+            reason="auth_error",
+            detail=f"Google refused the sign-in: {text[:200]}",
+        )
+
     @staticmethod
     def _explain(e: HttpError) -> ClassroomResult:
         """Turn the documented failures into something actionable."""
@@ -170,6 +208,9 @@ class ClassroomService:
             return {"ok": True, "courses": courses}
         except ClassroomNotConfigured as e:
             return {"ok": False, "courses": [], "reason": "not_configured", "detail": str(e)}
+        except (RefreshError, GoogleAuthError) as e:
+            r = self._explain_auth(e)
+            return {"ok": False, "courses": [], "reason": r.reason, "detail": r.detail}
         except HttpError as e:
             r = self._explain(e)
             return {"ok": False, "courses": [], "reason": r.reason, "detail": r.detail}
@@ -185,6 +226,9 @@ class ClassroomService:
             return {"ok": True, "topics": topics}
         except ClassroomNotConfigured as e:
             return {"ok": False, "topics": [], "reason": "not_configured", "detail": str(e)}
+        except (RefreshError, GoogleAuthError) as e:
+            r = self._explain_auth(e)
+            return {"ok": False, "topics": [], "reason": r.reason, "detail": r.detail}
         except HttpError as e:
             r = self._explain(e)
             return {"ok": False, "topics": [], "reason": r.reason, "detail": r.detail}
@@ -252,6 +296,8 @@ class ClassroomService:
             )
         except ClassroomNotConfigured as e:
             return ClassroomResult(ok=False, reason="not_configured", detail=str(e))
+        except (RefreshError, GoogleAuthError) as e:
+            return self._explain_auth(e)
         except HttpError as e:
             return self._explain(e)
         except Exception as e:                      # noqa: BLE001

@@ -516,6 +516,127 @@ class DriveService:
             logger.error(f"[DRIVE] Error creating session folder: {e}")
             return None
 
+    def get_or_create_folder(self, name: str, parent_id: str) -> Optional[str]:
+        """
+        Get or create a folder by name under a given parent.
+
+        Generic version of the session/view helpers below, used by the publish
+        flow so folder names come from the plan rather than being hard-coded to
+        the "Session N / Speaker View" convention.
+        """
+        cache_key = f"path_{parent_id}_{name}"
+        if cache_key in self._folder_cache:
+            return self._folder_cache[cache_key]
+
+        # Escape single quotes for the Drive query language.
+        safe_name = name.replace("'", "\\'")
+        try:
+            query = (
+                f"name='{safe_name}' and '{parent_id}' in parents "
+                f"and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            )
+            results = self.drive.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)',
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+
+            files = results.get('files', [])
+            if files:
+                self._folder_cache[cache_key] = files[0]['id']
+                return files[0]['id']
+
+            folder = self.drive.files().create(
+                body={
+                    'name': name,
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'parents': [parent_id],
+                },
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+
+            folder_id = folder.get('id')
+            self._folder_cache[cache_key] = folder_id
+            logger.info(f"[DRIVE] Created folder: {name}")
+            return folder_id
+
+        except HttpError as e:
+            logger.error(f"[DRIVE] Error creating folder {name}: {e}")
+            return None
+
+    def upload_to_path(
+        self,
+        file_path: str,
+        folder_names: List[str],
+        file_name: str,
+        progress_callback=None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Upload a file to an arbitrary folder path under the shared folder,
+        creating folders as needed. Replaces an existing file of the same name.
+
+        Used by the publish flow, where both the path and the filename come
+        from the class's own settings (or an Unsorted fallback when the
+        recording isn't matched to a class).
+        """
+        try:
+            parent = self.SHARED_FOLDER_ID
+            for name in folder_names:
+                parent = self.get_or_create_folder(name, parent)
+                if not parent:
+                    logger.error(f"[DRIVE] Could not resolve folder {name}")
+                    return None
+
+            safe_name = file_name.replace("'", "\\'")
+            existing = self.drive.files().list(
+                q=f"name='{safe_name}' and '{parent}' in parents and trashed=false",
+                spaces='drive',
+                fields='files(id, name)',
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute().get('files', [])
+
+            for old in existing:
+                logger.info(f"[DRIVE] Replacing existing file: {file_name}")
+                self.drive.files().delete(fileId=old['id'], supportsAllDrives=True).execute()
+
+            media = MediaFileUpload(
+                file_path,
+                mimetype='video/mp4',
+                resumable=True,
+                chunksize=1024 * 1024 * 5,
+            )
+            request = self.drive.files().create(
+                body={'name': file_name, 'parents': [parent]},
+                media_body=media,
+                fields='id, name, webViewLink',
+                supportsAllDrives=True
+            )
+
+            response = None
+            while response is None:
+                status, response = request.next_chunk()
+                if status and progress_callback:
+                    progress_callback(status.resumable_progress, status.total_size)
+
+            file_id = response.get('id')
+            self._set_file_permissions(file_id)
+            logger.info(f"[DRIVE] Uploaded {file_name} ({file_id})")
+
+            return {
+                'file_id': file_id,
+                'name': response.get('name', file_name),
+                'web_view_link': response.get('webViewLink'),
+                'folder_path': folder_names,
+            }
+
+        except HttpError as e:
+            logger.error(f"[DRIVE] Error uploading {file_name}: {e}")
+            return None
+
     def get_or_create_view_folder(self, session_folder_id: str, view_type: str) -> Optional[str]:
         """
         Get or create a view type folder (Gallery View or Speaker View).

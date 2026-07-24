@@ -159,6 +159,9 @@ class PublishConfig:
     classroom_subject: str = ""      # teacher the backend impersonates
     webhook_url: str = ""            # optional: your own service, posted to on success
     webhook_secret: str = ""
+    # Used for recordings that aren't matched to a class. Without it those fall
+    # back to UTC, which dates a late-night class to the following day.
+    default_timezone: str = "America/New_York"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -166,6 +169,7 @@ class PublishConfig:
             "classroom_subject": self.classroom_subject,
             "webhook_url": self.webhook_url,
             "webhook_secret": self.webhook_secret,
+            "default_timezone": self.default_timezone,
         }
 
     @classmethod
@@ -178,6 +182,7 @@ class PublishConfig:
             classroom_subject=data.get("classroom_subject", "") or "",
             webhook_url=data.get("webhook_url", "") or "",
             webhook_secret=data.get("webhook_secret", "") or "",
+            default_timezone=data.get("default_timezone") or "America/New_York",
         )
 
 

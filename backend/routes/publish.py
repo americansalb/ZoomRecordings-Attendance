@@ -37,11 +37,14 @@ class OutputSpec(BaseModel):
     folder: str
     download_url: str
     filename: Optional[str] = None
+    drive_folders: List[str] = []
 
 
 class PublishRequest(BaseModel):
     recording_id: str
-    session_code: str
+    # Optional on purpose: a recording with no matched class still uploads to
+    # Drive (into Unsorted/), it just doesn't get posted to Classroom.
+    session_code: str = ""
     day_number: Optional[int] = None
     date_key: str
     title: str

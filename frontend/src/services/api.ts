@@ -818,6 +818,7 @@ export interface PublishOutput {
   size_bytes: number
   folder: string
   filename: string
+  drive_folders: string[]
 }
 
 export interface PublishTrim {
@@ -850,6 +851,7 @@ export interface PublishPlan {
   date_key: string
   date_label: string
   duration_seconds: number
+  total_size_bytes: number
 
   session_code: string | null
   class_label: string | null
@@ -867,8 +869,10 @@ export interface PublishPlan {
   topic_name: string
   post_state: string
 
+  drive_root: string
   blockers: string[]
   ready: boolean
+  can_send: boolean
   state: 'ready' | 'needs_attention' | 'published'
   published: PublishedRecord | null
 }
@@ -927,12 +931,12 @@ export const publishApi = {
 
   start: async (body: {
     recording_id: string
-    session_code: string
+    session_code?: string
     day_number?: number | null
     date_key: string
     title: string
     description?: string
-    outputs: { key: string; folder: string; download_url: string; filename?: string }[]
+    outputs: { key: string; folder: string; download_url: string; filename?: string; drive_folders?: string[] }[]
     start_seconds: number
     end_seconds?: number | null
     course_id?: string

@@ -127,7 +127,7 @@ export default function PublishPage() {
               )}
 
               <Group
-                title="Needs your attention"
+                title="Not matched to a class"
                 dot={COLORS.amber.ink}
                 plans={data.recordings.filter((r) => r.state === 'needs_attention')}
                 onOpen={openReview}
@@ -206,6 +206,9 @@ function Row({ plan, onOpen }: { plan: PublishPlan; onOpen: (p: PublishPlan) => 
   const c = color(plan.class_color)
   const kept = plan.trim.end_seconds - plan.trim.start_seconds
   const state = plan.state
+  // Under 10 minutes is almost never a real class — worth calling out rather
+  // than making someone open it to find out.
+  const short = plan.duration_seconds > 0 && plan.duration_seconds < 600
 
   const pill =
     state === 'published'
@@ -241,17 +244,31 @@ function Row({ plan, onOpen }: { plan: PublishPlan; onOpen: (p: PublishPlan) => 
           {plan.day_number != null && ` · Day ${plan.day_number}`}
         </div>
         <p className="font-semibold text-gray-900 truncate">{plan.class_label || plan.topic}</p>
-        {state === 'needs_attention' ? (
+
+        {/* Length and size show on every row, matched or not — it's the only
+            way to tell a real class from a one-minute misfire at a glance. */}
+        <p className="text-sm text-gray-600 mt-0.5">
+          <b className={short ? '' : 'text-gray-900'} style={short ? { color: COLORS.amber.ink } : undefined}>
+            {hm(plan.duration_seconds)}
+          </b>{' '}
+          recorded
+          {plan.trim.source === 'schedule' && (
+            <> · <b className="text-gray-900">{hm(kept)}</b> after trim</>
+          )}
+          {' · '}
+          {plan.available_views.length} video{plan.available_views.length === 1 ? '' : 's'}
+          {plan.total_size_bytes > 0 && <> · {gb(plan.total_size_bytes)}</>}
+          {short && (
+            <span style={{ color: COLORS.amber.ink }}> · very short, probably not a class</span>
+          )}
+          {state === 'published' && plan.published?.classroom && !plan.published.classroom.ok && (
+            <span style={{ color: COLORS.amber.ink }}> · Drive only, not in Classroom</span>
+          )}
+        </p>
+
+        {state === 'needs_attention' && (
           <p className="text-sm mt-0.5" style={{ color: COLORS.amber.ink }}>
-            {BLOCKER_TEXT[plan.blockers[0]] || 'Needs a look before it can be sent.'}
-          </p>
-        ) : (
-          <p className="text-sm text-gray-600 mt-0.5">
-            {hm(plan.duration_seconds)} recorded · <b className="text-gray-900">{hm(kept)}</b> after
-            trim · {plan.outputs.length} video{plan.outputs.length === 1 ? '' : 's'}
-            {state === 'published' && plan.published?.classroom && !plan.published.classroom.ok && (
-              <span style={{ color: COLORS.amber.ink }}> · not posted to Classroom</span>
-            )}
+            {BLOCKER_TEXT[plan.blockers[0]] || 'Not matched to a class.'}
           </p>
         )}
       </div>
@@ -268,7 +285,7 @@ function Row({ plan, onOpen }: { plan: PublishPlan; onOpen: (p: PublishPlan) => 
           className="px-4 py-2 rounded-lg text-sm font-semibold text-white"
           style={{ background: ACCENT }}
         >
-          {state === 'published' ? 'Details' : state === 'ready' ? 'Review' : 'Fix'}
+          {state === 'published' ? 'Details' : 'Review'}
         </button>
       </div>
     </div>
@@ -346,6 +363,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         folder: v.folder || v.key,
         download_url: v.download_url,
         filename: v.filename,
+        drive_folders: v.drive_folders,
       }))
     try {
       const res = await publishApi.start({
@@ -371,6 +389,9 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
 
   const busy = !!jobId && job?.status !== 'completed' && job?.status !== 'failed'
   const kept = end - start
+  // Classroom only happens when this recording resolves to a course. Without
+  // one it's still a perfectly good Drive upload.
+  const willPostToClassroom = !!draft.course_id
 
   return (
     <div>
@@ -384,11 +405,17 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         {draft.day_number != null && ` · Day ${draft.day_number}`}
       </p>
 
-      {/* unmatched -> assign */}
+      {/* unmatched -> offer to assign, but never require it */}
       {!draft.ready && draft.blockers.length > 0 && (
-        <Card title="Which class is this?" tone="amber">
-          <p className="text-sm text-gray-600 mb-4">
+        <Card title="Which class is this? (optional)" tone="amber">
+          <p className="text-sm text-gray-600 mb-2">
             {BLOCKER_TEXT[draft.blockers[0]]}
+          </p>
+          <p className="text-sm text-gray-600 mb-4">
+            You can skip this and send it anyway — it'll upload to Drive under{' '}
+            <span className="font-mono text-xs">{draft.drive_root}/</span> keeping its Zoom title.
+            Matching it to a class only adds the day number, the tidy filename, and the
+            Classroom post.
           </p>
           <div className="grid sm:grid-cols-2 gap-4">
             <label className="block">
@@ -541,7 +568,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
             ))}
           <div className="pt-1">
             <span className="text-gray-500">Classroom: </span>
-            {draft.course_name || (cls?.classroom_course_name) || 'not connected — you\'ll get a link to post by hand'}
+            {draft.course_name || cls?.classroom_course_name || 'not posting — you\'ll get the Drive link to attach by hand'}
             {draft.topic_name && <span className="text-gray-500"> → {draft.topic_name}</span>}
           </div>
         </div>
@@ -551,7 +578,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
       <div className="sticky bottom-4 bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-4 flex-wrap shadow-lg">
         <span className="text-sm text-gray-600">
           Sending <b className="text-gray-900">{selected.length}</b> video
-          {selected.length === 1 ? '' : 's'} · <b className="text-gray-900">{hm(kept)}</b> each
+          {selected.length === 1 ? '' : 's'} · <b className="text-gray-900">{hm(kept)}</b> each ·{' '}
+          {willPostToClassroom ? 'Drive + Classroom' : 'Drive only'}
         </span>
         <span className="flex-1" />
 
@@ -568,11 +596,15 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         {!readOnly && (
           <button
             onClick={send}
-            disabled={busy || !draft.session_code || selected.length === 0}
+            disabled={busy || selected.length === 0}
             className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
             style={{ background: ACCENT }}
           >
-            {busy ? 'Sending…' : 'Send to Classroom'}
+            {busy
+              ? 'Sending…'
+              : willPostToClassroom
+              ? 'Send to Classroom'
+              : 'Upload to Drive'}
           </button>
         )}
       </div>
@@ -769,6 +801,9 @@ function Settings({ onDone }: { onDone: () => void }) {
   const [subject, setSubject] = useState('')
   const [webhook, setWebhook] = useState('')
   const [saved, setSaved] = useState(false)
+  // Every hook must run on every render — declaring this below the `isLoading`
+  // early return changed the hook count between renders and blanked the page.
+  const [adding, setAdding] = useState<ClassSettings | null>(null)
 
   useEffect(() => {
     if (data) {
@@ -811,8 +846,6 @@ function Settings({ onDone }: { onDone: () => void }) {
     post_state: 'PUBLISHED',
     share_mode: 'VIEW',
   })
-
-  const [adding, setAdding] = useState<ClassSettings | null>(null)
 
   return (
     <div>

@@ -139,12 +139,17 @@ def run_publish_job(job_id: str) -> None:
                         progress=_base + _share * (_TRIM_SHARE + (done / total) * _UPLOAD_SHARE),
                     )
 
-            result = drive_service.upload_video(
+            # Folder path and filename come from the plan, so an unmatched
+            # recording lands in Unsorted/<view> under its Zoom title rather
+            # than being blocked on someone configuring a class first.
+            folders = output.get("drive_folders") or [
+                f"Session {req['session_code']}" if req.get("session_code") else "Unsorted",
+                output.get("folder") or "Speaker + Screenshare",
+            ]
+            result = drive_service.upload_to_path(
                 file_path=local_path,
-                session_code=req["session_code"],
-                day_number=req.get("day_number") or 0,
-                meeting_date=req.get("date_key", ""),
-                view_type=output.get("key", "speaker"),
+                folder_names=folders,
+                file_name=output.get("filename") or os.path.basename(local_path),
                 progress_callback=on_upload,
             )
             if not result:
