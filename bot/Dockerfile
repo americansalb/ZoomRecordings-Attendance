@@ -24,6 +24,11 @@ COPY bot/ ./bot/
 # The npm tarball carries dist/lib alongside the SDK: the audio/video
 # wasm and workers the SDK fetches once a meeting starts. Shipping only
 # the .js would move the failure later instead of fixing it.
+#
+# Note the filename. npm ships zoom-meeting-embedded-ES5.min.js while the
+# CDN serves the same bytes as zoom-meeting-embedded-<version>.min.js
+# (both are exactly 3,291,075 bytes for 3.13.2). The version is in the
+# tarball URL, not the file inside it.
 ARG ZOOM_SDK_VERSION=3.13.2
 RUN set -eux; \
     mkdir -p /tmp/zsdk bot/static/vendor; \
@@ -32,7 +37,7 @@ RUN set -eux; \
     tar -xzf /tmp/zsdk.tgz -C /tmp/zsdk; \
     cp -r /tmp/zsdk/package/dist/. bot/static/vendor/; \
     rm -rf /tmp/zsdk /tmp/zsdk.tgz; \
-    test -f "bot/static/vendor/zoom-meeting-embedded-${ZOOM_SDK_VERSION}.min.js"
+    test -f bot/static/vendor/zoom-meeting-embedded-ES5.min.js
 
 # BOT_PUBLIC_BASE_URL is deliberately NOT set here. Baking in localhost
 # meant config.py's RENDER_EXTERNAL_URL fallback could never take effect,
