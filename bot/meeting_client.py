@@ -118,6 +118,30 @@ class PlaywrightZoomClient(MeetingClient):
         self._context = await self._browser.new_context()
         self._page = await self._context.new_page()
 
+        # Capture what the page says about itself. Without this a script
+        # that throws halfway through is invisible: the error never
+        # reaches Python, "load" still fires, and the only symptom is a
+        # global that never appears. That cost several rounds of guessing
+        # at the Zoom SDK, so the page's own words now come back with the
+        # failure.
+        self._page_errors: List[str] = []
+        self._page_console: List[str] = []
+        self._page.on(
+            "pageerror",
+            lambda e: self._page_errors.append(str(e)[:400]),
+        )
+        self._page.on(
+            "console",
+            lambda m: self._page_console.append(f"[{m.type}] {m.text[:300]}")
+            if m.type in ("error", "warning") else None,
+        )
+        self._page.on(
+            "requestfailed",
+            lambda r: self._page_errors.append(
+                f"request failed: {r.url[:160]} ({r.failure})"
+            ),
+        )
+
         # Bridge inbound chat from the page to our async handler.
         async def _on_zoom_chat(payload):
             if self.on_chat:
@@ -136,13 +160,16 @@ class PlaywrightZoomClient(MeetingClient):
                 "typeof window.ZoomMtgEmbedded !== 'undefined'", timeout=45000
             )
         except Exception:
+            # The page's own errors are the whole diagnosis here. The
+            # bundle assigns window.ZoomMtgEmbedded on its last line, so
+            # a missing global means it threw before getting there, and
+            # only the browser knows why.
+            detail = " | ".join(self._page_errors[-4:]) or "(no page errors captured)"
+            console = " | ".join(self._page_console[-4:]) or "(no console output)"
             raise RuntimeError(
-                "Zoom Web SDK did not load on "
-                f"{self.page_url} (window.ZoomMtgEmbedded undefined after 45s). "
-                "The SDK <script> in bot/static/zoom_client.html could not be "
-                "fetched: check the pinned version exists on source.zoom.us, "
-                "that the container has outbound network access, and that the "
-                "COEP headers are not blocking it."
+                f"Zoom Web SDK did not initialise on {self.page_url} "
+                "(window.ZoomMtgEmbedded undefined after 45s). "
+                f"Page errors: {detail}. Console: {console}"
             ) from None
 
         await self._page.evaluate(
