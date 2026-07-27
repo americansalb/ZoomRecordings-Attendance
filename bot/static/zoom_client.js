@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-12: SDK 6.2.0, waiting room admission, node-id tiles';
+const PAGE_BUILD = 'capture-13: SDK 6.2.0, waiting room admission, node-id tiles';
 
 let client = null;
 let selfUserId = null;

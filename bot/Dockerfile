@@ -55,4 +55,10 @@ EXPOSE 8088
 
 # uvicorn serves the contract + the Zoom client page. Bind Render's $PORT
 # (falls back to 8088 for local Docker runs).
-CMD ["sh", "-c", "uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088}"]
+#
+# --timeout-graceful-shutdown: without a cap, uvicorn waits forever for open
+# requests on SIGTERM. A container wedged by a Chromium pile-up has requests
+# that never finish, so it sat there refusing to die while Render kept
+# routing traffic to it, and the healthy replacement never took over. Twenty
+# seconds is more than any legitimate request here needs.
+CMD ["sh", "-c", "uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088} --timeout-graceful-shutdown 20"]
