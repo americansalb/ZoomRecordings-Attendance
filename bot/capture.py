@@ -144,6 +144,11 @@ class CaptureLoop:
 
             p = participants.get(row.user_id)
             video_on = bool(p.video_on) if p else bool(row.video_on)
+            # Role has to be read live rather than cached at join, because
+            # co-host is granted mid-meeting. The control plane needs it to
+            # leave whoever is running the class alone.
+            is_host = bool(p.is_host) if p else False
+            is_cohost = bool(p.is_co_host) if p else False
 
             data: Optional[bytes] = None
             if video_on:
@@ -189,6 +194,8 @@ class CaptureLoop:
                 "observed_seconds": row.observed_seconds,
                 "face_present": face,
                 "face_checked": data is not None,
+                "is_host": is_host,
+                "is_cohost": is_cohost,
             }
             await self.backend.post_attendance(attendance)
 
@@ -204,6 +211,8 @@ class CaptureLoop:
                 "stored": stored,
                 "image_url": image_url,
                 "drive_file_id": drive_file_id,
+                "is_host": is_host,
+                "is_cohost": is_cohost,
             }
             await self.backend.post_screenshot(manifest)
             rows.append(attendance)
