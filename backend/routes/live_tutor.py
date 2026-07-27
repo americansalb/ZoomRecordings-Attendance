@@ -111,7 +111,9 @@ class ScreenshotIn(BaseModel):
     registrant_id: Optional[str] = None
     captured_at: Optional[float] = None
     video_on: bool = False
-    face_present: bool = False
+    # None means no frame was ever examined, which is a different claim from
+    # False ("examined, no face"). Coercing it to False invents a check.
+    face_present: Optional[bool] = None
     stored: bool = False
     image_url: Optional[str] = None
     drive_file_id: Optional[str] = None
@@ -130,7 +132,7 @@ class AttendanceIn(BaseModel):
     video_on: bool = False
     video_on_seconds: int = 0
     observed_seconds: int = 0
-    face_present: bool = False
+    face_present: Optional[bool] = None
     face_checked: bool = False
 
 

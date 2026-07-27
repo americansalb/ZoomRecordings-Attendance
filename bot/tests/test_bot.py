@@ -85,7 +85,11 @@ async def _capture_pipeline():
     maria, sam = by_name["Maria Gomez"], by_name["Sam Lee"]
     assert maria["video_on"] is True and maria["face_present"] is True
     assert maria["participant_id"] == "1"           # attributed by Zoom id
-    assert sam["video_on"] is False and sam["face_present"] is False
+    assert sam["video_on"] is False
+    # No frame was examined for Sam, so face_present is None. False would be a
+    # claim we looked and saw nobody, and downstream counts checks by
+    # "face_present is not null": sending False invents a check that never ran.
+    assert sam["face_present"] is None and sam["face_checked"] is False
     assert len(backend.shots) == 2
     # attendance is reported alongside the manifest, with durations
     assert len(backend.attendance) == 2
@@ -127,7 +131,10 @@ async def _attendance_without_frames():
     att = {r["participant_name"]: r for r in backend.attendance}
     assert att["Maria Gomez"]["video_on"] is True
     assert att["Maria Gomez"]["face_checked"] is False, "no frame means no face claim"
-    assert att["Maria Gomez"]["face_present"] is False
+    # None, not False. This is the real SDK's behaviour on every tick, and
+    # reporting False here is what made a report show "0 of 27" face checks
+    # when not one check had run.
+    assert att["Maria Gomez"]["face_present"] is None
     assert att["Maria Gomez"]["observed_seconds"] == 60
     assert all(s["stored"] is False for s in backend.shots)
     print("  attendance without frames OK")

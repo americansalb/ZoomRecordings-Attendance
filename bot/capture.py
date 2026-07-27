@@ -158,11 +158,18 @@ class CaptureLoop:
                     logger.warning("capture_user(%s) failed: %s", row.user_id, e)
                     data = None
 
-            # OpenCV decode + Haar cascade is CPU-bound and was running inline
-            # on the event loop, stalling chat and the other participants'
-            # captures for the length of every detection.
-            face = False
+            # None means "never looked", which is not the same claim as False,
+            # "looked and saw nobody". Sending False for an unexamined frame
+            # made every tick read downstream as a completed face check, so a
+            # report could show 0 of 27 checks failing when no check ever ran.
+            # Per-user frames are unavailable on this SDK, so today this is
+            # always None; it must stay honest if that ever changes.
+            face: Optional[bool] = None
             if data:
+                face = False
+                # OpenCV decode + Haar cascade is CPU-bound and was running
+                # inline on the event loop, stalling chat and the other
+                # participants' captures for the length of every detection.
                 try:
                     face = bool(await asyncio.to_thread(self.face_detector, data))
                 except Exception as e:
