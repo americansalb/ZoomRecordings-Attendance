@@ -311,12 +311,12 @@ class BotManager:
         }
 
     async def send(self, runtime_id: str, channel: str, text: str,
-                   to_participant_id: Optional[str] = None) -> None:
+                   to_participant_id: Optional[str] = None) -> bool:
         session = self._sessions.get(runtime_id)
         if not session:
             raise KeyError(f"unknown runtime_id {runtime_id}")
         to = to_participant_id if channel == "dm" else None
-        await session.client.send_chat(text, to_user_id=to)
+        return await session.client.send_chat(text, to_user_id=to)
 
     def _page_url(self) -> str:
         return f"{self.config.public_base_url}/static/zoom_client.html"

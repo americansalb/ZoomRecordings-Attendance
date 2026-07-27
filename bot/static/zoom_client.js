@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-6: node-id tiles, single-camera fallback, inventory';
+const PAGE_BUILD = 'capture-7: node-id tiles, single-camera fallback, inventory';
 
 let client = null;
 let selfUserId = null;
@@ -350,6 +350,27 @@ window.zoomSendChat = async (text, toUserId) => {
       error: String((e && (e.reason || e.message)) || e).slice(0, 200) });
     throw e;
   }
+};
+
+// Send and then wait for Zoom's own echo of the message, the only proof it
+// was distributed. The SDK resolving its promise is not delivery: DMs have
+// been accepted and silently dropped, and the console claimed "sent" for a
+// message no device ever received. Never again on this path.
+window.zoomSendChatConfirmed = async (text, toUserId, timeoutMs) => {
+  const before = chatLog.length;
+  await window.zoomSendChat(text, toUserId);
+  const toId = (toUserId !== null && toUserId !== undefined && toUserId !== '')
+    ? String(toUserId) : null;
+  const preview = String(text || '').slice(0, 80);
+  const budget = Math.max(1000, Math.min(10000, timeoutMs || 5000));
+  const t0 = Date.now();
+  while (Date.now() - t0 < budget) {
+    const echoed = chatLog.slice(before).some((c) => c.kind === 'echo'
+      && (c.preview === preview || (toId !== null && String(c.toId) === toId)));
+    if (echoed) return { accepted: true, echoed: true };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return { accepted: true, echoed: false };
 };
 
 window.zoomListUsers = async () => {

@@ -72,7 +72,11 @@ class MeetingClient(ABC):
                    signature: str, sdk_key: str, zak: Optional[str] = None) -> None: ...
 
     @abstractmethod
-    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> None: ...
+    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
+        """Send a chat message. Returns True only when Zoom's own echo of the
+        message came back, which is the only proof it was distributed. False
+        means the SDK accepted the send and Zoom never carried it."""
+        ...
 
     @abstractmethod
     async def list_participants(self) -> List[Participant]: ...
@@ -120,8 +124,9 @@ class FakeMeetingClient(MeetingClient):
     async def join(self, **kwargs) -> None:
         self.joined = True
 
-    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> None:
+    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
         self.sent_chats.append({"text": text, "to": to_user_id})
+        return True
 
     async def list_participants(self) -> List[Participant]:
         return list(self._participants)
@@ -287,11 +292,12 @@ class PlaywrightZoomClient(MeetingClient):
             },
         )
 
-    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> None:
-        await self._page.evaluate(
-            """async ([text, to]) => { await window.zoomSendChat(text, to); }""",
+    async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
+        result = await self._page.evaluate(
+            """async ([text, to]) => await window.zoomSendChatConfirmed(text, to, 5000)""",
             [text, to_user_id],
         )
+        return bool(result and result.get("echoed"))
 
     async def list_participants(self) -> List[Participant]:
         users = await self._page.evaluate("""async () => await window.zoomListUsers()""")

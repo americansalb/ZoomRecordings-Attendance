@@ -35,7 +35,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-6"
+BUILD = "capture-7"
 
 
 class MessageIn(BaseModel):
@@ -229,12 +229,15 @@ def build_app(
                            x_tutor_bot_secret: Optional[str] = Header(default=None)):
         _check_secret(x_tutor_bot_secret)
         try:
-            await manager.send(runtime_id, body.channel, body.text, body.to_participant_id)
+            delivered = await manager.send(runtime_id, body.channel, body.text,
+                                           body.to_participant_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown runtime_id")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"send failed: {e}")
-        return JSONResponse({"ok": True})
+        # delivered means Zoom echoed the message back, the only proof it was
+        # actually distributed. ok alone only ever meant "the SDK took it".
+        return JSONResponse({"ok": True, "delivered": bool(delivered)})
 
     return app
 
