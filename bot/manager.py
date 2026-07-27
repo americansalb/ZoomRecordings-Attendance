@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .capture import CaptureContext, CaptureLoop
@@ -33,6 +34,9 @@ class BotSession:
     loop: Optional[CaptureLoop] = None
     task: Optional[asyncio.Task] = field(default=None)
     ctx: Optional[CaptureContext] = None
+    # (recipient, text) -> monotonic time of the last DELIVERED send.
+    # Delivery idempotence lives here, see BotManager.send.
+    recent_sends: Dict[Tuple[Optional[str], str], float] = field(default_factory=dict)
 
 
 def _passcode_from_join_url(join_url: Optional[str]) -> str:
@@ -323,13 +327,45 @@ class BotManager:
             "store_images": session.loop.store_images,
         }
 
+    # How long a delivered message shields against an identical resend.
+    # Long enough to cover the control plane's retry pass, short enough
+    # that a genuinely new identical message later in class still goes out.
+    DEDUPE_WINDOW_SECONDS = 600
+
     async def send(self, runtime_id: str, channel: str, text: str,
                    to_participant_id: Optional[str] = None) -> bool:
+        """Deliver a chat message exactly once.
+
+        The control plane can only see its own HTTP call, not the meeting.
+        When this container answers slowly, the caller times out, records a
+        failure, and sends the same message again on its next pass, while
+        the first copy was in fact delivered. That is how one student got a
+        stack of identical reminders all numbered #1. Delivery is therefore
+        idempotent here, at the only place that knows what was actually
+        delivered: an identical (recipient, text) within the window is
+        acknowledged as delivered without sending, which also lets the
+        caller repair its record of the copy it wrongly wrote off.
+        """
         session = self._sessions.get(runtime_id)
         if not session:
             raise KeyError(f"unknown runtime_id {runtime_id}")
         to = to_participant_id if channel == "dm" else None
-        return await session.client.send_chat(text, to_user_id=to)
+        key = (to, text)
+        now = time.monotonic()
+        last = session.recent_sends.get(key)
+        if last is not None and (now - last) < self.DEDUPE_WINDOW_SECONDS:
+            logger.info("[BOT] duplicate send suppressed (same text to %s, delivered %ds ago)",
+                        to or "everyone", int(now - last))
+            return True
+        delivered = await session.client.send_chat(text, to_user_id=to)
+        if delivered:
+            session.recent_sends[key] = now
+            if len(session.recent_sends) > 200:
+                cutoff = now - self.DEDUPE_WINDOW_SECONDS
+                session.recent_sends = {
+                    k: v for k, v in session.recent_sends.items() if v > cutoff
+                }
+        return delivered
 
     def _page_url(self) -> str:
         return f"{self.config.public_base_url}/static/zoom_client.html"

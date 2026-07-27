@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from bot.config import Config
 from bot.signature import meeting_sdk_signature
 from bot.capture import CaptureLoop, CaptureContext
-from bot.manager import BotManager
+from bot.manager import BotManager, BotSession
 from bot.meeting_client import FakeMeetingClient, Participant
 from bot.storage import NullStorage, Storage
 from bot.app import build_app
@@ -431,6 +431,66 @@ def test_join_passes_credentials():
     print("  join credentials OK")
 
 
+async def _face_rotation():
+    parts = [Participant(str(i), f"P{i}", video_on=True) for i in range(1, 7)]
+    frames = {str(i): b"F" for i in range(1, 7)}
+
+    class CountingClient(FakeMeetingClient):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.captured: list = []
+
+        async def capture_user(self, user_id):
+            self.captured.append(str(user_id))
+            return await super().capture_user(user_id)
+
+    client = CountingClient(participants=parts, frames=frames, self_id="99")
+    loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                       store_images=False, face_detector=lambda d: True)
+    ctx = CaptureContext(runtime_id="r", session_ref="5", meeting_id="m",
+                         session_label="5", bot_name="AALB Assistant")
+
+    first = await loop.run_once(ctx)
+    assert len(first) == 6, "everyone is still observed every sweep"
+    assert len(client.captured) == CaptureLoop.FACE_CHECKS_PER_SWEEP, \
+        "face checks per sweep are capped"
+    unchecked = [r for r in first if not r["face_checked"]]
+    # Honesty invariant: an unexamined frame is None, never False.
+    assert all(r["face_present"] is None for r in unchecked)
+
+    await loop.run_once(ctx)
+    assert set(client.captured) == {str(i) for i in range(1, 7)}, \
+        "the rotation reaches everyone across sweeps"
+
+
+def test_face_rotation():
+    asyncio.run(_face_rotation())
+    print("  face check rotation OK")
+
+
+async def _send_dedupe():
+    client = FakeMeetingClient()
+    mgr = BotManager(config=None, backend=None,
+                     client_factory=lambda **k: None,
+                     storage_factory=lambda a, b: None)
+    mgr._sessions["rt"] = BotSession("rt", "m", "ref", "Bot", client)
+
+    text1 = "Your camera is off. (Reminder #1 for Lalo)"
+    assert await mgr.send("rt", "dm", text1, "77") is True
+    assert await mgr.send("rt", "dm", text1, "77") is True, \
+        "the duplicate is acknowledged as delivered"
+    assert len(client.sent_chats) == 1, "the identical resend never reaches the meeting"
+    assert await mgr.send("rt", "dm", "Your camera is off. (Reminder #2 for Lalo)", "77") is True
+    assert len(client.sent_chats) == 2, "a different text goes out"
+    assert await mgr.send("rt", "dm", text1, "88") is True
+    assert len(client.sent_chats) == 3, "the same text to a different person goes out"
+
+
+def test_send_dedupe():
+    asyncio.run(_send_dedupe())
+    print("  duplicate send suppression OK")
+
+
 def run():
     test_signature()
     test_capture()
@@ -440,6 +500,8 @@ def run():
     test_lists_live_bots()
     test_failed_join_cleans_up()
     test_join_passes_credentials()
+    test_face_rotation()
+    test_send_dedupe()
     print("BOT TESTS PASSED")
 
 

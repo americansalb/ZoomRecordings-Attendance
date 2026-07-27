@@ -60,6 +60,14 @@ class CaptureLoop:
     # lighter than it was when every tick tried to render video per user.
     MIN_INTERVAL_SECONDS = 10
 
+    # Face checks are the expensive part of a sweep: each one renders a
+    # tile, screenshots it and runs the detector, while presence and camera
+    # state for the whole room come from one roster read. Capping the tile
+    # work per sweep keeps the sweep near the observation interval no
+    # matter how many cameras are on; the checks rotate, so over a few
+    # sweeps everyone with a camera on still gets sampled.
+    FACE_CHECKS_PER_SWEEP = 4
+
     def __init__(
         self,
         client: MeetingClient,
@@ -84,6 +92,8 @@ class CaptureLoop:
         self._sweep_lock = asyncio.Lock()
         self._self_id: Optional[str] = None
         self._rearm_only = False
+        # Rotation cursor for the per-sweep face check cap.
+        self._face_rr = 0
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -142,6 +152,26 @@ class CaptureLoop:
         folder = f"LiveTutor {ctx.session_label}".strip()
         captured_at = snapshot.at or time.time()
 
+        # Who is eligible for a face check this sweep. With the cap, a room
+        # of thirty cameras costs the same per sweep as a room of four; the
+        # cursor walks the list so nobody is starved across sweeps.
+        eligible = []
+        for row in snapshot.rows:
+            if self._is_self(row.user_id, row.name, ctx):
+                continue
+            p = participants.get(row.user_id)
+            if p is not None and p.is_hold:
+                continue
+            if (bool(p.video_on) if p else bool(row.video_on)):
+                eligible.append(str(row.user_id))
+        if len(eligible) <= self.FACE_CHECKS_PER_SWEEP:
+            face_turn = set(eligible)
+        else:
+            start = self._face_rr % len(eligible)
+            face_turn = {eligible[(start + i) % len(eligible)]
+                         for i in range(self.FACE_CHECKS_PER_SWEEP)}
+            self._face_rr = (start + self.FACE_CHECKS_PER_SWEEP) % len(eligible)
+
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
                 continue
@@ -160,7 +190,7 @@ class CaptureLoop:
             is_cohost = bool(p.is_co_host) if p else False
 
             data: Optional[bytes] = None
-            if video_on:
+            if video_on and str(row.user_id) in face_turn:
                 try:
                     data = await self.client.capture_user(row.user_id)
                 except Exception as e:

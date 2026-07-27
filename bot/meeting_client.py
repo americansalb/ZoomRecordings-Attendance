@@ -363,8 +363,14 @@ class PlaywrightZoomClient(MeetingClient):
                 if rendered is not None:
                     logger.debug("no tile for %s; rendered tiles: %s", user_id, rendered)
                 return None
+            # A tight budget on purpose. Playwright waits for the element to
+            # be stable, and a renderer busy compositing several video
+            # streams can stay "unstable" for tens of seconds. A tile that
+            # cannot settle in 4 seconds was not going to yield a better
+            # frame at 10 or 20, and every second spent here stretches the
+            # whole sweep past the observation interval.
             return await self._page.locator('[data-cap-target="1"]').screenshot(
-                type="png", timeout=10000, animations="disabled"
+                type="png", timeout=4000, animations="disabled"
             )
         except Exception as e:
             logger.warning("capture_user(%s) screenshot failed: %s", user_id, e)
