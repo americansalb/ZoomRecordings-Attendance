@@ -29,6 +29,10 @@ function zoomError(prefix, e) {
   return new Error(`${prefix}: ${body}`);
 }
 
+// Shown in diagnostics so "is the deployed bot actually running this code"
+// is answerable from the console instead of by archaeology on Render.
+const PAGE_BUILD = 'capture-2: node-id tiles, single-camera fallback, inventory';
+
 let client = null;
 let selfUserId = null;
 let joined = false;
@@ -351,9 +355,12 @@ window.zoomDiagnostics = async () => {
   // The camera-state signals received, newest last, and which tiles are
   // actually attached right now. Together these say whether a wrong camera
   // reading is Zoom never telling us, or us mishandling what it said.
+  out.pageBuild = PAGE_BUILD;
   out.videoEvents = videoEvents.slice(-30);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }
   catch (e) { out.renderedVideoUsers = []; }
+  try { out.videoSurfaces = videoSurfaceInventory(); }
+  catch (e) { out.videoSurfaces = []; }
   try {
     const users = client.getAttendeeslist() || [];
     out.raw = users.map((u) => ({
@@ -455,12 +462,76 @@ function tilesForUser(userId) {
   return out;
 }
 
+/*
+ * Fallback for composite rendering.
+ *
+ * Some layouts draw every video into one shared canvas instead of per-user
+ * elements, leaving nothing carrying a node-id. Attribution by tile position
+ * is forbidden, but there is one case where attribution needs no positions at
+ * all: exactly one participant besides the bot has a camera on and nobody is
+ * screen sharing. Whatever video surface is being rendered IS that person, by
+ * elimination. Any other configuration abstains.
+ */
+function singleCameraSurface(userId) {
+  let users = null;
+  try { users = client ? (client.getAttendeeslist() || []) : null; } catch (e) { users = null; }
+  // Fixture pages have no SDK client; they provide the roster directly so the
+  // fallback's logic is testable in a real browser.
+  if (!users) users = window.__fixtureRoster || null;
+  if (!users) return null;
+  if (users.some((u) => u.sharerOn)) return null;
+  const onCam = users.filter((u) => participantVideoOn(u) === true
+    && String(u.userId) !== String(selfUserId));
+  if (onCam.length !== 1 || String(onCam[0].userId) !== String(userId)) return null;
+
+  const root = document.getElementById('zoom-root') || document.body;
+  const surfaces = [...root.querySelectorAll('canvas, video, video-player')]
+    .filter((el) => el.getAttribute('media-type') !== 'preview')
+    .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.width >= 100 && rect.height >= 60)
+    .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+  return surfaces.length ? surfaces[0] : null;
+}
+
+// What video surfaces exist at all, biggest first. This is the evidence read:
+// when capture finds nothing, this says whether the page has per-user tiles,
+// one composite canvas, or nothing rendered, without guessing.
+function videoSurfaceInventory() {
+  return [...document.querySelectorAll('video-player, canvas, video')]
+    .map((el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        tag: el.tagName.toLowerCase(),
+        nodeId: el.getAttribute('node-id') || null,
+        mediaType: el.getAttribute('media-type') || null,
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      };
+    })
+    .filter((e) => e.width >= 8 && e.height >= 8)
+    .sort((a, b) => (b.width * b.height) - (a.width * a.height))
+    .slice(0, 30);
+}
+
+window.zoomVideoInventory = async () => videoSurfaceInventory();
+
 window.zoomMarkUserTile = async (userId) => {
   for (const el of document.querySelectorAll('[data-cap-target]')) {
     el.removeAttribute('data-cap-target');
   }
   const tiles = tilesForUser(userId);
   if (tiles.length === 0) {
+    const single = singleCameraSurface(userId);
+    if (single) {
+      single.el.setAttribute('data-cap-target', '1');
+      return {
+        ok: true,
+        width: Math.round(single.rect.width),
+        height: Math.round(single.rect.height),
+        tag: single.el.tagName.toLowerCase(),
+        strategy: 'single-camera',
+      };
+    }
     // Say what IS rendered, so a persistent miss is diagnosable: wrong ids
     // and an empty gallery look identical from a bare null. Same filter as a
     // capture, so the preview never shows up as a capturable participant.
@@ -477,6 +548,7 @@ window.zoomMarkUserTile = async (userId) => {
     width: Math.round(best.rect.width),
     height: Math.round(best.rect.height),
     tag: best.el.tagName.toLowerCase(),
+    strategy: 'node-id',
   };
 };
 

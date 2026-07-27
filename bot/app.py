@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -33,6 +33,8 @@ from .backend_client import BackendClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+BUILD = "capture-2"
 
 
 class MessageIn(BaseModel):
@@ -97,7 +99,9 @@ def build_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "sdk_configured": bool(config.sdk_key)}
+        # BUILD lets the console prove which code a deploy is actually
+        # running, instead of inferring it from behaviour.
+        return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD}
 
     @app.get("/bots")
     async def list_bots(x_tutor_bot_secret: Optional[str] = Header(default=None)):
@@ -128,6 +132,24 @@ def build_app(
         _check_secret(x_tutor_bot_secret)
         await manager.leave(runtime_id)
         return JSONResponse({"ok": True})
+
+    @app.get("/bots/{runtime_id}/screenshot")
+    async def bot_screenshot(runtime_id: str,
+                             x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """PNG of the bot's whole browser page.
+
+        The evidence view: when capture or camera state is disputed, this is
+        what the bot is actually looking at, not a description of it.
+        """
+        _check_secret(x_tutor_bot_secret)
+        try:
+            session = manager._require(runtime_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        shot = await session.client.page_screenshot()
+        if shot is None:
+            raise HTTPException(status_code=503, detail="no page to screenshot")
+        return Response(content=shot, media_type="image/png")
 
     @app.get("/bots/{runtime_id}/diagnostics")
     async def bot_diagnostics(runtime_id: str,

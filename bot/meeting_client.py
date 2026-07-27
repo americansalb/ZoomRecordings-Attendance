@@ -92,6 +92,10 @@ class MeetingClient(ABC):
         """Raw SDK state, for diagnosing disputed camera state."""
         return {}
 
+    async def page_screenshot(self) -> Optional[bytes]:
+        """PNG of the whole meeting page, for the console's evidence view."""
+        return None
+
     @abstractmethod
     async def leave(self) -> None: ...
 
@@ -373,6 +377,15 @@ class PlaywrightZoomClient(MeetingClient):
         data["page_errors"] = self._page_errors[-6:]
         data["console"] = self._page_console[-8:]
         return data
+
+    async def page_screenshot(self) -> Optional[bytes]:
+        if not self._page:
+            return None
+        try:
+            return await self._page.screenshot(type="png", timeout=8000)
+        except Exception as e:
+            logger.warning("page screenshot failed: %s", e)
+            return None
 
     async def leave(self) -> None:
         try:

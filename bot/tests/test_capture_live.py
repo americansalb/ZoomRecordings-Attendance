@@ -177,6 +177,63 @@ async def _run() -> None:
         rendered = await page.evaluate(
             "async () => await window.zoomRenderedVideoUsers()")
         assert sorted(rendered) == ["16778240", "16778241"]
+
+        # 8. The inventory lists every video surface, biggest first, so a
+        #    capture miss is diagnosable from the console.
+        inv = await page.evaluate("async () => await window.zoomVideoInventory()")
+        assert len(inv) >= 4 and inv[0]["width"] >= inv[-1]["width"], inv
+
+        # ---- composite rendering: one shared canvas, no node-id anywhere ----
+        await page.evaluate("""() => {
+            document.querySelectorAll('video-player').forEach((el) => el.remove());
+            const root = document.getElementById('zoom-root');
+            const c = document.createElement('canvas');
+            c.id = 'composite'; c.width = 960; c.height = 540;
+            c.style.cssText = 'width:960px;height:540px';
+            root.appendChild(c);
+        }""")
+
+        # 9. Exactly one camera on and nobody sharing: the surface IS that
+        #    person, by elimination, and capture attributes it to them.
+        await page.evaluate("""() => {
+            window.__fixtureRoster = [
+                { userId: '16778240', displayName: 'Maria', video: true },
+                { userId: '16778241', displayName: 'Sam', video: false },
+            ];
+        }""")
+        mark = await page.evaluate(
+            "async () => await window.zoomMarkUserTile('16778240')")
+        assert mark["ok"] and mark["strategy"] == "single-camera", mark
+        await page.evaluate("async () => await window.zoomUnmarkTile()")
+        frame = await client.capture_user("16778240")
+        assert frame and frame[:8] == b"\x89PNG\r\n\x1a\n"
+
+        # 10. The camera-off participant is never given the surface.
+        assert await client.capture_user("16778241") is None
+
+        # 11. Two cameras on: ambiguous, so the fallback abstains for both.
+        await page.evaluate("""() => {
+            window.__fixtureRoster = [
+                { userId: '16778240', displayName: 'Maria', video: true },
+                { userId: '16778241', displayName: 'Sam', video: true },
+            ];
+        }""")
+        assert await client.capture_user("16778240") is None
+        assert await client.capture_user("16778241") is None
+
+        # 12. Someone is screen sharing: the big surface could be the share,
+        #     so the fallback abstains even with one camera on.
+        await page.evaluate("""() => {
+            window.__fixtureRoster = [
+                { userId: '16778240', displayName: 'Maria', video: true },
+                { userId: '16778241', displayName: 'Sam', video: false, sharerOn: true },
+            ];
+        }""")
+        assert await client.capture_user("16778240") is None
+
+        # 13. The page-level screenshot for the console evidence view works.
+        shot = await client.page_screenshot()
+        assert shot and shot[:8] == b"\x89PNG\r\n\x1a\n"
     finally:
         await client.close()
 
