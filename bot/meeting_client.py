@@ -40,6 +40,9 @@ class Participant:
     video_on: bool = False
     is_host: bool = False
     is_co_host: bool = False
+    # Zoom's waiting room flag. On hold means outside the meeting: not
+    # present, not observable, never messageable.
+    is_hold: bool = False
 
 
 @dataclass
@@ -309,6 +312,7 @@ class PlaywrightZoomClient(MeetingClient):
                 video_on=bool(u.get("bVideoOn")),
                 is_host=bool(u.get("isHost")),
                 is_co_host=bool(u.get("isCoHost")),
+                is_hold=bool(u.get("isHold")),
             ))
         return out
 

@@ -144,6 +144,11 @@ class CaptureLoop:
                 continue
 
             p = participants.get(row.user_id)
+            # Waiting room, not the meeting. Recording them as present would
+            # mark attendance for someone the host has not admitted, and the
+            # message machinery must never reach into the waiting room.
+            if p is not None and p.is_hold:
+                continue
             video_on = bool(p.video_on) if p else bool(row.video_on)
             # Role has to be read live rather than cached at join, because
             # co-host is granted mid-meeting. The control plane needs it to

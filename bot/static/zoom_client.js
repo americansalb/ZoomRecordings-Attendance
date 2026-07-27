@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-7: node-id tiles, single-camera fallback, inventory';
+const PAGE_BUILD = 'capture-8: node-id tiles, single-camera fallback, inventory';
 
 let client = null;
 let selfUserId = null;
@@ -296,11 +296,33 @@ window.zoomJoin = async (cfg) => {
   // Only set when present, so a join without one behaves exactly as
   // before on accounts that still permit it.
   if (cfg.zak) joinArgs.zak = cfg.zak;
+  // While join() is pending the SDK may be sitting in the waiting room,
+  // which looks identical to a slow connect from the outside. Watch the
+  // SDK's own UI for the waiting room text and say so, both as a lifecycle
+  // signal and in the eventual error if the host never admits the bot.
+  let sawWaitingRoom = false;
+  const waitingWatch = setInterval(() => {
+    try {
+      if (joined) { clearInterval(waitingWatch); return; }
+      const text = (document.body && document.body.innerText) || '';
+      if (/waiting room|host will let you in|meeting host will let you in|wait for the host/i.test(text)) {
+        if (!sawWaitingRoom) {
+          sawWaitingRoom = true;
+          emitLifecycle('waiting_room', null);
+        }
+      }
+    } catch (e) { /* the watcher must never break the join */ }
+  }, 2000);
   try {
     await client.join(joinArgs);
   } catch (e) {
+    clearInterval(waitingWatch);
+    if (sawWaitingRoom) {
+      throw zoomError('Zoom join rejected: the bot reached the waiting room but was never admitted by the host', e);
+    }
     throw zoomError('Zoom join rejected', e);
   }
+  clearInterval(waitingWatch);
   joined = true;
 
   // Everything past this point is bookkeeping. It used to run unguarded, and
@@ -382,6 +404,9 @@ window.zoomListUsers = async () => {
     bVideoOn: participantVideoOn(u),
     isHost: !!u.isHost,
     isCoHost: !!u.isCoHost,
+    // bHold is Zoom's waiting room flag. Someone on hold is outside the
+    // meeting: not present, not observable, and never messageable.
+    isHold: !!(u.bHold ?? u.isHold ?? false),
   }));
 };
 
@@ -430,6 +455,7 @@ window.zoomDiagnostics = async () => {
       muted: u.muted ?? '(absent)',
       isHost: !!u.isHost,
       isCoHost: !!u.isCoHost,
+      isHold: !!(u.bHold ?? u.isHold ?? false),
       // What our own mapping concludes from the above.
       resolvedVideoOn: participantVideoOn(u),
     }));
