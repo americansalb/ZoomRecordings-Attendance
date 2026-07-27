@@ -140,11 +140,19 @@ async def _attendance_without_frames():
     print("  attendance without frames OK")
 
 
-async def _self_skip_by_id():
-    """The bot is skipped by user id, not by display name."""
-    parts = [Participant("1", "AALB Assistant", video_on=True),   # a real student
-             Participant("99", "AALB Assistant", video_on=True)]  # the bot
-    client = FakeMeetingClient(participants=parts, self_id="99")
+async def _self_skip_by_id_and_name():
+    """The bot is skipped by user id AND by display name.
+
+    The name check is not a fallback. Live, the SDK's current-user id and
+    the roster's id for the bot differed, so an id-only rule recorded the
+    bot as an attendee and queued a camera message to itself. Skipping by
+    name accepts a smaller risk (a student would have to be named exactly
+    like the bot) to remove that failure entirely.
+    """
+    parts = [Participant("1", "Maria Gomez", video_on=True),      # a real student
+             Participant("99", "AALB Assistant", video_on=True)]  # the bot, roster id
+    # self_id deliberately differs from the roster row, as observed live.
+    client = FakeMeetingClient(participants=parts, self_id="12345")
     backend = FakeBackend()
     ctx = CaptureContext(runtime_id="r", session_ref="5", meeting_id="m",
                          session_label="5", bot_name="AALB Assistant")
@@ -152,14 +160,14 @@ async def _self_skip_by_id():
                        store_images=False)
     rows = await loop.run_once(ctx)
     ids = {r["participant_id"] for r in rows}
-    assert ids == {"1"}, f"a student sharing the bot's name must survive, got {ids}"
-    print("  self-skip by id OK")
+    assert ids == {"1"}, f"the bot must never be recorded as an attendee, got {ids}"
+    print("  self-skip by id and name OK")
 
 
 def test_capture():
     asyncio.run(_capture_pipeline())
     asyncio.run(_attendance_without_frames())
-    asyncio.run(_self_skip_by_id())
+    asyncio.run(_self_skip_by_id_and_name())
 
 
 def test_contract():

@@ -105,15 +105,16 @@ class CaptureLoop:
     def _is_self(self, user_id: str, name: str, ctx: CaptureContext) -> bool:
         """Never record the bot as a student.
 
-        Prefer the Zoom user id: it is exact. The display-name comparison is
-        only a fallback for when the id is unavailable, and it is a poor one --
-        a student who happens to share the bot's display name would silently
-        vanish from the register.
+        The id check alone is not enough. The SDK's current-user id and the id
+        the roster carries for the bot can differ (observed live: getCurrentUser
+        reported 16788480 while the attendee list row said 16789504), and when
+        they do the bot records itself as an attendee, appears on the report,
+        and queues a camera message to itself. So the display name is always
+        checked as well. The bot's name is ours to choose, so a student
+        colliding with it is avoidable; the bot messaging itself is not.
         """
         if self._self_id and str(user_id) == str(self._self_id):
             return True
-        if self._self_id:
-            return False
         return bool(name) and name == ctx.bot_name
 
     async def run_once(self, ctx: CaptureContext) -> List[dict]:
