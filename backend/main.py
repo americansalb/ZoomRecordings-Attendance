@@ -130,6 +130,16 @@ async def health_check():
     return {"status": "healthy"}
 
 
+# render.yaml points the API service's healthCheckPath at /health, which was
+# never defined: only /api/health was. The SPA catch-all that would have
+# absorbed it is registered only when frontend/dist exists, and on the API
+# service it does not, because the frontend deploys as a separate static site.
+# So the health check 404s and Render treats the deploy as unhealthy.
+@app.get("/health")
+async def health_check_root():
+    return {"status": "healthy"}
+
+
 @app.get("/api/test")
 async def test_endpoint():
     print("[TEST] Test endpoint called", flush=True)
