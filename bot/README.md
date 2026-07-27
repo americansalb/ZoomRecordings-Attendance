@@ -15,14 +15,36 @@ backend ──HTTP (TUTOR_BOT.md)──► bot/app.py ──Playwright──► 
 ```
 
 ## Why this design
-- **Per-user capture, not gallery screenshots.** `zoomCaptureUser(userId)` renders
-  *one* student's own video to our off-screen canvas, so attribution is by Zoom
-  user id and **tile position is irrelevant** (your requirement).
-- **Two cross-checking signals.** Each snapshot records `video_on` (from Zoom's
-  per-user state) and `face_present` (OpenCV). Camera off ⇒ `video_on:false`;
-  camera on but no face ⇒ `face_present:false`. Either is a failsafe for the other.
+- **Attendance from participant identity, not tile position.** The browser page
+  keeps a presence ledger keyed by Zoom user id, driven by Zoom's own
+  `user-added` / `user-removed` / `user-updated` events, so it records who was
+  in the room, from when to when, and how long each camera was actually on.
+- **Attendance does not depend on screenshots.** The capture toggle decides
+  whether pixels are kept, not whether attendance is taken. Attendance that
+  switches itself off when a privacy setting is enabled is not attendance.
+- **Two cross-checking signals.** Each record carries `video_on` (from Zoom's
+  per-user state, authoritative) and, when a frame is available, `face_present`
+  (OpenCV) as a corroborating check.
 - **All-Python orchestration**, reusing your OpenCV + Google stack. The native
   C++ Meeting SDK is a future upgrade behind the same `MeetingClient` interface.
+
+## Known limitation: per-user frame capture
+
+Per-user video frames are **not obtainable** with the Component View Meeting
+SDK. The design this bot was originally built to assumed
+`getMediaStream().renderVideo(canvas, userId, ...)`, which is a **Video SDK**
+API. The object returned by `ZoomMtgEmbedded.createClient()` has no
+`getMediaStream` at all, in 3.13.2 or in 6.2.0, and the Video SDK cannot join
+ordinary Zoom meetings.
+
+`zoomCaptureUser()` therefore returns `null` and `zoomCaptureSupported()`
+returns `false`. `face_present` is recorded only when a frame genuinely exists,
+and `face_checked` distinguishes "no face" from "never looked". Attendance is
+unaffected: `video_on` plus presence duration is the signal the participation
+rule actually needs.
+
+To get frames you would need a different capture path entirely, such as a
+native Meeting SDK bot or a cloud-recording pass, not a change to this file.
 
 ## Prerequisites
 - A Zoom **Meeting SDK** app (Marketplace → Build App → *Meeting SDK*). This gives
@@ -70,13 +92,28 @@ python -m playwright install chromium
 uvicorn bot.app:app --host 0.0.0.0 --port 8088
 ```
 
-## The one piece you must validate live
-`static/zoom_client.js` targets the Zoom Web SDK **Component View**. SDK method
-names shift between versions, so pin the SDK `<script>` in `static/zoom_client.html`
-to the version you built against and confirm these calls against the docs:
-`createClient/init/join`, `getChatClient().send/sendToAll`, `getAttendeeslist`,
-and `getMediaStream().renderVideo` (the capture primitive). It's the only
-integration surface — the four `window.zoom*` functions and `window.onZoomChat`.
+## The integration surface
+`static/zoom_client.js` targets the Zoom Web SDK **Component View**, vendored
+into the image at the version pinned by `ZOOM_SDK_VERSION` in `bot/Dockerfile`.
+
+The method names below were verified against the object `createClient()`
+actually returns (67 methods). A lot of Zoom sample code online uses names that
+belong to the Video SDK or to old releases and that simply do not exist here:
+
+| Used | Do **not** use |
+|---|---|
+| `client.sendChat(text, userId?)` | `client.getChatClient().send(...)`, `sendToAll(...)` |
+| `client.getAttendeeslist()` | `client.getAllUser()` |
+| `client.leaveMeeting()` | `client.leave()` |
+| DOM/event based presence | `client.getMediaStream().renderVideo(...)` |
+
+Calling any of the right-hand names throws a `TypeError`. When that happened
+inside `zoomJoin` after a successful `client.join()`, the bot ended up parked
+silently in the meeting with the backend believing the join had failed.
+
+`init()` must be given `assetPath` pointing at the vendored `/lib/av`, otherwise
+the SDK fetches its media wasm from `source.zoom.us` at join time, which this
+page's `Cross-Origin-Embedder-Policy: require-corp` is there to avoid.
 
 ## Privacy
 Capture is **off by default** and announces the bot on join. These are students'
@@ -85,8 +122,22 @@ consider the backend's "presence flags only" mode (`store_images:false`) if you
 don't need to retain images.
 
 ## What's tested
-`bot/tests/test_bot.py` covers the orchestration with fakes: the SDK signature,
-the capture→attribute→manifest pipeline (video-on/off, face present/absent,
-store vs log-only, bot-self skipped), and the HTTP contract (join → runtime_id,
-announce, inbound chat → backend event, send, leave). The live Zoom join /
-chat / renderVideo path requires your SDK creds and a real meeting to exercise.
+`bot/tests/test_bot.py` covers the orchestration with fakes:
+
+- the SDK signature
+- the attendance pipeline: presence durations, video-on/off, face
+  present/absent, store vs log-only, and attendance recorded correctly **with
+  no frames at all** (the real SDK's behaviour)
+- the bot skipping itself by user id rather than display name, so a student who
+  shares the bot's name is still counted
+- the HTTP contract: join returns a runtime_id, announce, inbound chat becomes a
+  backend event, send, leave
+- a failed join tearing the browser down and reporting the reason, instead of
+  leaving a ghost participant in the meeting
+- the meeting ending on Zoom's side producing a `left` event and reaping the
+  session
+- passcode and ZAK reaching the meeting client, including the passcode carried
+  in a join URL
+
+Run with `python -m bot.tests.test_bot`. The live Zoom join and chat path still
+needs your SDK credentials and a real meeting to exercise.

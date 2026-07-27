@@ -68,6 +68,9 @@ class SummonIn(BaseModel):
     topic: Optional[str] = None
     session_code: Optional[str] = None
     join_url: Optional[str] = None
+    passcode: Optional[str] = None
+    zak: Optional[str] = None
+    role: Optional[int] = None
     overrides: Optional[Dict[str, Any]] = None
 
 
@@ -112,6 +115,23 @@ class ScreenshotIn(BaseModel):
     stored: bool = False
     image_url: Optional[str] = None
     drive_file_id: Optional[str] = None
+
+
+class AttendanceIn(BaseModel):
+    session_ref: Optional[str] = None
+    runtime_id: Optional[str] = None
+    participant_id: str
+    participant_name: Optional[str] = None
+    registrant_id: Optional[str] = None
+    observed_at: Optional[float] = None
+    joined_at: Optional[float] = None
+    left_at: Optional[float] = None
+    present: bool = False
+    video_on: bool = False
+    video_on_seconds: int = 0
+    observed_seconds: int = 0
+    face_present: bool = False
+    face_checked: bool = False
 
 
 def _actor(x_admin_user: Optional[str]) -> str:
@@ -213,8 +233,14 @@ async def delete_policy(policy_id: int) -> Dict[str, Any]:
 
 
 @router.get("/sessions")
-async def list_sessions() -> Dict[str, Any]:
-    return {"success": True, "sessions": get_tutor_store().list_active_sessions()}
+async def list_sessions(include_finished: bool = False, limit: int = 25) -> Dict[str, Any]:
+    """Active sessions by default; pass include_finished=true to also see
+    recently left and errored ones, which is the only way an operator can read
+    the error text from a join that failed."""
+    store = get_tutor_store()
+    sessions = (store.list_recent_sessions(limit=limit) if include_finished
+                else store.list_active_sessions())
+    return {"success": True, "sessions": sessions}
 
 
 @router.post("/sessions/summon")
@@ -223,6 +249,7 @@ async def summon(body: SummonIn, x_admin_user: Optional[str] = Header(default=No
         session = await get_tutor_service().summon(
             body.meeting_id, meeting_uuid=body.meeting_uuid, topic=body.topic,
             session_code=body.session_code, join_url=body.join_url,
+            passcode=body.passcode, zak=body.zak, role=body.role,
             overrides=body.overrides, summoned_by=_actor(x_admin_user),
         )
         return {"success": True, "session": session}
@@ -342,6 +369,80 @@ async def list_messages(
     return {"success": True, "messages": msgs}
 
 
+# ---------------------------------------------------------------- attendance
+
+
+def _resolve_session(store, session_ref: Optional[str], runtime_id: Optional[str]):
+    """Map an inbound bot report to a session by opaque ref, then runtime id."""
+    session = None
+    if session_ref:
+        try:
+            session = store.get_session(int(session_ref))
+        except (TypeError, ValueError):
+            session = None
+    if session is None and runtime_id:
+        session = store.get_session_by_runtime(runtime_id)
+    return session
+
+
+@router.get("/attendance")
+async def list_attendance(
+    session_id: Optional[int] = None,
+    meeting_id: Optional[str] = None,
+    participant_id: Optional[str] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Per-participant attendance for a live session: when they joined, whether
+    they are still here, and how long their camera was actually on."""
+    rows = get_tutor_store().list_attendance(
+        session_id=session_id, meeting_id=meeting_id,
+        participant_id=participant_id, limit=limit,
+    )
+    total_video = sum(int(r.get("video_on_seconds") or 0) for r in rows)
+    return {
+        "success": True,
+        "attendance": rows,
+        "summary": {
+            "participants": len(rows),
+            "present_now": sum(1 for r in rows if r.get("present")),
+            "camera_on_now": sum(1 for r in rows if r.get("video_on")),
+            "total_video_on_seconds": total_video,
+        },
+    }
+
+
+@router.post("/bot/attendance")
+async def ingest_attendance(
+    body: AttendanceIn,
+    x_tutor_bot_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Cumulative attendance ledger row from the bot: one per participant per
+    tick, upserted so the latest report wins."""
+    _check_bot_secret(x_tutor_bot_secret)
+    import time as _time
+
+    store = get_tutor_store()
+    session = _resolve_session(store, body.session_ref, body.runtime_id)
+
+    row = store.record_attendance(
+        participant_id=body.participant_id,
+        observed_at=body.observed_at or _time.time(),
+        session_id=session["id"] if session else None,
+        meeting_id=(session.get("meeting_id") if session else None),
+        participant_name=body.participant_name,
+        registrant_id=body.registrant_id,
+        joined_at=body.joined_at,
+        left_at=body.left_at,
+        present=body.present,
+        video_on=body.video_on,
+        video_on_seconds=body.video_on_seconds,
+        observed_seconds=body.observed_seconds,
+        face_checked=body.face_checked,
+        face_present=body.face_present,
+    )
+    return {"success": True, "attendance": row}
+
+
 # --------------------------------------------------------------- screenshots
 
 
@@ -369,14 +470,7 @@ async def ingest_screenshot(
     import time as _time
 
     store = get_tutor_store()
-    session = None
-    if body.session_ref:
-        try:
-            session = store.get_session(int(body.session_ref))
-        except (TypeError, ValueError):
-            session = None
-    if session is None and body.runtime_id:
-        session = store.get_session_by_runtime(body.runtime_id)
+    session = _resolve_session(store, body.session_ref, body.runtime_id)
 
     shot = store.add_screenshot(
         captured_at=body.captured_at or _time.time(),

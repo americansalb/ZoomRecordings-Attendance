@@ -96,6 +96,9 @@ class LiveTutorService:
         topic: Optional[str] = None,
         session_code: Optional[str] = None,
         join_url: Optional[str] = None,
+        passcode: Optional[str] = None,
+        zak: Optional[str] = None,
+        role: Optional[int] = None,
         summoned_by: Optional[str] = None,
         overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -124,6 +127,9 @@ class LiveTutorService:
                 announce=bool(bot_cfg.get("announce_on_join", True)),
                 announcement=bot_cfg.get("announcement"),
                 capture=settings.get("capture"),
+                passcode=passcode,
+                zak=zak,
+                role=role,
             ))
         except BotRuntimeError as e:
             self.store.update_session(session["id"], status=store_mod.SESSION_ERROR, error=str(e))

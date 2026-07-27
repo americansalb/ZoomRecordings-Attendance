@@ -1,9 +1,10 @@
 """
 BotManager: the orchestration layer behind the TUTOR_BOT.md HTTP contract.
 
-Tracks one meeting client per runtime_id, wires inbound chat to the backend
-webhook, and (when capture is enabled) runs a per-student capture loop. Meeting
-client + storage are injected via factories so this is testable with fakes.
+Tracks one meeting client per runtime_id, wires inbound chat and meeting
+lifecycle to the backend webhook, and runs a per-student attendance loop.
+Meeting client + storage are injected via factories so this is testable with
+fakes.
 """
 
 from __future__ import annotations
@@ -83,34 +84,77 @@ class BotManager:
                 "text": raw.get("message") or raw.get("text") or "",
             })
 
+        async def _on_lifecycle(event_type: str, detail: Optional[str]) -> None:
+            # The meeting ending is the important one: without it the headless
+            # browser sits in a dead meeting until the process is restarted,
+            # and the backend keeps the session marked active forever.
+            if event_type in ("ended", "left"):
+                await self.backend.post_event({
+                    "type": "left",
+                    "session_ref": session_ref,
+                    "runtime_id": runtime_id,
+                    "detail": detail,
+                })
+                asyncio.create_task(self._reap(runtime_id))
+
         client.on_chat = _on_chat
+        client.on_lifecycle = _on_lifecycle
 
         # Role must agree with how we are authenticating. A ZAK joins as
         # a specific, authenticated Zoom user (ours, set as alternative
         # host on the meeting), which is a role-1 join. Signing role 0
         # while presenting a ZAK is a contradiction and Zoom rejects it.
         # Without a ZAK we are an anonymous participant, which is role 0.
+        #
+        # `role` is overridable because the pairing is not absolute: a ZAK for
+        # a user who is neither host nor alternative host must still sign
+        # role 0, and signing role 1 there is rejected.
         zak = payload.get("zak") or None
+        role = payload.get("role")
+        role = int(role) if role is not None else (1 if zak else 0)
         signature = meeting_sdk_signature(
             self.config.sdk_key,
             self.config.sdk_secret,
             meeting_id,
-            role=1 if zak else 0,
+            role=role,
         )
-        await client.join(
-            meeting_number=meeting_id,
-            passcode=(
-                payload.get("passcode")
-                or _passcode_from_join_url(payload.get("join_url"))
-            ),
-            display_name=display_name,
-            signature=signature,
-            sdk_key=self.config.sdk_key,
-            zak=zak,
-        )
+
+        try:
+            await client.join(
+                meeting_number=meeting_id,
+                passcode=(
+                    payload.get("passcode")
+                    or _passcode_from_join_url(payload.get("join_url"))
+                ),
+                display_name=display_name,
+                signature=signature,
+                sdk_key=self.config.sdk_key,
+                zak=zak,
+            )
+        except Exception as e:
+            # A join that raises partway can still have left a browser in the
+            # meeting -- the SDK connects before the bookkeeping that follows.
+            # Without this the failure leaks a Chromium AND parks a silent,
+            # undismissable participant in the class, because nothing upstream
+            # ever learns a runtime_id to send a leave to.
+            logger.warning("[BOT] join failed for meeting %s, tearing down: %s", meeting_id, e)
+            await self._force_close(client)
+            await self.backend.post_event({
+                "type": "error",
+                "session_ref": session_ref,
+                "runtime_id": runtime_id,
+                "error": str(e)[:500],
+            })
+            raise
 
         session = BotSession(runtime_id, meeting_id, session_ref, display_name, client)
         self._sessions[runtime_id] = session
+
+        await self.backend.post_event({
+            "type": "joined",
+            "session_ref": session_ref,
+            "runtime_id": runtime_id,
+        })
 
         if payload.get("announce") and payload.get("announcement"):
             try:
@@ -118,45 +162,83 @@ class BotManager:
             except Exception as e:
                 logger.warning("announcement failed: %s", e)
 
+        # The attendance loop always runs. `capture.enabled` decides whether
+        # frames are grabbed and kept, not whether attendance is taken -- the
+        # two were previously the same switch, so a privacy-conscious operator
+        # who left screenshots off got no attendance record at all.
         capture = payload.get("capture") or {}
-        if capture.get("enabled"):
-            storage = self.storage_factory(
-                bool(capture.get("store_images", True)), self.config.drive_folder_id
-            )
-            loop = CaptureLoop(
-                client, self.backend, storage,
-                interval_seconds=int(capture.get("interval_seconds", 300)),
-                store_images=bool(capture.get("store_images", True)),
-            )
-            ctx = CaptureContext(
-                runtime_id=runtime_id,
-                session_ref=session_ref,
-                meeting_id=meeting_id,
-                session_label=session_ref or meeting_id,
-                bot_name=display_name,
-            )
-            session.loop = loop
-            session.task = asyncio.create_task(loop.run(ctx))
+        store_images = bool(capture.get("enabled")) and bool(capture.get("store_images", True))
+        storage = self.storage_factory(store_images, self.config.drive_folder_id)
+        loop = CaptureLoop(
+            client, self.backend, storage,
+            interval_seconds=int(capture.get("interval_seconds", 300)),
+            store_images=store_images,
+        )
+        ctx = CaptureContext(
+            runtime_id=runtime_id,
+            session_ref=session_ref,
+            meeting_id=meeting_id,
+            session_label=session_ref or meeting_id,
+            bot_name=display_name,
+        )
+        session.loop = loop
+        session.task = asyncio.create_task(loop.run(ctx))
 
-        logger.info("[BOT] joined meeting %s as %s (capture=%s)",
-                    meeting_id, runtime_id, bool(capture.get("enabled")))
+        logger.info("[BOT] joined meeting %s as %s (store_images=%s)",
+                    meeting_id, runtime_id, store_images)
         return runtime_id
 
     async def leave(self, runtime_id: str) -> None:
         session = self._sessions.pop(runtime_id, None)
         if not session:
             return
+        await self._shutdown_session(session)
+
+    async def _reap(self, runtime_id: str) -> None:
+        """Tear down after the meeting ended on Zoom's side."""
+        session = self._sessions.pop(runtime_id, None)
+        if not session:
+            return
+        logger.info("[BOT] meeting ended, reaping %s", runtime_id)
+        try:
+            await self._shutdown_session(session)
+        except Exception as e:
+            # This runs as a detached task, so an exception here would surface
+            # only as "Task exception was never retrieved" and the browser
+            # would stay up.
+            logger.warning("[BOT] reap of %s failed: %s", runtime_id, e)
+
+    async def _shutdown_session(self, session: BotSession) -> None:
         if session.loop:
             session.loop.stop()
         if session.task:
+            # Stopping the capture loop is best-effort. Whatever happens to the
+            # task -- it times out, it was already cancelled, it belongs to a
+            # loop that is going away -- must not stop us from closing the
+            # browser below, which is the part that actually removes the bot
+            # from the meeting.
             try:
                 await asyncio.wait_for(session.task, timeout=5)
             except (asyncio.TimeoutError, asyncio.CancelledError):
+                session.task.cancel()
+            except Exception as e:
+                logger.warning("capture task shutdown error: %s", e)
                 session.task.cancel()
         try:
             await session.client.leave()
         except Exception as e:
             logger.warning("leave error: %s", e)
+            await self._force_close(session.client)
+
+    @staticmethod
+    async def _force_close(client: MeetingClient) -> None:
+        closer = getattr(client, "close", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception as e:
+            logger.warning("browser teardown failed: %s", e)
 
     async def send(self, runtime_id: str, channel: str, text: str,
                    to_participant_id: Optional[str] = None) -> None:

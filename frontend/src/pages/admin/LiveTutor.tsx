@@ -11,7 +11,7 @@ import {
   type TutorScreenshot,
 } from '../../services/api'
 
-type Tab = 'approvals' | 'sessions' | 'reminders' | 'policies' | 'messages' | 'screenshots' | 'settings'
+type Tab = 'approvals' | 'sessions' | 'attendance' | 'reminders' | 'policies' | 'messages' | 'screenshots' | 'settings'
 
 function timeAgo(ts: number): string {
   const secs = Math.floor(Date.now() / 1000 - ts)
@@ -19,6 +19,15 @@ function timeAgo(ts: number): string {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
   return `${Math.floor(secs / 86400)}d ago`
+}
+
+function duration(secs: number): string {
+  const s = Math.max(0, Math.floor(secs || 0))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h) return `${h}h ${m}m`
+  if (m) return `${m}m ${s % 60}s`
+  return `${s}s`
 }
 
 export default function LiveTutorPage() {
@@ -34,6 +43,7 @@ export default function LiveTutorPage() {
   const tabs: { id: Tab; label: string; badge?: number }[] = [
     { id: 'approvals', label: 'Approvals', badge: pending || undefined },
     { id: 'sessions', label: 'Sessions', badge: status?.active_sessions || undefined },
+    { id: 'attendance', label: 'Attendance' },
     { id: 'reminders', label: 'Reminders' },
     { id: 'policies', label: 'Policies' },
     { id: 'messages', label: 'Message Log' },
@@ -89,6 +99,7 @@ export default function LiveTutorPage() {
 
       {tab === 'approvals' && <ApprovalsTab />}
       {tab === 'sessions' && <SessionsTab />}
+      {tab === 'attendance' && <AttendanceTab />}
       {tab === 'reminders' && <RemindersTab />}
       {tab === 'policies' && <PoliciesTab />}
       {tab === 'messages' && <MessagesTab />}
@@ -261,16 +272,23 @@ function ApprovalCard({
 
 // ----------------------------------------------------------------- Sessions
 
+const ACTIVE_STATUSES = ['requested', 'joining', 'in_meeting', 'leaving']
+
 function SessionsTab() {
   const qc = useQueryClient()
+  // Ask for finished sessions too. A join that fails leaves the active states
+  // immediately, so a list filtered to those makes a failed summon look
+  // identical to a normal dismissal: the row just disappears and the error it
+  // carries is never read by anyone.
   const { data: sessions = [], isLoading } = useQuery({
     queryKey: ['tutor-sessions'],
-    queryFn: tutorApi.listSessions,
+    queryFn: () => tutorApi.listSessions({ include_finished: true, limit: 25 }),
     refetchInterval: 10000,
   })
   const { data: reminders = [] } = useQuery({ queryKey: ['tutor-reminders'], queryFn: tutorApi.listReminders })
 
-  const [form, setForm] = useState({ meeting_id: '', topic: '', session_code: '' })
+  const blank = { meeting_id: '', topic: '', session_code: '', passcode: '' }
+  const [form, setForm] = useState(blank)
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['tutor-sessions'] })
     qc.invalidateQueries({ queryKey: ['tutor-status'] })
@@ -280,18 +298,24 @@ function SessionsTab() {
       meeting_id: form.meeting_id.trim(),
       topic: form.topic.trim() || undefined,
       session_code: form.session_code.trim() || undefined,
+      passcode: form.passcode.trim() || undefined,
     }),
-    onSuccess: () => { setForm({ meeting_id: '', topic: '', session_code: '' }); invalidate() },
+    onSuccess: () => { setForm(blank); invalidate() },
     onError: (e: any) => alert(e?.response?.data?.detail || 'Summon failed'),
   })
+
+  const active = sessions.filter((s) => ACTIVE_STATUSES.includes(s.status))
+  const finished = sessions.filter((s) => !ACTIVE_STATUSES.includes(s.status))
 
   return (
     <div className="space-y-6">
       <div className="card">
         <h3 className="font-semibold text-gray-900 mb-3">Summon the bot into a meeting</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
           <input className="border border-gray-300 rounded p-2 text-sm" placeholder="Zoom meeting ID *"
             value={form.meeting_id} onChange={(e) => setForm({ ...form, meeting_id: e.target.value })} />
+          <input className="border border-gray-300 rounded p-2 text-sm" placeholder="Passcode (if any)"
+            value={form.passcode} onChange={(e) => setForm({ ...form, passcode: e.target.value })} />
           <input className="border border-gray-300 rounded p-2 text-sm" placeholder="Topic (optional)"
             value={form.topic} onChange={(e) => setForm({ ...form, topic: e.target.value })} />
           <input className="border border-gray-300 rounded p-2 text-sm" placeholder="Session code (optional)"
@@ -302,16 +326,148 @@ function SessionsTab() {
             {summon.isPending ? 'Summoning…' : 'Summon'}
           </button>
         </div>
+        <p className="text-xs text-gray-500 mt-2">
+          A meeting with a passcode needs it here, otherwise Zoom rejects the join.
+        </p>
       </div>
 
       {isLoading ? (
         <div className="text-gray-500">Loading…</div>
-      ) : sessions.length === 0 ? (
+      ) : active.length === 0 ? (
         <div className="card text-center text-gray-500 py-10">The bot isn’t in any meetings right now.</div>
       ) : (
-        sessions.map((s) => (
+        active.map((s) => (
           <SessionCard key={s.id} session={s} reminders={reminders} onChanged={invalidate} />
         ))
+      )}
+
+      {finished.length > 0 && (
+        <div className="card">
+          <h3 className="font-semibold text-gray-900 mb-3">Recently finished</h3>
+          <div className="space-y-2">
+            {finished.map((s) => (
+              <div key={s.id} className="border border-gray-200 rounded p-3">
+                <div className="text-sm text-gray-900">
+                  {s.topic || `Meeting ${s.meeting_id}`}
+                  <span className="text-gray-500"> · ID {s.meeting_id} · </span>
+                  {statusBadge(s.status)}
+                  <span className="text-gray-400 text-xs"> · {timeAgo(s.updated_at)}</span>
+                </div>
+                {s.error && (
+                  <div className="mt-2 text-sm text-red-800 bg-red-50 border border-red-200 rounded p-2 font-mono break-words">
+                    {s.error}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// -------------------------------------------------------------- Attendance
+
+function AttendanceTab() {
+  const { data: sessions = [] } = useQuery({
+    queryKey: ['tutor-sessions'],
+    queryFn: () => tutorApi.listSessions({ include_finished: true, limit: 25 }),
+    refetchInterval: 10000,
+  })
+  const [sessionId, setSessionId] = useState<number | ''>('')
+  const effective = sessionId === '' ? sessions[0]?.id : sessionId
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['tutor-attendance', effective],
+    queryFn: () => tutorApi.listAttendance({ session_id: effective as number }),
+    enabled: !!effective,
+    refetchInterval: 15000,
+  })
+  const rows = data?.attendance ?? []
+  const summary = data?.summary
+
+  return (
+    <div className="space-y-4">
+      <div className="card">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-sm font-medium text-gray-700">Session</label>
+          <select className="border border-gray-300 rounded p-2 text-sm"
+            value={effective ?? ''} onChange={(e) => setSessionId(e.target.value ? Number(e.target.value) : '')}>
+            {sessions.length === 0 && <option value="">No sessions yet</option>}
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.topic || `Meeting ${s.meeting_id}`} ({s.status})
+              </option>
+            ))}
+          </select>
+          {summary && (
+            <div className="text-sm text-gray-600">
+              {summary.participants} tracked · {summary.present_now} present now ·{' '}
+              {summary.camera_on_now} on camera
+            </div>
+          )}
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          Attendance comes from Zoom's own participant events, so it is recorded whether or not
+          screenshots are enabled. Camera time is measured across the whole session, not sampled.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div className="text-gray-500">Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="card text-center text-gray-500 py-10">
+          No attendance recorded for this session yet.
+        </div>
+      ) : (
+        <div className="card overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-2 pr-4">Student</th>
+                <th className="py-2 pr-4">Status</th>
+                <th className="py-2 pr-4">Joined</th>
+                <th className="py-2 pr-4">In meeting</th>
+                <th className="py-2 pr-4">Camera on</th>
+                <th className="py-2 pr-4">Face seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const pct = r.observed_seconds
+                  ? Math.round((r.video_on_seconds / r.observed_seconds) * 100)
+                  : 0
+                return (
+                  <tr key={r.id} className="border-b border-gray-100">
+                    <td className="py-2 pr-4">
+                      <div className="text-gray-900">{r.participant_name || '(no name)'}</div>
+                      <div className="text-xs text-gray-400 font-mono">{r.participant_id}</div>
+                    </td>
+                    <td className="py-2 pr-4">
+                      {r.present
+                        ? <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">Present</span>
+                        : <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">Left</span>}
+                    </td>
+                    <td className="py-2 pr-4 text-gray-600">
+                      {r.joined_at ? timeAgo(r.joined_at) : '—'}
+                    </td>
+                    <td className="py-2 pr-4 text-gray-600">{duration(r.observed_seconds)}</td>
+                    <td className="py-2 pr-4 text-gray-600">
+                      {duration(r.video_on_seconds)}
+                      <span className="text-xs text-gray-400"> ({pct}%)</span>
+                    </td>
+                    <td className="py-2 pr-4 text-gray-600">
+                      {r.face_checks
+                        ? `${r.face_present_checks}/${r.face_checks}`
+                        : <span className="text-gray-400">not sampled</span>}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )

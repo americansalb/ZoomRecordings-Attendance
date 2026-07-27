@@ -1,9 +1,10 @@
 """
 Client for talking back to the Phase 1 backend.
 
-Posts inbound chat + lifecycle events to /api/tutor/bot/events and screenshot
-manifest rows to /api/tutor/bot/screenshots, authenticated with the shared
-secret when configured.
+Posts inbound chat + lifecycle events to /api/tutor/bot/events, attendance rows
+to /api/tutor/bot/attendance, and screenshot manifest rows to
+/api/tutor/bot/screenshots, authenticated with the shared secret when
+configured.
 """
 
 from __future__ import annotations
@@ -40,6 +41,9 @@ class BackendClient:
 
     async def post_event(self, event: Dict[str, Any]) -> None:
         await self._post("/api/tutor/bot/events", event)
+
+    async def post_attendance(self, row: Dict[str, Any]) -> None:
+        await self._post("/api/tutor/bot/attendance", row)
 
     async def post_screenshot(self, row: Dict[str, Any]) -> None:
         await self._post("/api/tutor/bot/screenshots", row)

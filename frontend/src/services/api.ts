@@ -691,6 +691,33 @@ export interface TutorScreenshot {
   created_at: number
 }
 
+/** One participant's attendance for one live session, as a running ledger. */
+export interface TutorAttendance {
+  id: number
+  session_id: number | null
+  meeting_id: string | null
+  participant_id: string
+  participant_name: string | null
+  registrant_id: string | null
+  joined_at: number | null
+  left_at: number | null
+  present: number
+  video_on: number
+  video_on_seconds: number
+  observed_seconds: number
+  face_checks: number
+  face_present_checks: number
+  first_seen_at: number
+  last_seen_at: number
+}
+
+export interface TutorAttendanceSummary {
+  participants: number
+  present_now: number
+  camera_on_now: number
+  total_video_on_seconds: number
+}
+
 export const tutorApi = {
   getStatus: async () => {
     const { data } = await api.get('/tutor/status')
@@ -737,9 +764,18 @@ export const tutorApi = {
     await api.delete(`/tutor/policies/${id}`)
   },
 
-  listSessions: async () => {
-    const { data } = await api.get('/tutor/sessions')
+  listSessions: async (params?: { include_finished?: boolean; limit?: number }) => {
+    const { data } = await api.get('/tutor/sessions', { params })
     return data.sessions as TutorSession[]
+  },
+  listAttendance: async (params?: {
+    session_id?: number
+    meeting_id?: string
+    participant_id?: string
+    limit?: number
+  }) => {
+    const { data } = await api.get('/tutor/attendance', { params })
+    return data as { attendance: TutorAttendance[]; summary: TutorAttendanceSummary }
   },
   summon: async (body: {
     meeting_id: string
@@ -747,6 +783,9 @@ export const tutorApi = {
     session_code?: string
     meeting_uuid?: string
     join_url?: string
+    passcode?: string
+    zak?: string
+    role?: number
   }) => {
     const { data } = await api.post('/tutor/sessions/summon', body)
     return data.session as TutorSession

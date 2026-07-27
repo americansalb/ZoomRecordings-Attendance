@@ -38,6 +38,9 @@ All requests carry `Content-Type: application/json` and (if configured)
   "announce": true,
   "announcement": "Hi everyone — I'm the AALB assistant…",  // post on join if announce
   "session_ref": "42",               // OPAQUE: echo this back on every event
+  "passcode": null,                  // meeting passcode, if the meeting has one
+  "zak": null,                       // host ZAK, to join as an authenticated user
+  "role": null,                      // override the signed role (0 attendee, 1 host)
   "capture": {                        // per-student screenshot config (may be null)
     "enabled": false,
     "interval_seconds": 300,
@@ -45,6 +48,22 @@ All requests carry `Content-Type: application/json` and (if configured)
   }
 }
 ```
+
+`passcode` is required for any meeting that has one; without it Zoom rejects the
+join. If it is absent the bot falls back to the `pwd` parameter in `join_url`.
+
+`capture` controls **screenshots only**. Attendance is reported on every tick
+regardless of it, because attendance that switches itself off when a privacy
+setting is enabled is not attendance.
+
+`role` defaults to 1 when a ZAK is present and 0 otherwise. Override it when the
+ZAK belongs to a user who is neither host nor alternative host, since signing
+role 1 for such a user is rejected.
+
+A join can take well over a minute: the bot launches a browser, loads the Zoom
+SDK and then completes the Zoom join. Allow at least 150 seconds before treating
+it as failed, or you will record a successful join as an error and be left
+unable to message or dismiss a bot that is really in the meeting.
 
 Respond `200` with the bot's own handle:
 
@@ -121,28 +140,77 @@ approves them.
 
 ```json
 { "type": "joined",  "session_ref": "42", "runtime_id": "bot_01HXYZ…" }
-{ "type": "left",    "session_ref": "42" }
+{ "type": "left",    "session_ref": "42", "runtime_id": "bot_01HXYZ…" }
 { "type": "error",   "session_ref": "42", "error": "failed to join: waiting room" }
 ```
 
-- `joined` / `ready` → session marked `in_meeting`.
-- `left` / `ended` → session marked `left`.
-- `error` → session marked `error` with the message.
+- `joined` / `ready` → session marked `in_meeting`. Sent once the bot is in.
+- `left` / `ended` → session marked `left`. Sent when the meeting ends on Zoom's
+  side, at which point the bot also tears its own browser down.
+- `error` → session marked `error` with the message. Sent when a join fails,
+  **after** the bot has closed the browser, so a failed join never leaves a
+  silent participant behind.
 - Anything else (e.g. `participant_joined`) is accepted and ignored for now.
+
+An errored session leaves the active states immediately, so it disappears from
+`GET /api/tutor/sessions`. Pass `include_finished=true` to see it and read the
+error text.
 
 Respond `200` to acknowledge; the backend returns `{ "success": true }`.
 
 ---
 
+## Attendance
+
+The bot runs an attendance loop every `capture.interval_seconds` (default 300,
+floor 30) for as long as it is in the meeting. The browser page maintains a
+presence ledger keyed by Zoom user id, fed by Zoom's own `user-added`,
+`user-removed` and `user-updated` events, so a participant who joins and leaves
+between two ticks is still recorded.
+
+Each tick reports one cumulative row per participant:
+
+```
+POST {BACKEND}/api/tutor/bot/attendance
+Header: X-Tutor-Bot-Secret: <secret>   (if configured)
+```
+
+```json
+{
+  "session_ref": "42",
+  "runtime_id": "bot_01HXYZ…",
+  "participant_id": "16778240",
+  "participant_name": "Maria Gomez",
+  "registrant_id": null,
+  "observed_at": 1749500000.0,
+  "joined_at": 1749496400.0,
+  "left_at": null,
+  "present": true,
+  "video_on": true,
+  "video_on_seconds": 3300,
+  "observed_seconds": 3550,
+  "face_present": true,
+  "face_checked": true
+}
+```
+
+These are **cumulative totals, not deltas**. The backend upserts on
+`(session_id, participant_id)`, so the latest report replaces the durations for
+that student. `face_checked` distinguishes "we looked and saw no face" from "we
+never had a frame to look at", which matters because per-user frames are
+unavailable on the Component View SDK (see `bot/README.md`).
+
+Read it back with `GET /api/tutor/attendance?session_id=…`, which also returns a
+summary of participants tracked, present now, on camera now, and total camera
+seconds.
+
 ## Screenshots / per-student capture
 
-If `capture.enabled` is true, the bot runs a capture loop every
-`capture.interval_seconds`. For **each participant** it renders *that user's own
-video stream* to an off-screen canvas (keyed by Zoom user id, so tile position
-is irrelevant), grabs a frame, and:
+If `capture.enabled` is true **and** a frame is actually obtainable, the bot
+also files a screenshot manifest row:
 
 1. Determines `video_on` (is the user's camera sending video?) and `face_present`
-   (OpenCV face check on the frame). These cross-check each other — camera off ⇒
+   (OpenCV face check on the frame). These cross-check each other: camera off ⇒
    `video_on:false`; camera on but no face ⇒ `face_present:false`.
 2. If `capture.store_images` is true, uploads the frame to Google Drive
    (per-session folder) and keeps the link. If false, it discards the pixels and

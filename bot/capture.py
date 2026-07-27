@@ -1,16 +1,29 @@
 """
-Per-student capture loop.
+Per-student attendance loop.
 
 Every `interval_seconds`, for each participant:
-  1. Read video_on from Zoom's per-user state (the SDK tells us, authoritatively).
-  2. If on, render *that user's* video to a canvas and grab a PNG.
-  3. face_present? (OpenCV) -- the cross-check signal.
+  1. Read the presence ledger the browser page maintains from Zoom's own
+     user-added/user-removed/user-updated events: who is here, since when, and
+     how long their camera has been on.
+  2. Read video_on from Zoom's per-user state (authoritative).
+  3. If a frame is available, run the face check (OpenCV) as a cross-check.
   4. If storing images, upload to Drive (per-session folder).
-  5. Report one manifest row to the backend, attributed by Zoom user id + name.
+  5. Report one attendance row and one manifest row per student to the backend,
+     attributed by Zoom user id + name.
 
-Attribution never depends on tile position; identity is the Zoom user id, and the
-name is recorded alongside as a failsafe. The face/video flags cross-check each
-other so a camera-off or no-face state is visible without losing who it was.
+Attribution never depends on tile position; identity is the Zoom user id, and
+the name is recorded alongside as a failsafe.
+
+Two things this loop deliberately does NOT do:
+
+  - It does not require frame capture. Per-user frames are unavailable on the
+    Component View SDK (see meeting_client.py), so `video_on` and presence
+    duration carry attendance on their own and `face_present` is recorded as a
+    cross-check only when a frame actually exists.
+  - It does not depend on the screenshot toggle. Attendance is reported on
+    every tick regardless; `store_images` only decides whether pixels are kept.
+    Attendance that switches itself off when a privacy setting is enabled is
+    not attendance.
 """
 
 from __future__ import annotations
@@ -34,7 +47,7 @@ class CaptureContext:
     session_ref: str
     meeting_id: str
     session_label: str   # used for the Drive folder name
-    bot_name: str        # so we never screenshot the bot itself
+    bot_name: str        # fallback identity for skipping ourselves
 
 
 def _safe(name: str) -> str:
@@ -59,59 +72,122 @@ class CaptureLoop:
         self.store_images = store_images
         self.face_detector = face_detector
         self._stop = asyncio.Event()
+        self._self_id: Optional[str] = None
+
+    def _is_self(self, user_id: str, name: str, ctx: CaptureContext) -> bool:
+        """Never record the bot as a student.
+
+        Prefer the Zoom user id: it is exact. The display-name comparison is
+        only a fallback for when the id is unavailable, and it is a poor one --
+        a student who happens to share the bot's display name would silently
+        vanish from the register.
+        """
+        if self._self_id and str(user_id) == str(self._self_id):
+            return True
+        if self._self_id:
+            return False
+        return bool(name) and name == ctx.bot_name
 
     async def run_once(self, ctx: CaptureContext) -> List[dict]:
         rows: List[dict] = []
-        participants = await self.client.list_participants()
+
+        if self._self_id is None:
+            try:
+                self._self_id = await self.client.self_user_id()
+            except Exception:
+                self._self_id = None
+
+        snapshot = await self.client.presence()
+        if snapshot.self_user_id:
+            self._self_id = snapshot.self_user_id
+
+        # video_on comes from the live roster; the ledger carries the durations.
+        participants = {p.user_id: p for p in await self.client.list_participants()}
         folder = f"LiveTutor {ctx.session_label}".strip()
+        captured_at = snapshot.at or time.time()
 
-        for p in participants:
-            if p.name and p.name == ctx.bot_name:
-                continue  # don't snapshot ourselves
+        for row in snapshot.rows:
+            if self._is_self(row.user_id, row.name, ctx):
+                continue
 
-            video_on = bool(p.video_on)
+            p = participants.get(row.user_id)
+            video_on = bool(p.video_on) if p else bool(row.video_on)
+
             data: Optional[bytes] = None
             if video_on:
                 try:
-                    data = await self.client.capture_user(p.user_id)
+                    data = await self.client.capture_user(row.user_id)
                 except Exception as e:
-                    logger.warning("capture_user(%s) failed: %s", p.user_id, e)
+                    logger.warning("capture_user(%s) failed: %s", row.user_id, e)
                     data = None
 
-            face = bool(self.face_detector(data)) if data else False
+            # OpenCV decode + Haar cascade is CPU-bound and was running inline
+            # on the event loop, stalling chat and the other participants'
+            # captures for the length of every detection.
+            face = False
+            if data:
+                try:
+                    face = bool(await asyncio.to_thread(self.face_detector, data))
+                except Exception as e:
+                    logger.warning("face check failed for %s: %s", row.user_id, e)
 
             stored = False
             image_url = None
             drive_file_id = None
             if self.store_images and data:
                 ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                filename = f"{_safe(ctx.session_label)}_{_safe(p.name)}_{ts}.png"
+                filename = f"{_safe(ctx.session_label)}_{_safe(row.name)}_{ts}.png"
                 drive_file_id, image_url = await self.storage.upload(
                     data=data, filename=filename, session_folder=folder
                 )
                 stored = bool(drive_file_id or image_url)
 
-            row = {
+            attendance = {
                 "session_ref": ctx.session_ref,
                 "runtime_id": ctx.runtime_id,
-                "participant_id": p.user_id,
-                "participant_name": p.name,
+                "participant_id": row.user_id,
+                "participant_name": row.name,
                 "registrant_id": None,
-                "captured_at": time.time(),
+                "observed_at": captured_at,
+                "joined_at": row.joined_at,
+                "left_at": row.left_at,
+                "present": row.present,
+                "video_on": video_on,
+                "video_on_seconds": row.video_on_seconds,
+                "observed_seconds": row.observed_seconds,
+                "face_present": face,
+                "face_checked": data is not None,
+            }
+            await self.backend.post_attendance(attendance)
+
+            manifest = {
+                "session_ref": ctx.session_ref,
+                "runtime_id": ctx.runtime_id,
+                "participant_id": row.user_id,
+                "participant_name": row.name,
+                "registrant_id": None,
+                "captured_at": captured_at,
                 "video_on": video_on,
                 "face_present": face,
                 "stored": stored,
                 "image_url": image_url,
                 "drive_file_id": drive_file_id,
             }
-            await self.backend.post_screenshot(row)
-            rows.append(row)
+            await self.backend.post_screenshot(manifest)
+            rows.append(attendance)
 
         return rows
 
     async def run(self, ctx: CaptureContext) -> None:
-        logger.info("[CAPTURE] loop started for session %s every %ss",
+        logger.info("[CAPTURE] attendance loop started for session %s every %ss",
                     ctx.session_ref, self.interval_seconds)
+        try:
+            if not await self.client.capture_supported():
+                logger.info(
+                    "[CAPTURE] per-user frame capture unavailable on this SDK; "
+                    "recording presence and camera state only")
+        except Exception:
+            pass
         while not self._stop.is_set():
             try:
                 await self.run_once(ctx)
@@ -121,7 +197,7 @@ class CaptureLoop:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
             except asyncio.TimeoutError:
                 pass
-        logger.info("[CAPTURE] loop stopped for session %s", ctx.session_ref)
+        logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
 
     def stop(self) -> None:
         self._stop.set()

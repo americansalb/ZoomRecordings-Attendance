@@ -192,6 +192,31 @@ class TutorStore:
     );
     CREATE INDEX IF NOT EXISTS idx_tutor_shots_session ON tutor_screenshots(session_id);
     CREATE INDEX IF NOT EXISTS idx_tutor_shots_captured ON tutor_screenshots(captured_at);
+
+    CREATE TABLE IF NOT EXISTS tutor_attendance (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id          INTEGER,
+        meeting_id          TEXT,
+        participant_id      TEXT NOT NULL,
+        participant_name    TEXT,
+        registrant_id       TEXT,
+        joined_at           REAL,
+        left_at             REAL,
+        present             INTEGER NOT NULL DEFAULT 0,
+        video_on            INTEGER NOT NULL DEFAULT 0,
+        video_on_seconds    INTEGER NOT NULL DEFAULT 0,
+        observed_seconds    INTEGER NOT NULL DEFAULT 0,
+        face_checks         INTEGER NOT NULL DEFAULT 0,
+        face_present_checks INTEGER NOT NULL DEFAULT 0,
+        first_seen_at       REAL NOT NULL,
+        last_seen_at        REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tutor_att_session ON tutor_attendance(session_id);
+    CREATE INDEX IF NOT EXISTS idx_tutor_att_meeting ON tutor_attendance(meeting_id);
+    -- One row per participant per session: the bot reports a cumulative ledger
+    -- every tick, so these are upserts, not an append-only sample stream.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tutor_att_unique
+        ON tutor_attendance(session_id, participant_id);
     """
 
     # Columns that hold JSON and should be (de)serialized transparently.
@@ -425,6 +450,20 @@ class TutorStore:
             ).fetchall()
         return [_row(r, self._JSON_COLS["tutor_sessions"]) for r in rows]
 
+    def list_recent_sessions(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Active sessions plus recently finished or failed ones.
+
+        A session that fails to join drops straight out of the active states,
+        so a list filtered to those makes a failed summon indistinguishable
+        from a normal dismissal: the row simply disappears on the next poll and
+        the error text it carries is never seen by anyone.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tutor_sessions ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_row(r, self._JSON_COLS["tutor_sessions"]) for r in rows]
+
     # ---------------------------------------------------------- approval queue
 
     def create_approval(
@@ -616,6 +655,120 @@ class TutorStore:
         with self._connect() as conn:
             r = conn.execute("SELECT * FROM tutor_screenshots WHERE id = ?", (shot_id,)).fetchone()
         return _row(r)
+
+    # ---------------------------------------------------------------- attendance
+
+    def record_attendance(
+        self,
+        *,
+        participant_id: str,
+        observed_at: float,
+        session_id: Optional[int] = None,
+        meeting_id: Optional[str] = None,
+        participant_name: Optional[str] = None,
+        registrant_id: Optional[str] = None,
+        joined_at: Optional[float] = None,
+        left_at: Optional[float] = None,
+        present: bool = False,
+        video_on: bool = False,
+        video_on_seconds: int = 0,
+        observed_seconds: int = 0,
+        face_checked: bool = False,
+        face_present: bool = False,
+    ) -> Dict[str, Any]:
+        """Upsert one participant's attendance for one session.
+
+        The bot reports a cumulative ledger (total camera seconds so far, not a
+        delta), so durations are replaced rather than added. The face counters
+        are the exception: each report carries a single point-in-time check, so
+        those accumulate into a ratio the reviewer can read as "a face was
+        visible in N of M sampled frames".
+        """
+        now = _now()
+        with self._lock, self._connect() as conn:
+            existing = conn.execute(
+                """SELECT id, face_checks, face_present_checks FROM tutor_attendance
+                   WHERE participant_id = ?
+                     AND (session_id IS ? OR session_id = ?)""",
+                (participant_id, session_id, session_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE tutor_attendance SET
+                         meeting_id = COALESCE(?, meeting_id),
+                         participant_name = COALESCE(?, participant_name),
+                         registrant_id = COALESCE(?, registrant_id),
+                         joined_at = COALESCE(?, joined_at),
+                         left_at = ?,
+                         present = ?, video_on = ?,
+                         video_on_seconds = ?, observed_seconds = ?,
+                         face_checks = ?, face_present_checks = ?,
+                         last_seen_at = ?
+                       WHERE id = ?""",
+                    (
+                        meeting_id, participant_name, registrant_id, joined_at, left_at,
+                        1 if present else 0, 1 if video_on else 0,
+                        int(video_on_seconds), int(observed_seconds),
+                        int(existing["face_checks"]) + (1 if face_checked else 0),
+                        int(existing["face_present_checks"]) + (1 if face_present else 0),
+                        now, existing["id"],
+                    ),
+                )
+                row_id = existing["id"]
+            else:
+                cur = conn.execute(
+                    """INSERT INTO tutor_attendance
+                       (session_id, meeting_id, participant_id, participant_name,
+                        registrant_id, joined_at, left_at, present, video_on,
+                        video_on_seconds, observed_seconds, face_checks,
+                        face_present_checks, first_seen_at, last_seen_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id, meeting_id, participant_id, participant_name,
+                        registrant_id, joined_at, left_at,
+                        1 if present else 0, 1 if video_on else 0,
+                        int(video_on_seconds), int(observed_seconds),
+                        1 if face_checked else 0, 1 if face_present else 0,
+                        observed_at, now,
+                    ),
+                )
+                row_id = cur.lastrowid
+            conn.commit()
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT * FROM tutor_attendance WHERE id = ?", (row_id,)
+            ).fetchone()
+        return _row(r)
+
+    def list_attendance(
+        self,
+        *,
+        session_id: Optional[int] = None,
+        meeting_id: Optional[str] = None,
+        participant_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if meeting_id is not None:
+            clauses.append("meeting_id = ?")
+            params.append(meeting_id)
+        if participant_id is not None:
+            clauses.append("participant_id = ?")
+            params.append(participant_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM tutor_attendance{where}
+                    ORDER BY participant_name COLLATE NOCASE, participant_id LIMIT ?""",
+                params,
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    # --------------------------------------------------------------- screenshots
 
     def list_screenshots(
         self,

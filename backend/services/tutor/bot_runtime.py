@@ -52,6 +52,9 @@ class JoinRequest:
     announce: bool = True
     announcement: Optional[str] = None
     capture: Optional[dict] = None  # screenshot capture config (enabled/interval/store)
+    passcode: Optional[str] = None  # meeting passcode, if the meeting has one
+    zak: Optional[str] = None       # host ZAK, to join as an authenticated user
+    role: Optional[int] = None      # override the signed role (0 attendee, 1 host)
 
 
 class BotRuntime(ABC):
@@ -84,6 +87,15 @@ class BotRuntime(ABC):
 class SelfHostedBotRuntime(BotRuntime):
     """Talks to a self-hosted Meeting SDK bot over HTTP."""
 
+    # A join is not a normal API call: the bot has to launch Chromium, load the
+    # Zoom Web SDK (allowed 45s on its own) and then complete the Zoom join,
+    # which routinely runs past a minute on a cold container. The old 15s
+    # timeout meant a perfectly good join was recorded as a failure -- the
+    # session got no runtime_id, so it could never be messaged or dismissed,
+    # while the bot sat in the meeting. Sends and leaves stay on the short
+    # timeout because they are genuinely quick.
+    JOIN_TIMEOUT = 150.0
+
     def __init__(self, base_url: str, shared_secret: Optional[str] = None, timeout: float = 15.0):
         self.base_url = base_url.rstrip("/")
         self.shared_secret = shared_secret
@@ -110,8 +122,11 @@ class SelfHostedBotRuntime(BotRuntime):
             "announcement": req.announcement,
             "session_ref": req.session_ref,
             "capture": req.capture,
+            "passcode": req.passcode,
+            "zak": req.zak,
+            "role": req.role,
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.JOIN_TIMEOUT) as client:
             try:
                 resp = await client.post(
                     f"{self.base_url}/bots", json=payload, headers=self._headers()
