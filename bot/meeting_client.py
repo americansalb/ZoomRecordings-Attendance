@@ -209,7 +209,15 @@ class PlaywrightZoomClient(MeetingClient):
                 "--disable-dev-shm-usage",
             ],
         )
-        self._context = await self._browser.new_context()
+        # 960x540, not the 1280x720 default. The SDK sizes its gallery to the
+        # window and Zoom's simulcast picks a stream layer per rendered tile
+        # size, so the viewport is effectively the video decode budget: half
+        # the area is half the decoded pixels Chromium must hold, which is
+        # what was killing small instances (OOM with a handful of cameras).
+        # Tiles stay comfortably large enough for the face detector's
+        # 30 pixel floor.
+        self._context = await self._browser.new_context(
+            viewport={"width": 960, "height": 540})
         self._page = await self._context.new_page()
 
         # Capture what the page says about itself. Without this a script
