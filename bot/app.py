@@ -35,7 +35,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-8"
+BUILD = "capture-9"
 
 
 class MessageIn(BaseModel):

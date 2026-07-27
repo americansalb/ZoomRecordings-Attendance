@@ -83,6 +83,7 @@ class CaptureLoop:
         # and report a half-built ledger.
         self._sweep_lock = asyncio.Lock()
         self._self_id: Optional[str] = None
+        self._rearm_only = False
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -91,11 +92,13 @@ class CaptureLoop:
     def set_interval(self, seconds: int) -> int:
         """Change the cadence of a loop that is already running.
 
-        Capture config used to reach the bot only at join time, so changing the
-        interval did nothing until the bot was dismissed and re-summoned.
+        Re-arms the sleep against the new interval WITHOUT running an extra
+        sweep: the wake used to trigger an immediate observation, which made
+        the cadence look broken right after anyone changed it.
         """
         self.interval_seconds = self._clamp(seconds)
-        self._wake.set()          # re-arm the sleep against the new interval
+        self._rearm_only = True
+        self._wake.set()
         return self.interval_seconds
 
     def trigger_now(self) -> None:
@@ -243,10 +246,14 @@ class CaptureLoop:
         except Exception:
             pass
         while not self._stop.is_set():
-            try:
-                await self.run_once(ctx)
-            except Exception as e:  # keep the loop alive across transient errors
-                logger.warning("[CAPTURE] run_once error: %s", e)
+            if self._rearm_only:
+                # The wake was an interval change, not a request to observe.
+                self._rearm_only = False
+            else:
+                try:
+                    await self.run_once(ctx)
+                except Exception as e:  # keep the loop alive across transient errors
+                    logger.warning("[CAPTURE] run_once error: %s", e)
             await self._sleep_until_next()
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
 

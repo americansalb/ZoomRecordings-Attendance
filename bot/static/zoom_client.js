@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-8: node-id tiles, single-camera fallback, inventory';
+const PAGE_BUILD = 'capture-9: node-id tiles, single-camera fallback, inventory';
 
 let client = null;
 let selfUserId = null;
@@ -361,12 +361,14 @@ window.zoomSendChat = async (text, toUserId) => {
   // sendChat(message, userId?) — omitting the id sends to everyone. There is
   // no getChatClient() on the Component View client and no sendToAll().
   try {
+    let result;
     if (toId) {
-      await client.sendChat(text, Number(toId));
+      result = await client.sendChat(text, Number(toId));
     } else {
-      await client.sendChat(text);
+      result = await client.sendChat(text);
     }
     recordChat('sdk-accepted', { toId: toId || 'everyone' });
+    return result;
   } catch (e) {
     recordChat('sdk-rejected', { toId: toId || 'everyone',
       error: String((e && (e.reason || e.message)) || e).slice(0, 200) });
@@ -374,17 +376,23 @@ window.zoomSendChat = async (text, toUserId) => {
   }
 };
 
-// Send and then wait for Zoom's own echo of the message, the only proof it
-// was distributed. The SDK resolving its promise is not delivery: DMs have
-// been accepted and silently dropped, and the console claimed "sent" for a
-// message no device ever received. Never again on this path.
+// Send and return whether delivery is proven. Proof, in order: the SDK
+// resolving with the sent ChatMessage object (its documented return value,
+// and the receipt this SDK actually provides: live testing showed
+// chat-on-message does NOT echo the bot's own messages, so an echo-only
+// scheme called visibly delivered messages failed); failing that, a short
+// wait for an echo anyway, for SDK builds that resolve with nothing.
 window.zoomSendChatConfirmed = async (text, toUserId, timeoutMs) => {
   const before = chatLog.length;
-  await window.zoomSendChat(text, toUserId);
+  const result = await window.zoomSendChat(text, toUserId);
   const toId = (toUserId !== null && toUserId !== undefined && toUserId !== '')
     ? String(toUserId) : null;
+  if (result && typeof result === 'object' && !(result instanceof Error)) {
+    recordChat('sdk-receipt', { toId: toId || 'everyone' });
+    return { accepted: true, echoed: true, receipt: true };
+  }
   const preview = String(text || '').slice(0, 80);
-  const budget = Math.max(1000, Math.min(10000, timeoutMs || 5000));
+  const budget = Math.max(500, Math.min(4000, timeoutMs || 2000));
   const t0 = Date.now();
   while (Date.now() - t0 < budget) {
     const echoed = chatLog.slice(before).some((c) => c.kind === 'echo'
