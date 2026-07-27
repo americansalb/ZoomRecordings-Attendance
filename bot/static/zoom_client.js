@@ -678,6 +678,48 @@ window.zoomRenderedVideoUsers = async () => {
   return [...new Set(ids)];
 };
 
+/*
+ * Gallery paging: the "handful at a time" design.
+ *
+ * The browser decodes every tile the gallery currently shows, and only
+ * those, so a small window showing one page at a time puts a constant
+ * ceiling on decode work regardless of class size. What it costs is
+ * coverage: people on other pages have no tile to capture. This walks the
+ * SDK's own pagination one step per call, so over a few sweeps every page
+ * gets its turn in front of the camera, and the capture path's honesty
+ * rule already handles the rest: not rendered means recorded as not
+ * checked, never guessed.
+ *
+ * The controls are found by their accessible labels rather than class
+ * names, and when nothing matches, the visible button labels are returned
+ * so the bot's-view diagnostics show exactly what was on offer.
+ */
+window.zoomGalleryAdvance = async () => {
+  const root = document.getElementById('zoom-root') || document.body;
+  const btns = [...root.querySelectorAll('button')];
+  const label = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${
+    typeof b.className === 'string' ? b.className : ''}`;
+  const usable = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true'
+    && b.offsetParent !== null;
+  const next = btns.find((b) => /next[ -]?page|pagination[^a-z]*next|next[^a-z]*pagination/i.test(label(b)));
+  const prev = btns.find((b) => /prev(ious)?[ -]?page|pagination[^a-z]*prev|prev[^a-z]*pagination/i.test(label(b)));
+  if (next && usable(next)) { next.click(); return { ok: true, moved: 'next' }; }
+  if (prev && usable(prev)) {
+    // On the last page: walk back to the first so the cycle restarts.
+    let guard = 12;
+    while (guard-- > 0 && usable(prev)) {
+      prev.click();
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return { ok: true, moved: 'first' };
+  }
+  return {
+    ok: false,
+    buttons: btns.filter((b) => b.offsetParent !== null)
+      .map((b) => label(b).trim().slice(0, 60)).filter(Boolean).slice(0, 12),
+  };
+};
+
 window.zoomCaptureSupported = async () => true;
 
 window.zoomLeave = async () => {

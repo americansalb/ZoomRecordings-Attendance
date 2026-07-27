@@ -209,15 +209,18 @@ class PlaywrightZoomClient(MeetingClient):
                 "--disable-dev-shm-usage",
             ],
         )
-        # 960x540, not the 1280x720 default. The SDK sizes its gallery to the
+        # 800x450, not the 1280x720 default. The SDK sizes its gallery to the
         # window and Zoom's simulcast picks a stream layer per rendered tile
-        # size, so the viewport is effectively the video decode budget: half
-        # the area is half the decoded pixels Chromium must hold, which is
-        # what was killing small instances (OOM with a handful of cameras).
-        # Tiles stay comfortably large enough for the face detector's
-        # 30 pixel floor.
+        # size, so the viewport is effectively the video decode budget: this
+        # is 40 percent of the default's pixels, which is what was killing
+        # 512 MB instances (OOM with a handful of cameras). Tile size scales
+        # with participant count, so small classes still get large tiles; in
+        # a full 25 tile grid each tile is 160x90 and Zoom sends its lowest
+        # layer, which is the point: a 30 camera class must fit in the same
+        # memory as a 4 camera one. Faces in a 160x90 tile still clear the
+        # detector's 30 pixel floor.
         self._context = await self._browser.new_context(
-            viewport={"width": 960, "height": 540})
+            viewport={"width": 800, "height": 450})
         self._page = await self._context.new_page()
 
         # Capture what the page says about itself. Without this a script
@@ -388,6 +391,22 @@ class PlaywrightZoomClient(MeetingClient):
                 await self._page.evaluate("""async () => await window.zoomUnmarkTile()""")
             except Exception:
                 pass
+
+    async def gallery_advance(self) -> dict:
+        """Step the SDK's gallery to its next page, wrapping at the end.
+
+        The browser only decodes the tiles on the visible page, so paging is
+        what turns a 30 camera class into a bounded, constant memory cost:
+        a handful of streams at a time, rotating, instead of all of them.
+        """
+        if not self._page:
+            return {"ok": False}
+        try:
+            return await self._page.evaluate(
+                """async () => await window.zoomGalleryAdvance()""") or {"ok": False}
+        except Exception as e:
+            logger.debug("gallery advance failed: %s", e)
+            return {"ok": False}
 
     async def self_user_id(self) -> Optional[str]:
         try:

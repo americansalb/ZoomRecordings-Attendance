@@ -155,6 +155,7 @@ class CaptureLoop:
         # Who is eligible for a face check this sweep. With the cap, a room
         # of thirty cameras costs the same per sweep as a room of four; the
         # cursor walks the list so nobody is starved across sweeps.
+        starved = False
         eligible = []
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
@@ -196,6 +197,10 @@ class CaptureLoop:
                 except Exception as e:
                     logger.warning("capture_user(%s) failed: %s", row.user_id, e)
                     data = None
+                if data is None:
+                    # Their turn came up but no tile was rendered: they are
+                    # on another gallery page. Page after this sweep.
+                    starved = True
 
             # None means "never looked", which is not the same claim as False,
             # "looked and saw nobody". Sending False for an unexamined frame
@@ -262,6 +267,20 @@ class CaptureLoop:
             }
             await self.backend.post_screenshot(manifest)
             rows.append(attendance)
+
+        # The other half of the "handful at a time" design: the browser only
+        # decodes the gallery page it shows, so when someone's face turn
+        # found no rendered tile, or there are more cameras than one page
+        # holds, step the gallery so the next page gets its turn. One step
+        # per sweep; the capture rotation and this rotation mesh over a few
+        # sweeps to cover everyone at a constant memory cost.
+        if starved or len(eligible) > self.FACE_CHECKS_PER_SWEEP:
+            advance = getattr(self.client, "gallery_advance", None)
+            if advance is not None:
+                try:
+                    await advance()
+                except Exception as e:
+                    logger.debug("gallery advance skipped: %s", e)
 
         return rows
 

@@ -439,10 +439,15 @@ async def _face_rotation():
         def __init__(self, **kw):
             super().__init__(**kw)
             self.captured: list = []
+            self.advances = 0
 
         async def capture_user(self, user_id):
             self.captured.append(str(user_id))
             return await super().capture_user(user_id)
+
+        async def gallery_advance(self):
+            self.advances += 1
+            return {"ok": True, "moved": "next"}
 
     client = CountingClient(participants=parts, frames=frames, self_id="99")
     loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
@@ -461,6 +466,9 @@ async def _face_rotation():
     await loop.run_once(ctx)
     assert set(client.captured) == {str(i) for i in range(1, 7)}, \
         "the rotation reaches everyone across sweeps"
+    # More cameras than one sweep's cap: the gallery steps each sweep so
+    # every page of tiles gets its turn at a constant decode cost.
+    assert client.advances == 2, "gallery advances once per sweep when over the cap"
 
 
 def test_face_rotation():
