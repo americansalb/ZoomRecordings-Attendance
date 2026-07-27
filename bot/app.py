@@ -41,6 +41,11 @@ class MessageIn(BaseModel):
     to_participant_id: Optional[str] = None
 
 
+class CaptureConfigIn(BaseModel):
+    interval_seconds: Optional[int] = None
+    store_images: Optional[bool] = None
+
+
 def build_app(
     config: Optional[Config] = None,
     *,
@@ -112,6 +117,36 @@ def build_app(
         _check_secret(x_tutor_bot_secret)
         await manager.leave(runtime_id)
         return JSONResponse({"ok": True})
+
+    @app.post("/bots/{runtime_id}/capture")
+    async def capture_now(runtime_id: str,
+                          x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """Run one attendance sweep right now, without waiting for the interval."""
+        _check_secret(x_tutor_bot_secret)
+        try:
+            recorded = await manager.capture_now(runtime_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"capture failed: {e}")
+        return {"ok": True, "recorded": recorded}
+
+    @app.patch("/bots/{runtime_id}/capture")
+    async def update_capture(runtime_id: str, body: CaptureConfigIn,
+                             x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """Retune a running attendance loop without a dismiss and re-summon."""
+        _check_secret(x_tutor_bot_secret)
+        try:
+            cfg = manager.set_capture_config(
+                runtime_id,
+                interval_seconds=body.interval_seconds,
+                store_images=body.store_images,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"reconfigure failed: {e}")
+        return {"ok": True, **cfg}
 
     @app.post("/bots/{runtime_id}/messages")
     async def send_message(runtime_id: str, body: MessageIn,

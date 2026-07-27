@@ -263,6 +263,52 @@ def test_meeting_end_is_reported():
     print("  meeting-end reaping OK")
 
 
+def test_capture_now_and_retune():
+    """An operator can force a sweep and change the cadence mid-meeting."""
+    async def scenario():
+        def client_factory(page_url, headless):
+            return FakeMeetingClient(
+                participants=[Participant("1", "Maria", video_on=True),
+                              Participant("2", "Sam", video_on=False)],
+                self_id="99")
+
+        cfg = Config(backend_url="http://backend", bot_shared_secret=None,
+                     sdk_key="KEY", sdk_secret="SECRET",
+                     public_base_url="http://bot", headless=True, drive_folder_id=None)
+        backend = FakeBackend()
+        manager = BotManager(cfg, backend, client_factory=client_factory,
+                             storage_factory=lambda s, f: NullStorage())
+        rid = await manager.join({
+            "meeting_id": "98765", "session_ref": "7", "display_name": "AALB Assistant",
+            "capture": {"interval_seconds": 3600},
+        })
+        before = len(backend.attendance)
+
+        # Force a sweep without waiting out the hour-long interval.
+        recorded = await manager.capture_now(rid)
+        assert recorded == 2, recorded
+        assert len(backend.attendance) == before + 2
+
+        # Retune the cadence on the running loop.
+        cfg2 = manager.set_capture_config(rid, interval_seconds=30)
+        assert cfg2["interval_seconds"] == 30
+        # The floor is enforced, so a silly value cannot hammer Zoom.
+        cfg3 = manager.set_capture_config(rid, interval_seconds=1)
+        assert cfg3["interval_seconds"] == CaptureLoop.MIN_INTERVAL_SECONDS
+
+        # Unknown runtime ids are rejected rather than silently ignored.
+        try:
+            await manager.capture_now("bot_nope")
+            raise AssertionError("expected KeyError")
+        except KeyError:
+            pass
+
+        await manager.leave(rid)
+
+    asyncio.run(scenario())
+    print("  capture-now and retune OK")
+
+
 def test_failed_join_cleans_up():
     """A join that raises must not leave a browser (or a ghost) behind.
 
@@ -345,6 +391,7 @@ def run():
     test_capture()
     test_contract()
     test_meeting_end_is_reported()
+    test_capture_now_and_retune()
     test_failed_join_cleans_up()
     test_join_passes_credentials()
     print("BOT TESTS PASSED")

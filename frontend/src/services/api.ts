@@ -794,6 +794,10 @@ export const tutorApi = {
     const { data } = await api.post(`/tutor/sessions/${sessionId}/dismiss`)
     return data.session as TutorSession
   },
+  captureNow: async (sessionId: number) => {
+    const { data } = await api.post(`/tutor/sessions/${sessionId}/capture-now`)
+    return data as { success: boolean; recorded: number }
+  },
   postReminder: async (sessionId: number, body: { reminder_id?: number; text?: string }) => {
     const { data } = await api.post(`/tutor/sessions/${sessionId}/reminder`, body)
     return data.message as TutorMessage

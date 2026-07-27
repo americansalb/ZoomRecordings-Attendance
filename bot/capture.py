@@ -55,6 +55,11 @@ def _safe(name: str) -> str:
 
 
 class CaptureLoop:
+    # Floor on the cadence. A tick is two cheap page reads plus, when frames
+    # exist, a face check per student, so it is not free -- but it is far
+    # lighter than it was when every tick tried to render video per user.
+    MIN_INTERVAL_SECONDS = 10
+
     def __init__(
         self,
         client: MeetingClient,
@@ -68,11 +73,34 @@ class CaptureLoop:
         self.client = client
         self.backend = backend
         self.storage = storage
-        self.interval_seconds = max(30, int(interval_seconds or 300))
+        self.interval_seconds = self._clamp(interval_seconds)
         self.store_images = store_images
         self.face_detector = face_detector
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        # Serialises the scheduled sweep against an operator-triggered one, so
+        # "take attendance now" cannot interleave with a tick already running
+        # and report a half-built ledger.
+        self._sweep_lock = asyncio.Lock()
         self._self_id: Optional[str] = None
+
+    @classmethod
+    def _clamp(cls, seconds) -> int:
+        return max(cls.MIN_INTERVAL_SECONDS, int(seconds or 300))
+
+    def set_interval(self, seconds: int) -> int:
+        """Change the cadence of a loop that is already running.
+
+        Capture config used to reach the bot only at join time, so changing the
+        interval did nothing until the bot was dismissed and re-summoned.
+        """
+        self.interval_seconds = self._clamp(seconds)
+        self._wake.set()          # re-arm the sleep against the new interval
+        return self.interval_seconds
+
+    def trigger_now(self) -> None:
+        """Ask the loop to sweep immediately rather than finish its sleep."""
+        self._wake.set()
 
     def _is_self(self, user_id: str, name: str, ctx: CaptureContext) -> bool:
         """Never record the bot as a student.
@@ -89,6 +117,10 @@ class CaptureLoop:
         return bool(name) and name == ctx.bot_name
 
     async def run_once(self, ctx: CaptureContext) -> List[dict]:
+        async with self._sweep_lock:
+            return await self._sweep(ctx)
+
+    async def _sweep(self, ctx: CaptureContext) -> List[dict]:
         rows: List[dict] = []
 
         if self._self_id is None:
@@ -193,11 +225,25 @@ class CaptureLoop:
                 await self.run_once(ctx)
             except Exception as e:  # keep the loop alive across transient errors
                 logger.warning("[CAPTURE] run_once error: %s", e)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+            await self._sleep_until_next()
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
+
+    async def _sleep_until_next(self) -> None:
+        """Wait out the interval, but wake early on stop or on a nudge.
+
+        A plain sleep meant an operator who wanted attendance right now, or who
+        shortened the interval, had to wait out the old one first.
+        """
+        waiters = [asyncio.ensure_future(self._stop.wait()),
+                   asyncio.ensure_future(self._wake.wait())]
+        try:
+            await asyncio.wait(waiters, timeout=self.interval_seconds,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for w in waiters:
+                w.cancel()
+            self._wake.clear()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()          # do not sit out the interval before exiting

@@ -168,7 +168,15 @@ async def get_settings() -> Dict[str, Any]:
 async def patch_settings(patch: SettingsPatch) -> Dict[str, Any]:
     body = {k: v for k, v in patch.model_dump().items() if v is not None}
     settings = get_tutor_store().update_settings(body)
-    return {"success": True, "settings": settings}
+    # A capture change has to reach bots that are already in a meeting,
+    # otherwise the new interval silently waits for the next summon.
+    retuned = 0
+    if "capture" in body:
+        try:
+            retuned = await get_tutor_service().apply_capture_settings()
+        except Exception as e:
+            logger.warning("[TUTOR] could not apply capture settings live: %s", e)
+    return {"success": True, "settings": settings, "sessions_retuned": retuned}
 
 
 # ----------------------------------------------------------------- reminders
@@ -262,6 +270,17 @@ async def dismiss(session_id: int, x_admin_user: Optional[str] = Header(default=
     try:
         session = await get_tutor_service().dismiss(session_id, by=_actor(x_admin_user))
         return {"success": True, "session": session}
+    except TutorServiceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/capture-now")
+async def capture_now(session_id: int) -> Dict[str, Any]:
+    """Take attendance for this session right now, instead of waiting for the
+    next scheduled sweep."""
+    try:
+        recorded = await get_tutor_service().capture_now(session_id)
+        return {"success": True, "recorded": recorded}
     except TutorServiceError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -151,6 +151,43 @@ class LiveTutorService:
                 logger.warning("[TUTOR] leave error (marking left anyway): %s", e)
         return self.store.update_session(session_id, status=store_mod.SESSION_LEFT)
 
+    # ------------------------------------------------------------- attendance
+
+    async def capture_now(self, session_id: int) -> int:
+        """Take attendance immediately for one live session."""
+        session = self._require_active_session(session_id)
+        rid = session.get("runtime_id")
+        if not rid:
+            raise TutorServiceError("Bot is not in the meeting (no runtime id).")
+        try:
+            return await self.bot.capture_now(rid)
+        except BotRuntimeError as e:
+            raise TutorServiceError(f"Attendance sweep failed: {e}") from e
+
+    async def apply_capture_settings(self) -> int:
+        """Push the current capture settings to every active session.
+
+        Capture config used to reach the bot only in the join payload, so
+        changing the interval did nothing until the bot was dismissed and
+        re-summoned. Returns how many sessions were retuned.
+        """
+        capture = self.store.get_settings().get("capture", {})
+        interval = capture.get("interval_seconds")
+        store_images = bool(capture.get("enabled")) and bool(capture.get("store_images", True))
+        updated = 0
+        for session in self.store.list_active_sessions():
+            rid = session.get("runtime_id")
+            if not rid:
+                continue
+            try:
+                await self.bot.update_capture(
+                    rid, interval_seconds=interval, store_images=store_images
+                )
+                updated += 1
+            except BotRuntimeError as e:
+                logger.warning("[TUTOR] could not retune session %s: %s", session["id"], e)
+        return updated
+
     # ---------------------------------------------------------------- sending
 
     async def _send_now(

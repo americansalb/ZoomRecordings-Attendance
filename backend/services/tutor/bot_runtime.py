@@ -83,6 +83,20 @@ class BotRuntime(ABC):
     ) -> None:
         """Send a public chat message or a direct message."""
 
+    @abstractmethod
+    async def capture_now(self, runtime_id: str) -> int:
+        """Take attendance immediately. Returns the number of rows recorded."""
+
+    @abstractmethod
+    async def update_capture(
+        self,
+        runtime_id: str,
+        *,
+        interval_seconds: Optional[int] = None,
+        store_images: Optional[bool] = None,
+    ) -> dict:
+        """Retune a running attendance loop."""
+
 
 class SelfHostedBotRuntime(BotRuntime):
     """Talks to a self-hosted Meeting SDK bot over HTTP."""
@@ -171,6 +185,43 @@ class SelfHostedBotRuntime(BotRuntime):
             except httpx.HTTPError as e:
                 raise BotRuntimeError(f"send failed: {e}") from e
 
+    async def capture_now(self, runtime_id: str) -> int:
+        # A sweep talks to the browser and can outlast a normal call, so it
+        # gets its own headroom rather than the send timeout.
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/bots/{runtime_id}/capture", headers=self._headers()
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except httpx.HTTPError as e:
+                raise BotRuntimeError(f"capture failed: {e}") from e
+        return int(data.get("recorded") or 0)
+
+    async def update_capture(
+        self,
+        runtime_id: str,
+        *,
+        interval_seconds: Optional[int] = None,
+        store_images: Optional[bool] = None,
+    ) -> dict:
+        payload = {}
+        if interval_seconds is not None:
+            payload["interval_seconds"] = int(interval_seconds)
+        if store_images is not None:
+            payload["store_images"] = bool(store_images)
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                resp = await client.patch(
+                    f"{self.base_url}/bots/{runtime_id}/capture",
+                    json=payload, headers=self._headers(),
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPError as e:
+                raise BotRuntimeError(f"reconfigure failed: {e}") from e
+
 
 class NullBotRuntime(BotRuntime):
     """No-op runtime: records intent in the log, sends nothing to a meeting."""
@@ -203,6 +254,20 @@ class NullBotRuntime(BotRuntime):
             f" -> {to_participant_id}" if to_participant_id else "",
             text[:120],
         )
+
+    async def capture_now(self, runtime_id: str) -> int:
+        logger.warning("[TUTOR] (null) would take attendance via %s", runtime_id)
+        return 0
+
+    async def update_capture(
+        self,
+        runtime_id: str,
+        *,
+        interval_seconds: Optional[int] = None,
+        store_images: Optional[bool] = None,
+    ) -> dict:
+        logger.warning("[TUTOR] (null) would retune capture on %s", runtime_id)
+        return {"interval_seconds": interval_seconds, "store_images": store_images}
 
 
 _runtime: Optional[BotRuntime] = None

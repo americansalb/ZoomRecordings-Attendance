@@ -493,6 +493,16 @@ function SessionCard({ session, reminders, onChanged }: {
   const fail = (e: any) => alert(e?.response?.data?.detail || 'Action failed')
 
   const dismiss = useMutation({ mutationFn: () => tutorApi.dismiss(session.id), onSuccess: onChanged, onError: fail })
+  const captureNow = useMutation({
+    mutationFn: () => tutorApi.captureNow(session.id),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['tutor-attendance'] })
+      alert(r.recorded > 0
+        ? `Attendance recorded for ${r.recorded} participant${r.recorded === 1 ? '' : 's'}. See the Attendance tab.`
+        : 'The bot is in the meeting but sees no other participants yet.')
+    },
+    onError: fail,
+  })
   const postReminder = useMutation({
     mutationFn: () => tutorApi.postReminder(session.id, { reminder_id: Number(reminderId) }),
     onSuccess: () => { setReminderId(''); afterSend() }, onError: fail,
@@ -529,10 +539,16 @@ function SessionCard({ session, reminders, onChanged }: {
             {session.summoned_by ? ` · by ${session.summoned_by}` : ''}
           </div>
         </div>
-        <button className="text-sm px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50"
-          onClick={() => dismiss.mutate()} disabled={dismiss.isPending}>
-          {dismiss.isPending ? 'Dismissing…' : 'Dismiss'}
-        </button>
+        <div className="flex gap-2">
+          <button className="text-sm px-3 py-1.5 rounded border border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+            onClick={() => captureNow.mutate()} disabled={captureNow.isPending}>
+            {captureNow.isPending ? 'Taking…' : 'Take attendance now'}
+          </button>
+          <button className="text-sm px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50"
+            onClick={() => dismiss.mutate()} disabled={dismiss.isPending}>
+            {dismiss.isPending ? 'Dismissing…' : 'Dismiss'}
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
@@ -943,28 +959,46 @@ function SettingsTab() {
       </div>
 
       <div className="card">
-        <h3 className="font-semibold text-gray-900 mb-1">Per-student screenshots</h3>
+        <h3 className="font-semibold text-gray-900 mb-1">Attendance recording</h3>
+        <p className="text-sm text-gray-600 mb-3">
+          Attendance is always recorded while the bot is in a meeting, from Zoom's own participant
+          events. Saving here applies immediately to bots already in a meeting, with no need to
+          dismiss and re-summon.
+        </p>
+        <div className="space-y-3">
+          <label className="text-sm block max-w-xs">
+            <span className="block text-gray-600 mb-1">How often to record (seconds)</span>
+            <input type="number" min={10} className="border border-gray-300 rounded p-2 w-full"
+              value={current.capture.interval_seconds}
+              onChange={(e) => set({ capture: { interval_seconds: Number(e.target.value) } as any })} />
+            <span className="block text-xs text-gray-500 mt-1">
+              Minimum 10 seconds. Join and leave times are exact regardless of this, because they
+              come from Zoom events rather than from polling.
+            </span>
+          </label>
+        </div>
+
+        <h3 className="font-semibold text-gray-900 mt-6 mb-1">Screenshots</h3>
         <p className="text-sm text-amber-600 mb-3">
-          Captures students’ faces on an interval (likely minors). Off by default — only enable with a consent/policy basis.
-          The bot announces itself on join.
+          Captures students' faces on an interval (likely minors). Off by default. Only enable with a
+          consent or policy basis. The bot announces itself on join. Turning this off does not affect
+          attendance.
         </p>
         <div className="space-y-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={current.capture.enabled}
               onChange={(e) => set({ capture: { enabled: e.target.checked } as any })} />
-            <span className="text-gray-700">Enable periodic capture</span>
-          </label>
-          <label className="text-sm block max-w-xs">
-            <span className="block text-gray-600 mb-1">Snapshot interval (seconds per student)</span>
-            <input type="number" min={30} className="border border-gray-300 rounded p-2 w-full"
-              value={current.capture.interval_seconds}
-              onChange={(e) => set({ capture: { interval_seconds: Number(e.target.value) } as any })} />
+            <span className="text-gray-700">Enable periodic screenshots</span>
           </label>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={current.capture.store_images}
               onChange={(e) => set({ capture: { store_images: e.target.checked } as any })} />
-            <span className="text-gray-700">Store images to Google Drive (uncheck for presence-flags-only, no pixels kept)</span>
+            <span className="text-gray-700">Store images to Google Drive (uncheck for presence flags only, no pixels kept)</span>
           </label>
+          <p className="text-xs text-gray-500">
+            Note: per-user video frames are not obtainable on the Zoom Web SDK the bot uses, so no
+            images are produced today regardless of this setting. Camera on and off is still recorded.
+          </p>
         </div>
       </div>
 

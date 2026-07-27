@@ -32,6 +32,7 @@ class BotSession:
     client: MeetingClient
     loop: Optional[CaptureLoop] = None
     task: Optional[asyncio.Task] = field(default=None)
+    ctx: Optional[CaptureContext] = None
 
 
 def _passcode_from_join_url(join_url: Optional[str]) -> str:
@@ -182,6 +183,7 @@ class BotManager:
             bot_name=display_name,
         )
         session.loop = loop
+        session.ctx = ctx
         session.task = asyncio.create_task(loop.run(ctx))
 
         logger.info("[BOT] joined meeting %s as %s (store_images=%s)",
@@ -239,6 +241,45 @@ class BotManager:
             await closer()
         except Exception as e:
             logger.warning("browser teardown failed: %s", e)
+
+    def _require(self, runtime_id: str) -> BotSession:
+        session = self._sessions.get(runtime_id)
+        if not session:
+            raise KeyError(f"unknown runtime_id {runtime_id}")
+        return session
+
+    async def capture_now(self, runtime_id: str) -> int:
+        """Run one attendance sweep immediately. Returns the rows recorded.
+
+        Awaited rather than fired off, so the caller gets a real count back and
+        the operator learns straight away whether the bot can actually see the
+        room, instead of being told "triggered" and having to go and look.
+        """
+        session = self._require(runtime_id)
+        ctx = session.ctx
+        if not session.loop or not ctx:
+            raise RuntimeError("no attendance loop for this session")
+        rows = await session.loop.run_once(ctx)
+        logger.info("[BOT] manual attendance sweep for %s recorded %d row(s)",
+                    runtime_id, len(rows))
+        return len(rows)
+
+    def set_capture_config(self, runtime_id: str, *,
+                           interval_seconds: Optional[int] = None,
+                           store_images: Optional[bool] = None) -> Dict[str, Any]:
+        """Reconfigure a running loop, so a settings change does not require
+        dismissing and re-summoning the bot."""
+        session = self._require(runtime_id)
+        if not session.loop:
+            raise RuntimeError("no attendance loop for this session")
+        if interval_seconds is not None:
+            session.loop.set_interval(interval_seconds)
+        if store_images is not None:
+            session.loop.store_images = bool(store_images)
+        return {
+            "interval_seconds": session.loop.interval_seconds,
+            "store_images": session.loop.store_images,
+        }
 
     async def send(self, runtime_id: str, channel: str, text: str,
                    to_participant_id: Optional[str] = None) -> None:
