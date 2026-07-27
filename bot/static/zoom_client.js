@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-10: SDK 6.2.0, node-id tiles, single-camera fallback';
+const PAGE_BUILD = 'capture-12: SDK 6.2.0, waiting room admission, node-id tiles';
 
 let client = null;
 let selfUserId = null;
@@ -316,11 +316,33 @@ window.zoomJoin = async (cfg) => {
   try {
     await client.join(joinArgs);
   } catch (e) {
-    clearInterval(waitingWatch);
-    if (sawWaitingRoom) {
-      throw zoomError('Zoom join rejected: the bot reached the waiting room but was never admitted by the host', e);
+    let raw = '';
+    try { raw = JSON.stringify(e) || String(e); } catch { raw = String(e); }
+    if (/RECONNECTING_MEETING|OPERATION_CANCELLED/.test(raw)) {
+      // Being admitted from the waiting room CANCELS the original join and
+      // reconnects into the meeting. That is progress, not failure: the old
+      // code threw here and tore the browser down at the exact moment the
+      // host let the bot in. Wait for the reconnect to land instead.
+      const t0 = Date.now();
+      let connected = false;
+      while (Date.now() - t0 < 120000) {
+        try {
+          const u = client.getCurrentUser && client.getCurrentUser();
+          if (u && u.userId) { connected = true; break; }
+        } catch (err) { /* not connected yet */ }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!connected) {
+        clearInterval(waitingWatch);
+        throw zoomError('Zoom join failed: admission from the waiting room never completed', e);
+      }
+    } else {
+      clearInterval(waitingWatch);
+      if (sawWaitingRoom) {
+        throw zoomError('Zoom join rejected: the bot reached the waiting room but was never admitted by the host', e);
+      }
+      throw zoomError('Zoom join rejected', e);
     }
-    throw zoomError('Zoom join rejected', e);
   }
   clearInterval(waitingWatch);
   joined = true;
