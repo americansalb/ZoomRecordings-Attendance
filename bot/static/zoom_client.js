@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-5: node-id tiles, single-camera fallback, inventory';
+const PAGE_BUILD = 'capture-6: node-id tiles, single-camera fallback, inventory';
 
 let client = null;
 let selfUserId = null;
@@ -117,6 +117,17 @@ function recordVideoEvent(source, userId, name, value) {
   if (videoEvents.length > 80) videoEvents.splice(0, videoEvents.length - 80);
 }
 
+// Chat receipts. "The SDK call resolved" and "Zoom actually distributed the
+// message" are different facts: the send is recorded when attempted and when
+// the SDK accepts it, and the SDK's own chat-on-message echo of our outbound
+// message is recorded when it arrives. A send with no echo is a message Zoom
+// swallowed, and without this log that is indistinguishable from delivered.
+const chatLog = [];
+function recordChat(kind, detail) {
+  chatLog.push({ at: new Date().toISOString(), kind: kind, ...detail });
+  if (chatLog.length > 60) chatLog.splice(0, chatLog.length - 60);
+}
+
 function participantName(u) {
   return u.displayName || u.userName || '';
 }
@@ -175,10 +186,22 @@ async function ensureClient() {
   client.on('chat-on-message', (payload) => {
     try {
       const sender = payload.sender || {};
-      if (selfUserId && String(sender.userId) === String(selfUserId)) return;
       const receiver = payload.receiver || {};
       // Private if addressed to a specific user (i.e. a DM to the bot).
       const isPrivate = !!(receiver && receiver.userId);
+      if (selfUserId && String(sender.userId) === String(selfUserId)) {
+        // Zoom echoing back our own message is the delivery receipt.
+        recordChat('echo', {
+          to: receiver.name || String(receiver.userId || 'everyone'),
+          toId: receiver.userId !== undefined ? String(receiver.userId) : null,
+          preview: String(payload.message || '').slice(0, 80),
+        });
+        return;
+      }
+      recordChat('received', {
+        from: sender.name || String(sender.userId || ''),
+        preview: String(payload.message || '').slice(0, 80),
+      });
       if (window.onZoomChat) {
         window.onZoomChat({
           message: payload.message,
@@ -309,12 +332,23 @@ window.zoomJoin = async (cfg) => {
 
 window.zoomSendChat = async (text, toUserId) => {
   if (!client || !joined) throw new Error('cannot send chat: not in a meeting');
+  const toId = (toUserId !== null && toUserId !== undefined && toUserId !== '')
+    ? String(toUserId) : null;
+  recordChat('send-attempt', { toId: toId || 'everyone',
+    preview: String(text || '').slice(0, 80) });
   // sendChat(message, userId?) — omitting the id sends to everyone. There is
   // no getChatClient() on the Component View client and no sendToAll().
-  if (toUserId !== null && toUserId !== undefined && toUserId !== '') {
-    await client.sendChat(text, Number(toUserId));
-  } else {
-    await client.sendChat(text);
+  try {
+    if (toId) {
+      await client.sendChat(text, Number(toId));
+    } else {
+      await client.sendChat(text);
+    }
+    recordChat('sdk-accepted', { toId: toId || 'everyone' });
+  } catch (e) {
+    recordChat('sdk-rejected', { toId: toId || 'everyone',
+      error: String((e && (e.reason || e.message)) || e).slice(0, 200) });
+    throw e;
   }
 };
 
@@ -357,6 +391,7 @@ window.zoomDiagnostics = async () => {
   // reading is Zoom never telling us, or us mishandling what it said.
   out.pageBuild = PAGE_BUILD;
   out.videoEvents = videoEvents.slice(-30);
+  out.chatLog = chatLog.slice(-20);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }
   catch (e) { out.renderedVideoUsers = []; }
   try { out.videoSurfaces = videoSurfaceInventory(); }
