@@ -11,8 +11,12 @@ RUN pip install --no-cache-dir -r bot/requirements.txt \
 
 COPY bot/ ./bot/
 
-ENV BOT_HEADLESS=true \
-    BOT_PUBLIC_BASE_URL=http://localhost:8088
+# BOT_PUBLIC_BASE_URL is deliberately NOT set here. Baking in localhost
+# meant config.py's RENDER_EXTERNAL_URL fallback could never take effect,
+# so on Render the headless browser tried to load the Zoom client page
+# from http://localhost:8088 and got ERR_CONNECTION_REFUSED. Leave it
+# unset and let config.py fall back, or set it explicitly per deploy.
+ENV BOT_HEADLESS=true
 
 EXPOSE 8088
 

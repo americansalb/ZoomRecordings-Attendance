@@ -12,7 +12,16 @@
       The page is served by the bot with COOP/COEP headers so the SDK's
       SharedArrayBuffer works (see app.py). The Zoom CDN supports CORP.
     -->
-    <script src="https://source.zoom.us/3.13.2/zoom-meeting-embedded-3.13.2.min.js"></script>
+    <!--
+      crossorigin="anonymous" matters here. The page is served with
+      Cross-Origin-Embedder-Policy: require-corp, under which a plain
+      <script src> is a no-cors request. Marking it CORS makes the CDN's
+      Access-Control-Allow-Origin the deciding header instead of relying
+      on CORP alone, which is the difference between the SDK loading and
+      ZoomMtgEmbedded silently never being defined.
+    -->
+    <script crossorigin="anonymous"
+            src="https://source.zoom.us/3.13.2/zoom-meeting-embedded-3.13.2.min.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
       #zoom-root { width: 1280px; height: 720px; }

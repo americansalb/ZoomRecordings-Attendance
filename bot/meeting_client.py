@@ -126,6 +126,25 @@ class PlaywrightZoomClient(MeetingClient):
         await self._page.expose_function("onZoomChat", _on_zoom_chat)
         await self._page.goto(self.page_url, wait_until="load")
 
+        # Wait for the SDK global before touching it. "load" firing only
+        # means the page finished; a <script> that failed to fetch does
+        # not stop it, so without this the next line throws a bare
+        # "ZoomMtgEmbedded is not defined" from inside eval and the real
+        # cause (blocked, 404, slow CDN) is nowhere in the message.
+        try:
+            await self._page.wait_for_function(
+                "typeof window.ZoomMtgEmbedded !== 'undefined'", timeout=45000
+            )
+        except Exception:
+            raise RuntimeError(
+                "Zoom Web SDK did not load on "
+                f"{self.page_url} (window.ZoomMtgEmbedded undefined after 45s). "
+                "The SDK <script> in bot/static/zoom_client.html could not be "
+                "fetched: check the pinned version exists on source.zoom.us, "
+                "that the container has outbound network access, and that the "
+                "COEP headers are not blocking it."
+            ) from None
+
         await self._page.evaluate(
             """async (cfg) => { await window.zoomJoin(cfg); }""",
             {
