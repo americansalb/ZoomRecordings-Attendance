@@ -59,6 +59,11 @@ class BotManager:
         self.client_factory = client_factory
         self.storage_factory = storage_factory
         self._sessions: Dict[str, BotSession] = {}
+        # One Chromium launch at a time. Overlapping joins each spawned a
+        # browser on a machine that can barely run one, and the pile-up
+        # thrashed the container until launches themselves timed out at 180
+        # seconds and the whole API went dark.
+        self._join_lock = asyncio.Lock()
 
     async def join(self, payload: Dict[str, Any]) -> str:
         meeting_id = str(payload.get("meeting_id") or "").strip()
@@ -66,6 +71,14 @@ class BotManager:
             raise ValueError("meeting_id is required")
         if not (self.config.sdk_key and self.config.sdk_secret):
             raise RuntimeError("ZOOM_MEETING_SDK_KEY/ZOOM_MEETING_SDK_SECRET not configured")
+        if self._join_lock.locked():
+            raise RuntimeError(
+                "another bot is already joining on this container; "
+                "wait for that join to finish, then send again")
+        async with self._join_lock:
+            return await self._join_inner(payload, meeting_id)
+
+    async def _join_inner(self, payload: Dict[str, Any], meeting_id: str) -> str:
 
         session_ref = str(payload.get("session_ref") or "")
         display_name = payload.get("display_name") or "AALB Assistant"
