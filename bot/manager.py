@@ -140,13 +140,22 @@ class BotManager:
             # ever learns a runtime_id to send a leave to.
             logger.warning("[BOT] join failed for meeting %s, tearing down: %s", meeting_id, e)
             await self._force_close(client)
+            # Name the most common real cause. A small instance cannot run
+            # two Chromiums, so a join attempted while another bot is live
+            # fails on timeouts that look like network problems.
+            others = len(self._sessions)
+            hint = (
+                f" ({others} other bot{'s are' if others != 1 else ' is'} live in this "
+                "container; a small instance usually cannot run two browsers, "
+                "recall the other bot first)"
+            ) if others else ""
             await self.backend.post_event({
                 "type": "error",
                 "session_ref": session_ref,
                 "runtime_id": runtime_id,
-                "error": str(e)[:500],
+                "error": (str(e) + hint)[:500],
             })
-            raise
+            raise RuntimeError(f"{e}{hint}") from e
 
         session = BotSession(runtime_id, meeting_id, session_ref, display_name, client)
         self._sessions[runtime_id] = session

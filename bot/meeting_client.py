@@ -245,7 +245,12 @@ class PlaywrightZoomClient(MeetingClient):
 
         await self._page.expose_function("onZoomChat", _on_zoom_chat)
         await self._page.expose_function("onZoomLifecycle", _on_zoom_lifecycle)
-        await self._page.goto(self.page_url, wait_until="load")
+        # domcontentloaded, not "load", and a long budget. The SDK global is
+        # explicitly waited for right below, so full-load adds nothing, and a
+        # container already running another bot's Chromium can be slow enough
+        # that the default 30 seconds fails the join before it starts.
+        await self._page.goto(self.page_url, wait_until="domcontentloaded",
+                              timeout=90_000)
 
         # Wait for the SDK global before touching it. "load" firing only
         # means the page finished; a <script> that failed to fetch does
