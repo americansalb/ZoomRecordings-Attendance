@@ -99,6 +99,17 @@ def build_app(
     async def healthz():
         return {"ok": True, "sdk_configured": bool(config.sdk_key)}
 
+    @app.get("/bots")
+    async def list_bots(x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """Which bots are actually live in this process.
+
+        The authoritative answer to "is the bot still in that meeting". A
+        control plane that only reads its own records cannot tell a live bot
+        from one whose container was redeployed underneath it.
+        """
+        _check_secret(x_tutor_bot_secret)
+        return {"bots": manager.list_sessions()}
+
     @app.post("/bots")
     async def join_meeting(request: Request, x_tutor_bot_secret: Optional[str] = Header(default=None)):
         _check_secret(x_tutor_bot_secret)

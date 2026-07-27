@@ -309,6 +309,36 @@ def test_capture_now_and_retune():
     print("  capture-now and retune OK")
 
 
+def test_lists_live_bots():
+    """The control plane must be able to ask what is actually running.
+
+    Its own records are written optimistically at join and corrected only by
+    an event the bot sends. A bot that died with its container sends nothing,
+    so without this the console shows a bot sitting in an empty meeting.
+    """
+    cfg = Config(backend_url="http://backend", bot_shared_secret=None,
+                 sdk_key="KEY", sdk_secret="SECRET",
+                 public_base_url="http://bot", headless=True, drive_folder_id=None)
+    app = build_app(cfg, backend=FakeBackend(),
+                    client_factory=lambda page_url, headless: FakeMeetingClient(self_id="99"),
+                    storage_factory=lambda s, f: NullStorage())
+    c = TestClient(app)
+
+    assert c.get("/bots").json()["bots"] == []
+
+    rid = c.post("/bots", json={"meeting_id": "98765", "session_ref": "botsession:7",
+                                "display_name": "AALB Assistant"}).json()["runtime_id"]
+    bots = c.get("/bots").json()["bots"]
+    assert len(bots) == 1
+    assert bots[0]["runtime_id"] == rid
+    assert bots[0]["meeting_id"] == "98765"
+    assert bots[0]["session_ref"] == "botsession:7"
+
+    c.request("DELETE", f"/bots/{rid}")
+    assert c.get("/bots").json()["bots"] == [], "a departed bot must not still be listed"
+    print("  live bot listing OK")
+
+
 def test_failed_join_cleans_up():
     """A join that raises must not leave a browser (or a ghost) behind.
 
@@ -392,6 +422,7 @@ def run():
     test_contract()
     test_meeting_end_is_reported()
     test_capture_now_and_retune()
+    test_lists_live_bots()
     test_failed_join_cleans_up()
     test_join_passes_credentials()
     print("BOT TESTS PASSED")

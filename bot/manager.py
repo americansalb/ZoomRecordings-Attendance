@@ -242,6 +242,26 @@ class BotManager:
         except Exception as e:
             logger.warning("browser teardown failed: %s", e)
 
+    def list_sessions(self) -> list:
+        """The bots actually running in this process.
+
+        The control plane cannot infer this from its own database: it records
+        a join optimistically, and a bot that crashed, was recalled out of
+        band, or died with its container sends nothing. Without an
+        authoritative read, a stale row shows "bot in room" over an empty
+        meeting indefinitely.
+        """
+        return [
+            {
+                "runtime_id": s.runtime_id,
+                "meeting_id": s.meeting_id,
+                "session_ref": s.session_ref,
+                "display_name": s.display_name,
+                "capturing": bool(s.task and not s.task.done()),
+            }
+            for s in self._sessions.values()
+        ]
+
     def _require(self, runtime_id: str) -> BotSession:
         session = self._sessions.get(runtime_id)
         if not session:
