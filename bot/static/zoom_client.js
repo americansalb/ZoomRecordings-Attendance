@@ -46,13 +46,24 @@ async function ensureClient() {
 
 window.zoomJoin = async (cfg) => {
   await ensureClient();
-  await client.join({
+  const joinArgs = {
     sdkKey: cfg.sdkKey,
     signature: cfg.signature,
     meetingNumber: cfg.meetingNumber,
     password: cfg.passcode || '',
     userName: cfg.userName,
-  });
+  };
+  // Zoom requires apps joining meetings to be authorized (March 2 2026);
+  // a ZAK is one of the accepted mechanisms. It also joins us AS the
+  // bot's own Zoom user rather than as an anonymous guest, which is what
+  // lets an alternative-host assignment grant co-host rights. Without
+  // those, a host who restricts chat to "Host only" silently disables
+  // every direct message.
+  //
+  // Only set when present, so a join without one behaves exactly as
+  // before on accounts that still permit it.
+  if (cfg.zak) joinArgs.zak = cfg.zak;
+  await client.join(joinArgs);
   stream = client.getMediaStream();
   try {
     const me = client.getCurrentUser && client.getCurrentUser();
