@@ -20,6 +20,23 @@
       script several ways to be dropped without a usable error. Same
       origin removes the CDN, CORS and COEP questions together.
     -->
+    <!--
+      Order matters. The Component View SDK is built against React,
+      ReactDOM, Redux and lodash as GLOBALS, not bundled. Without these
+      it throws "React is not defined" partway through and never reaches
+      its own last line, which is where it assigns window.ZoomMtgEmbedded.
+      The symptom is an undefined global with a page that looks fine,
+      because a script error does not stop "load" from firing.
+
+      All of these ship inside the same npm tarball the SDK comes from
+      (dist/lib/vendor), so they are vendored and version-matched rather
+      than pulled from a CDN.
+    -->
+    <script src="/static/vendor/lib/vendor/react.min.js"></script>
+    <script src="/static/vendor/lib/vendor/react-dom.min.js"></script>
+    <script src="/static/vendor/lib/vendor/redux.min.js"></script>
+    <script src="/static/vendor/lib/vendor/redux-thunk.min.js"></script>
+    <script src="/static/vendor/lib/vendor/lodash.min.js"></script>
     <script src="/static/vendor/zoom-meeting-embedded-ES5.min.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
