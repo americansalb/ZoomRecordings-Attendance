@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-9: node-id tiles, single-camera fallback, inventory';
+const PAGE_BUILD = 'capture-10: SDK 6.2.0, node-id tiles, single-camera fallback';
 
 let client = null;
 let selfUserId = null;

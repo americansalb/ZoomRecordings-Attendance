@@ -26,10 +26,15 @@ COPY bot/ ./bot/
 # the .js would move the failure later instead of fixing it.
 #
 # Note the filename. npm ships zoom-meeting-embedded-ES5.min.js while the
-# CDN serves the same bytes as zoom-meeting-embedded-<version>.min.js
-# (both are exactly 3,291,075 bytes for 3.13.2). The version is in the
-# tarball URL, not the file inside it.
-ARG ZOOM_SDK_VERSION=3.13.2
+# CDN serves the same bytes as zoom-meeting-embedded-<version>.min.js.
+# The version is in the tarball URL, not the file inside it.
+#
+# 6.x, not 3.13.2: private messages sent from the 3.x SDK reach Zoom but
+# Zoom Workplace clients running continuous meeting chat refuse to render
+# them ("Messages can't be synced to this meeting chat"), which made every
+# direct message silently vanish on the receiving device. The page's method
+# surface was runtime-verified identical on 3.13.2 and 6.2.0.
+ARG ZOOM_SDK_VERSION=6.2.0
 RUN set -eux; \
     mkdir -p /tmp/zsdk bot/static/vendor; \
     curl -fsSL "https://registry.npmjs.org/@zoom/meetingsdk/-/meetingsdk-${ZOOM_SDK_VERSION}.tgz" \
