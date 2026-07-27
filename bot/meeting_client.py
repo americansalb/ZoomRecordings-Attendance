@@ -13,16 +13,15 @@ Identity note: attendance is attributed by Zoom user id, never by tile position.
 `presence()` returns the per-user ledger the browser page maintains from Zoom's
 own user-added/user-removed/user-updated events.
 
-Capture note: per-user frame capture is not available on the Component View SDK
-(no getMediaStream on the meeting client, in any released version). capture_user
-returns None and capture_supported() is False; see zoom_client.js for the full
-explanation. video_on from Zoom's per-user state remains authoritative.
+Capture note: per-user frames come from screenshotting the tile the SDK itself
+bound to the user (its node-id attribute), via Playwright's compositor capture.
+Only tiles Zoom has attached are capturable, so capture_user returns None for
+anyone off the rendered gallery page and the caller records that no check ran.
+video_on from Zoom's per-user state remains authoritative for attendance.
 """
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -191,6 +190,11 @@ class PlaywrightZoomClient(MeetingClient):
                 "--use-fake-device-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",
                 "--no-sandbox",
+                # Containers give /dev/shm 64MB by default and Chromium keeps
+                # decoded video frames there. A meeting with several cameras
+                # exhausts it and the renderer dies mid-meeting with no error
+                # that reaches Python.
+                "--disable-dev-shm-usage",
             ],
         )
         self._context = await self._browser.new_context()
@@ -322,17 +326,35 @@ class PlaywrightZoomClient(MeetingClient):
             return False
 
     async def capture_user(self, user_id: str) -> Optional[bytes]:
-        data_url = await self._page.evaluate(
-            """async (uid) => await window.zoomCaptureUser(uid)""", user_id
-        )
-        if not data_url:
+        """PNG of the user's rendered tile, or None if Zoom has no tile attached.
+
+        The page marks the element the SDK itself bound to this user id
+        (node-id attribute), and Playwright screenshots the compositor output
+        for it. That works where canvas.toDataURL() returns black on WebGL,
+        and it is attribution by Zoom's own binding, never by tile position.
+        """
+        if not self._page:
             return None
         try:
-            b64 = data_url.split(",", 1)[1]
-            return base64.b64decode(b64)
+            mark = await self._page.evaluate(
+                """async (uid) => await window.zoomMarkUserTile(uid)""", str(user_id)
+            ) or {}
+            if not mark.get("ok"):
+                rendered = mark.get("rendered")
+                if rendered is not None:
+                    logger.debug("no tile for %s; rendered tiles: %s", user_id, rendered)
+                return None
+            return await self._page.locator('[data-cap-target="1"]').screenshot(
+                type="png", timeout=5000, animations="disabled"
+            )
         except Exception as e:
-            logger.warning("capture_user decode failed for %s: %s", user_id, e)
+            logger.warning("capture_user(%s) screenshot failed: %s", user_id, e)
             return None
+        finally:
+            try:
+                await self._page.evaluate("""async () => await window.zoomUnmarkTile()""")
+            except Exception:
+                pass
 
     async def self_user_id(self) -> Optional[str]:
         try:

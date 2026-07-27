@@ -996,8 +996,9 @@ function SettingsTab() {
             <span className="text-gray-700">Store images to Google Drive (uncheck for presence flags only, no pixels kept)</span>
           </label>
           <p className="text-xs text-gray-500">
-            Note: per-user video frames are not obtainable on the Zoom Web SDK the bot uses, so no
-            images are produced today regardless of this setting. Camera on and off is still recorded.
+            Frames are captured from the video tiles Zoom renders in the bot's gallery view, so
+            coverage is the rendered page of the gallery (up to 25 tiles). Students without a
+            rendered tile are recorded as not checked, never as absent.
           </p>
         </div>
       </div>

@@ -86,7 +86,31 @@ function participantVideoOn(u) {
   // both, 6.x deprecates the latter. Read whichever is present so an SDK
   // upgrade does not silently turn every camera "off".
   if (typeof u.video === 'boolean') return u.video;
-  return !!u.bVideoOn;
+  if (typeof u.bVideoOn === 'boolean') return u.bVideoOn;
+  // Neither field present means the payload did not carry camera state at
+  // all. That is "unknown", not "off": defaulting it to false would let a
+  // partial update silently flip a live camera to off in our ledger.
+  return null;
+}
+
+/*
+ * Audit trail for camera state.
+ *
+ * When someone says "it thinks my camera is on and it is off", the dispute is
+ * over which side failed: Zoom never sent the change, or we mishandled it.
+ * This records every camera-state signal we receive, with its source, so the
+ * diagnostics read settles that in one look instead of a redeploy.
+ */
+const videoEvents = [];
+function recordVideoEvent(source, userId, name, value) {
+  videoEvents.push({
+    at: new Date().toISOString(),
+    source: source,               // 'user-added' | 'user-updated' | 'roster'
+    userId: String(userId),
+    name: name || '',
+    videoOn: value,
+  });
+  if (videoEvents.length > 80) videoEvents.splice(0, videoEvents.length - 80);
 }
 
 function participantName(u) {
@@ -118,6 +142,25 @@ async function ensureClient() {
       // the cross-origin fetch assetPath just removed, and floats the media
       // version away from the pinned SDK.
       patchJsMedia: false,
+      // Nobody clicks in a headless browser, so the meeting must come up
+      // already showing video. Gallery at full size makes the SDK attach a
+      // <video-player node-id="<userId>"> per visible participant, which is
+      // what frame capture screenshots, and it keeps the video pipeline
+      // active so camera on and off state stays live instead of freezing at
+      // whatever it was in a minimized view.
+      customize: {
+        video: {
+          isResizable: false,
+          defaultViewType: 'gallery',
+          viewSizes: {
+            default: { width: 1280, height: 720 },
+            ribbon: { width: 1280, height: 720 },
+          },
+        },
+      },
+      // 25 is the SDK's ceiling with SharedArrayBuffer, which this page has
+      // (COOP/COEP are set server-side and verified in diagnostics).
+      maximumVideosInGalleryView: 25,
     });
   } catch (e) {
     client = null;               // let a retry re-init rather than reusing a dead client
@@ -152,7 +195,11 @@ async function ensureClient() {
       for (const u of [].concat(payload || [])) {
         const row = ledgerFor(u.userId, participantName(u));
         row.leftAt = null;
-        settleVideo(row, participantVideoOn(u));
+        const on = participantVideoOn(u);
+        if (on !== null) {
+          recordVideoEvent('user-added', u.userId, participantName(u), on);
+          settleVideo(row, on);
+        }
       }
     } catch (e) { console.error('user-added handler error', e); }
   });
@@ -176,7 +223,11 @@ async function ensureClient() {
         if (u.displayName || u.userName) row.name = participantName(u);
         // A user-updated payload is a partial: it carries only what changed,
         // so an absent video field means "unchanged", not "off".
-        if ('video' in u || 'bVideoOn' in u) settleVideo(row, participantVideoOn(u));
+        const on = participantVideoOn(u);
+        if (on !== null) {
+          recordVideoEvent('user-updated', u.userId, row.name, on);
+          settleVideo(row, on);
+        }
       }
     } catch (e) { console.error('user-updated handler error', e); }
   });
@@ -297,6 +348,12 @@ window.zoomDiagnostics = async () => {
     error: null,
   };
   if (!client) { out.error = 'no client'; return out; }
+  // The camera-state signals received, newest last, and which tiles are
+  // actually attached right now. Together these say whether a wrong camera
+  // reading is Zoom never telling us, or us mishandling what it said.
+  out.videoEvents = videoEvents.slice(-30);
+  try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }
+  catch (e) { out.renderedVideoUsers = []; }
   try {
     const users = client.getAttendeeslist() || [];
     out.raw = users.map((u) => ({
@@ -340,7 +397,10 @@ window.zoomPresence = async () => {
       const row = ledgerFor(u.userId, participantName(u));
       if (row.leftAt !== null) row.leftAt = null;   // rejoined
       const live = participantVideoOn(u);
-      if (live !== row.videoOn) settleVideo(row, live, t);
+      if (live !== null && live !== row.videoOn) {
+        recordVideoEvent('roster', u.userId, row.name, live);
+        settleVideo(row, live, t);
+      }
     }
   } catch (e) { console.warn('presence roster read failed', e); }
 
@@ -363,23 +423,78 @@ window.zoomPresence = async () => {
 };
 
 /*
- * Per-user frame capture is NOT available in the Component View SDK.
+ * Per-user frame capture, from the SDK's own rendered tiles.
  *
- * The design this bot was built to (see ZOOM_ATTENDANCE_BOT_PLAN.md) calls for
- * rendering one user's own stream to an off-screen canvas via
- * getMediaStream().renderVideo(). That method exists on the Video SDK client,
- * not on the Component View meeting client: createClient() returns an object
- * with no getMediaStream at all, in 3.13.2 and still in 6.2.0. The Video SDK
- * cannot join ordinary Zoom meetings, so there is no drop-in swap.
+ * The Component View has no getMediaStream().renderVideo() (that is Video SDK
+ * API), so the original off-screen-canvas design cannot work here. What the
+ * SDK does provide, verified in the 3.13.2 bundle: every tile it attaches
+ * video to gets `node-id="<userId>"` set on the element, reset to "0" when
+ * detached, with the self preview marked `media-type="preview"`. That is
+ * Zoom's own binding of element to user id, so screenshotting that element is
+ * attribution by identity, never by tile position.
  *
- * Returning null keeps the capture loop honest: it records video_on from
- * Zoom's own per-user state, which is the signal the participation rule
- * actually needs, and simply stores no pixels. This used to throw and take the
- * entire join down with it.
+ * The screenshot itself happens on the Python side: Playwright captures the
+ * compositor's output for the element, which includes WebGL, where
+ * canvas.toDataURL() would return black. This side only finds and marks the
+ * element.
+ *
+ * Coverage is whatever Zoom renders. A participant off the current gallery
+ * page has no attached tile and returns not-found, and the caller records
+ * that no check ran rather than inventing a result.
  */
-window.zoomCaptureSupported = async () => false;
+function tilesForUser(userId) {
+  const out = [];
+  for (const el of document.querySelectorAll(`[node-id="${CSS.escape(String(userId))}"]`)) {
+    if (el.getAttribute('media-type') === 'preview') continue;   // self preview
+    const r = el.getBoundingClientRect();
+    if (r.width < 16 || r.height < 16) continue;                 // detached or collapsed
+    out.push({ el, area: r.width * r.height, rect: r });
+  }
+  // Largest wins: the same user can have a thumbnail and a main-stage tile.
+  out.sort((a, b) => b.area - a.area);
+  return out;
+}
 
-window.zoomCaptureUser = async (userId) => null;
+window.zoomMarkUserTile = async (userId) => {
+  for (const el of document.querySelectorAll('[data-cap-target]')) {
+    el.removeAttribute('data-cap-target');
+  }
+  const tiles = tilesForUser(userId);
+  if (tiles.length === 0) {
+    // Say what IS rendered, so a persistent miss is diagnosable: wrong ids
+    // and an empty gallery look identical from a bare null. Same filter as a
+    // capture, so the preview never shows up as a capturable participant.
+    const rendered = [...document.querySelectorAll('[node-id]')]
+      .filter((el) => el.getAttribute('media-type') !== 'preview')
+      .map((el) => el.getAttribute('node-id'))
+      .filter((id) => id && id !== '0');
+    return { ok: false, rendered: [...new Set(rendered)] };
+  }
+  const best = tiles[0];
+  best.el.setAttribute('data-cap-target', '1');
+  return {
+    ok: true,
+    width: Math.round(best.rect.width),
+    height: Math.round(best.rect.height),
+    tag: best.el.tagName.toLowerCase(),
+  };
+};
+
+window.zoomUnmarkTile = async () => {
+  for (const el of document.querySelectorAll('[data-cap-target]')) {
+    el.removeAttribute('data-cap-target');
+  }
+};
+
+window.zoomRenderedVideoUsers = async () => {
+  const ids = [...document.querySelectorAll('[node-id]')]
+    .filter((el) => el.getAttribute('media-type') !== 'preview')
+    .map((el) => el.getAttribute('node-id'))
+    .filter((id) => id && id !== '0');
+  return [...new Set(ids)];
+};
+
+window.zoomCaptureSupported = async () => true;
 
 window.zoomLeave = async () => {
   // leaveMeeting(), not leave() — the latter does not exist and used to fail
