@@ -349,7 +349,7 @@ class PlaywrightZoomClient(MeetingClient):
                     logger.debug("no tile for %s; rendered tiles: %s", user_id, rendered)
                 return None
             return await self._page.locator('[data-cap-target="1"]').screenshot(
-                type="png", timeout=5000, animations="disabled"
+                type="png", timeout=10000, animations="disabled"
             )
         except Exception as e:
             logger.warning("capture_user(%s) screenshot failed: %s", user_id, e)
@@ -374,18 +374,32 @@ class PlaywrightZoomClient(MeetingClient):
                 """async () => await window.zoomDiagnostics()""") or {}
         except Exception as e:
             return {"error": f"diagnostics failed: {e}"}
-        data["page_errors"] = self._page_errors[-6:]
-        data["console"] = self._page_console[-8:]
+        # The SDK races several Zoom datacenters at join and cancels the
+        # losers, and its virtual background engine fails to start headless.
+        # Both are one-time startup noise, not faults, and showing them in
+        # the panel buried real errors under scary-looking ones.
+        def benign(line: str) -> bool:
+            return ("/wc/ping/" in line and "ERR_ABORTED" in line) or "init tf fail" in line
+
+        errors = [e for e in self._page_errors if not benign(e)]
+        noise = [e for e in self._page_errors if benign(e)]
+        data["page_errors"] = errors[-6:]
+        data["startup_noise"] = noise[-4:]
+        data["console"] = [c for c in self._page_console if not benign(c)][-8:]
         return data
 
     async def page_screenshot(self) -> Optional[bytes]:
         if not self._page:
             return None
-        try:
-            return await self._page.screenshot(type="png", timeout=8000)
-        except Exception as e:
-            logger.warning("page screenshot failed: %s", e)
-            return None
+        # One retry: a page busy decoding several video streams can miss a
+        # short screenshot window, and the intermittent failure reads as the
+        # whole feature flickering.
+        for timeout_ms in (12000, 20000):
+            try:
+                return await self._page.screenshot(type="png", timeout=timeout_ms)
+            except Exception as e:
+                logger.warning("page screenshot attempt failed: %s", e)
+        return None
 
     async def leave(self) -> None:
         try:

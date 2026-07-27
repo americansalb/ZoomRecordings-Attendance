@@ -16,6 +16,7 @@ with fakes; `app = build_app()` is the module-level instance uvicorn runs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Callable, Optional
@@ -34,7 +35,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-2"
+BUILD = "capture-3"
 
 
 class MessageIn(BaseModel):
@@ -150,6 +151,32 @@ def build_app(
         if shot is None:
             raise HTTPException(status_code=503, detail="no page to screenshot")
         return Response(content=shot, media_type="image/png")
+
+    @app.get("/bots/{runtime_id}/face-check/{user_id}")
+    async def face_check(runtime_id: str, user_id: str,
+                         x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """One frame, checked for a face, with a box drawn around every hit.
+
+        The calibration view: the exact production detector on the exact
+        production capture, made visible, so "what counted as a face" is
+        something an operator can look at instead of guess about.
+        """
+        _check_secret(x_tutor_bot_secret)
+        try:
+            session = manager._require(runtime_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        frame = await session.client.capture_user(user_id)
+        if frame is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No video tile is rendered for this person right now.")
+        from .face import face_check_annotated
+        found, png = await asyncio.to_thread(face_check_annotated, frame)
+        if png is None:
+            raise HTTPException(status_code=500, detail="could not analyse the frame")
+        return Response(content=png, media_type="image/png",
+                        headers={"X-Face-Found": "true" if found else "false"})
 
     @app.get("/bots/{runtime_id}/diagnostics")
     async def bot_diagnostics(runtime_id: str,
