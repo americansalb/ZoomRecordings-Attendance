@@ -11,6 +11,29 @@ RUN pip install --no-cache-dir -r bot/requirements.txt \
 
 COPY bot/ ./bot/
 
+# Vendor the Zoom Web Meeting SDK into the image rather than pulling it
+# from source.zoom.us at join time. The CDN copy loads fine from a normal
+# browser, but inside this container it never defined ZoomMtgEmbedded,
+# and from a page served with Cross-Origin-Embedder-Policy: require-corp
+# there are several ways for a cross-origin script to be dropped without
+# a usable error. Serving it same-origin removes the CDN, the CORS
+# question and the COEP question in one move, and matches how the
+# platform already self-hosts MediaPipe rather than trusting a CDN at
+# runtime.
+#
+# The npm tarball carries dist/lib alongside the SDK: the audio/video
+# wasm and workers the SDK fetches once a meeting starts. Shipping only
+# the .js would move the failure later instead of fixing it.
+ARG ZOOM_SDK_VERSION=3.13.2
+RUN set -eux; \
+    mkdir -p /tmp/zsdk bot/static/vendor; \
+    curl -fsSL "https://registry.npmjs.org/@zoom/meetingsdk/-/meetingsdk-${ZOOM_SDK_VERSION}.tgz" \
+      -o /tmp/zsdk.tgz; \
+    tar -xzf /tmp/zsdk.tgz -C /tmp/zsdk; \
+    cp -r /tmp/zsdk/package/dist/. bot/static/vendor/; \
+    rm -rf /tmp/zsdk /tmp/zsdk.tgz; \
+    test -f "bot/static/vendor/zoom-meeting-embedded-${ZOOM_SDK_VERSION}.min.js"
+
 # BOT_PUBLIC_BASE_URL is deliberately NOT set here. Baking in localhost
 # meant config.py's RENDER_EXTERNAL_URL fallback could never take effect,
 # so on Render the headless browser tried to load the Zoom client page

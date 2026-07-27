@@ -68,7 +68,7 @@ def build_app(
     async def _cross_origin_isolation(request: Request, call_next):
         """The Zoom Web SDK needs SharedArrayBuffer -> cross-origin isolation."""
         resp = await call_next(request)
-        if request.url.path.startswith("/static"):
+        if request.url.path.startswith(("/static", "/lib")):
             resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
             resp.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
         return resp
@@ -76,6 +76,15 @@ def build_app(
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # The SDK fetches its audio/video wasm and workers once a meeting
+    # starts. Depending on version it resolves them relative to its own
+    # script or from /lib at the root, so serve both. Cheap insurance
+    # against the join getting further and then dying on a 404 for a
+    # worker file, which reads as a totally different bug.
+    vendor_lib = static_dir / "vendor" / "lib"
+    if vendor_lib.exists():
+        app.mount("/lib", StaticFiles(directory=str(vendor_lib)), name="zoomsdk-lib")
 
     @app.on_event("shutdown")
     async def _shutdown():

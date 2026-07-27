@@ -13,15 +13,14 @@
       SharedArrayBuffer works (see app.py). The Zoom CDN supports CORP.
     -->
     <!--
-      crossorigin="anonymous" matters here. The page is served with
-      Cross-Origin-Embedder-Policy: require-corp, under which a plain
-      <script src> is a no-cors request. Marking it CORS makes the CDN's
-      Access-Control-Allow-Origin the deciding header instead of relying
-      on CORP alone, which is the difference between the SDK loading and
-      ZoomMtgEmbedded silently never being defined.
+      Vendored into the image at build time (see bot/Dockerfile), served
+      same-origin. Loading it from source.zoom.us worked in a browser but
+      never defined ZoomMtgEmbedded inside the container, and a page under
+      Cross-Origin-Embedder-Policy: require-corp gives a cross-origin
+      script several ways to be dropped without a usable error. Same
+      origin removes the CDN, CORS and COEP questions together.
     -->
-    <script crossorigin="anonymous"
-            src="https://source.zoom.us/3.13.2/zoom-meeting-embedded-3.13.2.min.js"></script>
+    <script src="/static/vendor/zoom-meeting-embedded-3.13.2.min.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
       #zoom-root { width: 1280px; height: 720px; }

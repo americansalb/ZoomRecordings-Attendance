@@ -40,3 +40,4 @@ htmlcov/
 *.sqlite3
 *.db
 backend/data/
+bot/static/vendor/
