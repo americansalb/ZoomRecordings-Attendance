@@ -85,16 +85,28 @@ class BotManager:
 
         client.on_chat = _on_chat
 
+        # Role must agree with how we are authenticating. A ZAK joins as
+        # a specific, authenticated Zoom user (ours, set as alternative
+        # host on the meeting), which is a role-1 join. Signing role 0
+        # while presenting a ZAK is a contradiction and Zoom rejects it.
+        # Without a ZAK we are an anonymous participant, which is role 0.
+        zak = payload.get("zak") or None
         signature = meeting_sdk_signature(
-            self.config.sdk_key, self.config.sdk_secret, meeting_id, role=0
+            self.config.sdk_key,
+            self.config.sdk_secret,
+            meeting_id,
+            role=1 if zak else 0,
         )
         await client.join(
             meeting_number=meeting_id,
-            passcode=_passcode_from_join_url(payload.get("join_url")),
+            passcode=(
+                payload.get("passcode")
+                or _passcode_from_join_url(payload.get("join_url"))
+            ),
             display_name=display_name,
             signature=signature,
             sdk_key=self.config.sdk_key,
-            zak=payload.get("zak") or None,
+            zak=zak,
         )
 
         session = BotSession(runtime_id, meeting_id, session_ref, display_name, client)
