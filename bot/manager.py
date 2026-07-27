@@ -94,6 +94,7 @@ class BotManager:
             display_name=display_name,
             signature=signature,
             sdk_key=self.config.sdk_key,
+            zak=payload.get("zak") or None,
         )
 
         session = BotSession(runtime_id, meeting_id, session_ref, display_name, client)

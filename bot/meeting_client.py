@@ -42,7 +42,7 @@ class MeetingClient(ABC):
 
     @abstractmethod
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
-                   signature: str, sdk_key: str) -> None: ...
+                   signature: str, sdk_key: str, zak: Optional[str] = None) -> None: ...
 
     @abstractmethod
     async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> None: ...
@@ -100,7 +100,7 @@ class PlaywrightZoomClient(MeetingClient):
         self._page = None
 
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
-                   signature: str, sdk_key: str) -> None:
+                   signature: str, sdk_key: str, zak: Optional[str] = None) -> None:
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
@@ -134,6 +134,8 @@ class PlaywrightZoomClient(MeetingClient):
                 "meetingNumber": str(meeting_number),
                 "passcode": passcode or "",
                 "userName": display_name,
+                # Bearer credential: never log this.
+                "zak": zak or None,
             },
         )
 
