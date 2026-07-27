@@ -89,6 +89,10 @@ class MeetingClient(ABC):
     async def capture_supported(self) -> bool:
         return False
 
+    async def diagnostics(self) -> dict:
+        """Raw SDK state, for diagnosing disputed camera state."""
+        return {}
+
     @abstractmethod
     async def leave(self) -> None: ...
 
@@ -145,6 +149,11 @@ class FakeMeetingClient(MeetingClient):
 
     async def self_user_id(self) -> Optional[str]:
         return self._self_id
+
+    async def diagnostics(self) -> dict:
+        return {"joined": self.joined, "selfUserId": self._self_id,
+                "raw": [{"userId": p.user_id, "displayName": p.name,
+                         "resolvedVideoOn": p.video_on} for p in self._participants]}
 
     async def inject_chat(self, event: dict) -> None:
         if self.on_chat:
@@ -331,6 +340,17 @@ class PlaywrightZoomClient(MeetingClient):
             return str(uid) if uid else None
         except Exception:
             return None
+
+    async def diagnostics(self) -> dict:
+        """Raw SDK state, for when reported camera state is disputed."""
+        try:
+            data = await self._page.evaluate(
+                """async () => await window.zoomDiagnostics()""") or {}
+        except Exception as e:
+            return {"error": f"diagnostics failed: {e}"}
+        data["page_errors"] = self._page_errors[-6:]
+        data["console"] = self._page_console[-8:]
+        return data
 
     async def leave(self) -> None:
         try:

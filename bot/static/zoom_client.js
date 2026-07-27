@@ -278,6 +278,52 @@ window.zoomListUsers = async () => {
 window.zoomSelfUserId = async () => selfUserId;
 
 /*
+ * Raw diagnostics: what the SDK itself reports, before any of our mapping.
+ *
+ * Camera state is the one field the whole participation rule rests on, and if
+ * it disagrees with what a person can see in their own Zoom window, guessing
+ * at the cause from a summary count is hopeless. This returns the untouched
+ * participant objects so the disagreement can be read directly, including
+ * which field the value came from and whether the media engine ever started.
+ */
+window.zoomDiagnostics = async () => {
+  const out = {
+    joined: joined,
+    selfUserId: selfUserId,
+    sdkVersion: (window.ZoomMtgEmbedded && ZoomMtgEmbedded.VERSION) || null,
+    crossOriginIsolated: self.crossOriginIsolated === true,
+    assetPath: `${window.location.origin}/lib/av`,
+    raw: [],
+    error: null,
+  };
+  if (!client) { out.error = 'no client'; return out; }
+  try {
+    const users = client.getAttendeeslist() || [];
+    out.raw = users.map((u) => ({
+      userId: String(u.userId),
+      displayName: u.displayName ?? null,
+      userName: u.userName ?? null,
+      // Both spellings, unmapped, so a disagreement between them is visible.
+      video: (typeof u.video === 'undefined') ? '(absent)' : u.video,
+      bVideoOn: (typeof u.bVideoOn === 'undefined') ? '(absent)' : u.bVideoOn,
+      isVideoConnect: u.isVideoConnect ?? u.bVideoConnect ?? '(absent)',
+      muted: u.muted ?? '(absent)',
+      isHost: !!u.isHost,
+      isCoHost: !!u.isCoHost,
+      // What our own mapping concludes from the above.
+      resolvedVideoOn: participantVideoOn(u),
+    }));
+  } catch (e) {
+    out.error = String(e).slice(0, 300);
+  }
+  try {
+    const me = client.getCurrentUser && client.getCurrentUser();
+    out.currentUser = me ? { userId: String(me.userId), displayName: me.displayName } : null;
+  } catch (e) { out.currentUser = null; }
+  return out;
+};
+
+/*
  * The attendance read. Returns one row per participant seen this meeting,
  * with camera time settled up to the moment of the call so the caller does
  * not have to know about transitions.

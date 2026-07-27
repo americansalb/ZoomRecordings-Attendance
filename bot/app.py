@@ -129,6 +129,22 @@ def build_app(
         await manager.leave(runtime_id)
         return JSONResponse({"ok": True})
 
+    @app.get("/bots/{runtime_id}/diagnostics")
+    async def bot_diagnostics(runtime_id: str,
+                              x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """What the Zoom SDK itself reports, unmapped.
+
+        Camera state is the field the whole participation rule rests on. When
+        it disagrees with what someone sees in their own Zoom window, this is
+        the only way to tell a bad mapping from a bad SDK reading.
+        """
+        _check_secret(x_tutor_bot_secret)
+        try:
+            session = manager._require(runtime_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        return await session.client.diagnostics()
+
     @app.post("/bots/{runtime_id}/capture")
     async def capture_now(runtime_id: str,
                           x_tutor_bot_secret: Optional[str] = Header(default=None)):
