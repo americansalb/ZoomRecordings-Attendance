@@ -11,6 +11,19 @@
  * own stream to our off-screen canvas, so tile position is irrelevant.
  */
 
+
+// Zoom's SDK rejects with a plain object ({ type, reason, errorCode }),
+// not an Error. Playwright stringifies that as the literal word
+// "Object", so the reason is lost exactly when it matters most. Convert
+// to a real Error carrying the JSON, so the failure text that reaches
+// the operator says what Zoom actually objected to.
+function zoomError(prefix, e) {
+  if (e instanceof Error) return new Error(`${prefix}: ${e.message}`);
+  let body;
+  try { body = JSON.stringify(e); } catch { body = String(e); }
+  return new Error(`${prefix}: ${body}`);
+}
+
 let client = null;
 let stream = null;
 let selfUserId = null;
@@ -18,11 +31,16 @@ let selfUserId = null;
 async function ensureClient() {
   if (client) return client;
   client = ZoomMtgEmbedded.createClient();
-  await client.init({
-    zoomAppRoot: document.getElementById('zoom-root'),
-    language: 'en-US',
-    patchJsMedia: true,
-  });
+  try {
+    await client.init({
+      zoomAppRoot: document.getElementById('zoom-root'),
+      language: 'en-US',
+      patchJsMedia: true,
+    });
+  } catch (e) {
+    client = null;               // let a retry re-init rather than reusing a dead client
+    throw zoomError('Zoom SDK init failed', e);
+  }
 
   // Inbound chat -> forward to the Python side (ignoring our own messages).
   client.on('chat-on-message', (payload) => {
@@ -63,7 +81,11 @@ window.zoomJoin = async (cfg) => {
   // Only set when present, so a join without one behaves exactly as
   // before on accounts that still permit it.
   if (cfg.zak) joinArgs.zak = cfg.zak;
-  await client.join(joinArgs);
+  try {
+    await client.join(joinArgs);
+  } catch (e) {
+    throw zoomError('Zoom join rejected', e);
+  }
   stream = client.getMediaStream();
   try {
     const me = client.getCurrentUser && client.getCurrentUser();
