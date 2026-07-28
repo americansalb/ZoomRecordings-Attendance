@@ -408,6 +408,23 @@ class PlaywrightZoomClient(MeetingClient):
             logger.debug("gallery advance failed: %s", e)
             return {"ok": False}
 
+    async def shrink_viewport(self) -> None:
+        """Emergency decode shed under memory pressure.
+
+        A smaller window makes the SDK render fewer, smaller tiles, which is
+        the only decoded video memory we can hand back while staying in the
+        meeting. One way on purpose: re-inflating near the limit would
+        oscillate straight back into the pressure that triggered this.
+        """
+        if not self._page or getattr(self, "_viewport_shrunk", False):
+            return
+        try:
+            await self._page.set_viewport_size({"width": 480, "height": 270})
+            self._viewport_shrunk = True
+            logger.warning("viewport shrunk to 480x270 under memory pressure")
+        except Exception as e:
+            logger.warning("viewport shrink failed: %s", e)
+
     async def self_user_id(self) -> Optional[str]:
         try:
             uid = await self._page.evaluate("""async () => await window.zoomSelfUserId()""")

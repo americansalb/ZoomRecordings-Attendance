@@ -499,6 +499,35 @@ def test_send_dedupe():
     print("  duplicate send suppression OK")
 
 
+async def _memory_valve():
+    parts = [Participant("1", "Maria Gomez", video_on=True)]
+    client = FakeMeetingClient(participants=parts, frames={"1": b"F"}, self_id="99")
+    loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                       store_images=False, face_detector=lambda d: True)
+    ctx = CaptureContext(runtime_id="r", session_ref="5", meeting_id="m",
+                         session_label="5", bot_name="AALB Assistant")
+
+    loop.memory_fraction = lambda: 0.90        # over the soft limit
+    rows = await loop.run_once(ctx)
+    assert rows[0]["present"] is True, "attendance never pauses"
+    assert rows[0]["face_checked"] is False and rows[0]["face_present"] is None, \
+        "face work pauses under memory pressure, recorded as not checked"
+
+    loop.memory_fraction = lambda: 0.80        # below soft, above resume
+    rows = await loop.run_once(ctx)
+    assert rows[0]["face_checked"] is False, "hysteresis holds the pause"
+
+    loop.memory_fraction = lambda: 0.50        # well clear
+    rows = await loop.run_once(ctx)
+    assert rows[0]["face_checked"] is True and rows[0]["face_present"] is True, \
+        "face checks resume when memory recovers"
+
+
+def test_memory_valve():
+    asyncio.run(_memory_valve())
+    print("  memory pressure valve OK")
+
+
 def run():
     test_signature()
     test_capture()
@@ -510,6 +539,7 @@ def run():
     test_join_passes_credentials()
     test_face_rotation()
     test_send_dedupe()
+    test_memory_valve()
     print("BOT TESTS PASSED")
 
 

@@ -68,6 +68,21 @@ class CaptureLoop:
     # sweeps everyone with a camera on still gets sampled.
     FACE_CHECKS_PER_SWEEP = 4
 
+    # The memory pressure valve. What kills the container is video decode,
+    # never attendance: the roster read costs almost nothing. So as the
+    # container nears its memory limit, face capture work pauses and
+    # attendance continues, and near the very edge the window shrinks,
+    # which is the one way to hand decoded video memory back while staying
+    # in the meeting. Hysteresis so it does not flap. Dying mid-class
+    # takes the rest of the class record with it; degrading does not.
+    MEM_SOFT_LIMIT = 0.85
+    MEM_HARD_LIMIT = 0.92
+    MEM_RESUME_BELOW = 0.70
+    MEM_CURRENT_PATHS = ("/sys/fs/cgroup/memory.current",
+                         "/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
+                     "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
     def __init__(
         self,
         client: MeetingClient,
@@ -94,6 +109,7 @@ class CaptureLoop:
         self._rearm_only = False
         # Rotation cursor for the per-sweep face check cap.
         self._face_rr = 0
+        self._throttled = False
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -114,6 +130,28 @@ class CaptureLoop:
     def trigger_now(self) -> None:
         """Ask the loop to sweep immediately rather than finish its sleep."""
         self._wake.set()
+
+    def memory_fraction(self) -> float:
+        """How full the container's memory cgroup is, 0.0 when unknowable."""
+        def read_first(paths):
+            for p in paths:
+                try:
+                    with open(p) as f:
+                        return f.read().strip()
+                except OSError:
+                    continue
+            return None
+        cur, mx = read_first(self.MEM_CURRENT_PATHS), read_first(self.MEM_MAX_PATHS)
+        if not cur or not mx or mx == "max":
+            return 0.0
+        try:
+            cur_b, max_b = int(cur), int(mx)
+        except ValueError:
+            return 0.0
+        # cgroup v1 reports "no limit" as an enormous number.
+        if max_b <= 0 or max_b > (1 << 50):
+            return 0.0
+        return cur_b / max_b
 
     def _is_self(self, user_id: str, name: str, ctx: CaptureContext) -> bool:
         """Never record the bot as a student.
@@ -172,6 +210,29 @@ class CaptureLoop:
             face_turn = {eligible[(start + i) % len(eligible)]
                          for i in range(self.FACE_CHECKS_PER_SWEEP)}
             self._face_rr = (start + self.FACE_CHECKS_PER_SWEEP) % len(eligible)
+
+        # The valve: under memory pressure, faces wait and attendance
+        # continues. Unchecked people are recorded as not checked, the
+        # same honesty rule as a tile that never rendered.
+        mem = self.memory_fraction()
+        if not self._throttled and mem >= self.MEM_SOFT_LIMIT:
+            self._throttled = True
+            logger.warning(
+                "[CAPTURE] memory at %d%% of the container limit; pausing face "
+                "captures, attendance continues", int(mem * 100))
+        elif self._throttled and mem < self.MEM_RESUME_BELOW:
+            self._throttled = False
+            logger.info("[CAPTURE] memory back to %d%%; face captures resume",
+                        int(mem * 100))
+        if self._throttled:
+            face_turn = set()
+            if mem >= self.MEM_HARD_LIMIT:
+                shrink = getattr(self.client, "shrink_viewport", None)
+                if shrink is not None:
+                    try:
+                        await shrink()
+                    except Exception as e:
+                        logger.warning("emergency viewport shrink failed: %s", e)
 
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
@@ -274,7 +335,9 @@ class CaptureLoop:
         # holds, step the gallery so the next page gets its turn. One step
         # per sweep; the capture rotation and this rotation mesh over a few
         # sweeps to cover everyone at a constant memory cost.
-        if starved or len(eligible) > self.FACE_CHECKS_PER_SWEEP:
+        # Not while throttled: turning a fresh page spins up fresh decoders,
+        # the opposite of what memory pressure needs.
+        if (starved or len(eligible) > self.FACE_CHECKS_PER_SWEEP) and not self._throttled:
             advance = getattr(self.client, "gallery_advance", None)
             if advance is not None:
                 try:
