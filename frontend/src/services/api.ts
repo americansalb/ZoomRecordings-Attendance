@@ -709,6 +709,7 @@ export const publishApi = {
     topic_id?: string
     post_state?: string
     share_mode?: string
+    drive_only?: boolean
   }) => {
     const { data } = await api.post('/publish/start', body)
     return data as { success: boolean; job_id: string }

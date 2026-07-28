@@ -57,6 +57,9 @@ class PublishRequest(BaseModel):
     post_state: str = "PUBLISHED"
     share_mode: str = "VIEW"
     scheduled_time: Optional[str] = None
+    # Upload to Drive and stop there, even though a course is selected. For
+    # getting the file up now and deciding where it goes later.
+    drive_only: bool = False
 
 
 class ClassPayload(BaseModel):

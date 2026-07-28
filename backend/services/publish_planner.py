@@ -271,9 +271,17 @@ def plan_recording(
                 "size_bytes": match.get("file_size") or 0,
             }
 
+    # Screen + speaker is what nearly every class sends, so it's the default
+    # when the class hasn't said otherwise, and the fallback when what the class
+    # asked for isn't among the files Zoom produced. Failing both, preselect
+    # whatever there is — an empty selection means a disabled Send button and no
+    # explanation of why.
     wanted = [v for v in (settings.views if settings else [PRIMARY_VIEW]) if v in available]
-    if not wanted and PRIMARY_VIEW in available:
-        wanted = [PRIMARY_VIEW]
+    if not wanted:
+        if PRIMARY_VIEW in available:
+            wanted = [PRIMARY_VIEW]
+        elif available:
+            wanted = [next(iter(available))]
 
     day_number = day_override
     if day_number is None and settings:

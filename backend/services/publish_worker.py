@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from services import class_config
-from services.classroom_service import classroom_service
+from services.classroom_service import ClassroomResult, classroom_service
 from services.drive_service import DriveUploadError, drive_service
 from services.job_store import get_job_store
 from services.video_trimmer import VideoTrimmerService
@@ -203,33 +203,43 @@ def run_publish_job(job_id: str) -> None:
                 pass
 
         # ---- Classroom ---------------------------------------------------
-        store.update_job(
-            job_id,
-            status="posting",
-            progress=1.0 - _CLASSROOM_SHARE,
-            message="Posting to Google Classroom...",
-        )
-
         config = class_config.load()
+        drive_only = bool(req.get("drive_only"))
 
-        # Students reach the video through the "anyone with the link" permission
-        # set at upload, so this is not what makes the post work. It gives the
-        # teacher the recording in their own Drive, and covers the case where
-        # Classroom resolves the link back into the file. Best-effort.
-        for upload in uploaded:
-            drive_service.grant_access(upload["file_id"], config.classroom_subject)
+        if drive_only:
+            # Asked for on purpose, so it is not a failure and not a warning —
+            # the job finishes clean with the Drive links.
+            classroom = ClassroomResult(
+                ok=False,
+                reason="drive_only",
+                detail="Drive upload only — you chose not to post this to Classroom.",
+            )
+        else:
+            store.update_job(
+                job_id,
+                status="posting",
+                progress=1.0 - _CLASSROOM_SHARE,
+                message="Posting to Google Classroom...",
+            )
 
-        classroom = classroom_service.post_material(
-            subject=config.classroom_subject,
-            course_id=req.get("course_id", ""),
-            drive_file_ids=[u["file_id"] for u in uploaded],
-            drive_links=[u["link"] for u in uploaded if u.get("link")],
-            title=req.get("title") or "Class recording",
-            description=req.get("description", ""),
-            topic_id=req.get("topic_id") or None,
-            state=req.get("post_state", "PUBLISHED"),
-            scheduled_time=req.get("scheduled_time") or None,
-        )
+            # Students reach the video through the "anyone with the link"
+            # permission set at upload, so this is not what makes the post work.
+            # It gives the teacher the recording in their own Drive, and covers
+            # Classroom resolving the link back into the file. Best-effort.
+            for upload in uploaded:
+                drive_service.grant_access(upload["file_id"], config.classroom_subject)
+
+            classroom = classroom_service.post_material(
+                subject=config.classroom_subject,
+                course_id=req.get("course_id", ""),
+                drive_file_ids=[u["file_id"] for u in uploaded],
+                drive_links=[u["link"] for u in uploaded if u.get("link")],
+                title=req.get("title") or "Class recording",
+                description=req.get("description", ""),
+                topic_id=req.get("topic_id") or None,
+                state=req.get("post_state", "PUBLISHED"),
+                scheduled_time=req.get("scheduled_time") or None,
+            )
 
         result_payload: Dict[str, Any] = {
             "session_code": req.get("session_code"),
@@ -243,7 +253,9 @@ def run_publish_job(job_id: str) -> None:
 
         _notify_webhook(config.webhook_url, config.webhook_secret, result_payload)
 
-        if classroom.ok:
+        if drive_only:
+            message = f"Uploaded {len(uploaded)} video(s) to Drive."
+        elif classroom.ok:
             message = f"Published to Classroom ({len(uploaded)} video(s))."
         else:
             # Drive succeeded, so this is a partial success, not a failure.

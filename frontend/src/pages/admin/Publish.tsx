@@ -29,6 +29,10 @@ const COLORS: Record<string, { ink: string; soft: string; border: string }> = {
 const color = (name: string) => COLORS[name] || COLORS.teal
 
 const ACCENT = '#0A4F4B'
+
+// Shared screen with the active speaker in a tile — the one nearly every class
+// uses. Matches PRIMARY_VIEW in backend/services/class_config.py.
+const PRIMARY_VIEW = 'speaker'
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 // Every trim, day number and date is computed in the class's own timezone,
@@ -411,7 +415,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
     setTopicId(replanned.topic_id || '')
   }
 
-  const send = async () => {
+  const send = async (driveOnly = false) => {
     setFailed(null)
     const outputs = draft.available_views
       .filter((v) => selected.includes(v.key))
@@ -436,6 +440,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         course_id: courseId,
         topic_id: topicId,
         post_state: postState,
+        drive_only: driveOnly,
       })
       setJobId(res.job_id)
       setJob({ job_id: res.job_id, status: 'pending', progress: 0, message: 'Starting…' })
@@ -446,6 +451,8 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
 
   const busy = !!jobId && job?.status !== 'completed' && job?.status !== 'failed'
   const kept = end - start
+  const hasSpeakerView = draft.available_views.some((v) => v.key === PRIMARY_VIEW)
+  const isSpeakerOnly = selected.length === 1 && selected[0] === PRIMARY_VIEW
   // Classroom only happens when this recording resolves to a course. Without
   // one it's still a perfectly good Drive upload.
   const willPostToClassroom = !!courseId
@@ -659,6 +666,35 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         {draft.available_views.length === 0 && (
           <p className="text-sm text-gray-600">Zoom has no video files for this recording yet.</p>
         )}
+
+        {/* The everyday choice is one click, because it's the same choice
+            almost every time. The checkboxes below stay for the exceptions. */}
+        {draft.available_views.length > 1 && !readOnly && (
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            {hasSpeakerView && (
+              <button
+                type="button"
+                onClick={() => setSelected([PRIMARY_VIEW])}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold border"
+                style={
+                  isSpeakerOnly
+                    ? { borderColor: COLORS.blue.ink, background: COLORS.blue.ink, color: '#fff' }
+                    : { borderColor: COLORS.blue.ink, background: '#fff', color: COLORS.blue.ink }
+                }
+              >
+                Screen + speaker only
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSelected(draft.available_views.map((v) => v.key))}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 text-gray-700 bg-white"
+            >
+              All {draft.available_views.length} videos
+            </button>
+          </div>
+        )}
+
         {draft.available_views.map((v) => {
           const on = selected.includes(v.key)
           return (
@@ -843,18 +879,34 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         )}
 
         {!readOnly && (
-          <button
-            onClick={send}
-            disabled={busy || selected.length === 0}
-            className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-            style={{ background: ACCENT }}
-          >
-            {busy
-              ? 'Sending…'
-              : willPostToClassroom
-              ? 'Send to Classroom'
-              : 'Upload to Drive'}
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Drive on its own is a real destination, not a downgrade — for
+                getting the file up now and deciding where it goes later. Only
+                worth offering as a separate button when the other button would
+                do something more. */}
+            {willPostToClassroom && (
+              <button
+                onClick={() => send(true)}
+                disabled={busy || selected.length === 0}
+                className="px-4 py-2.5 rounded-lg text-sm font-semibold border disabled:opacity-50"
+                style={{ borderColor: ACCENT, color: ACCENT, background: '#fff' }}
+              >
+                Drive only
+              </button>
+            )}
+            <button
+              onClick={() => send(false)}
+              disabled={busy || selected.length === 0}
+              className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
+              style={{ background: ACCENT }}
+            >
+              {busy
+                ? 'Sending…'
+                : willPostToClassroom
+                ? 'Send to Classroom'
+                : 'Upload to Drive'}
+            </button>
+          </div>
         )}
       </div>
 
@@ -906,7 +958,14 @@ function Outcome({ result }: { result: any }) {
           <b>Posted.</b> {classroom.detail}
         </div>
       )}
-      {classroom && !classroom.ok && (
+      {/* Choosing Drive only isn't a problem to flag — it's what was asked for,
+          so it gets a plain note rather than the amber "something went wrong". */}
+      {classroom?.reason === 'drive_only' && (
+        <p className="mt-3 text-sm text-gray-700">
+          Drive only, as you chose. Nothing was posted to Classroom.
+        </p>
+      )}
+      {classroom && !classroom.ok && classroom.reason !== 'drive_only' && (
         <div className="mt-3 rounded-lg border p-3 text-sm"
           style={{ borderColor: COLORS.amber.ink, background: '#fff', color: COLORS.amber.ink }}>
           <b>Not posted to Classroom.</b> {classroom.detail}
