@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .capture import CaptureLoop
 from .config import Config, load_config
 from .manager import BotManager
 from .meeting_client import build_meeting_client
@@ -35,7 +36,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-18"
+BUILD = "capture-19"
 
 
 class MessageIn(BaseModel):
@@ -101,8 +102,12 @@ def build_app(
     @app.get("/healthz")
     async def healthz():
         # BUILD lets the console prove which code a deploy is actually
-        # running, instead of inferring it from behaviour.
-        return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD}
+        # running, instead of inferring it from behaviour. memory is the
+        # container's own meter, live, so nobody has to guess how close to
+        # the kill line a class is running: 0.85 throttles, at 1.0 the
+        # platform kills the container.
+        return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD,
+                "memory": round(CaptureLoop.memory_fraction(), 3)}
 
     @app.get("/bots")
     async def list_bots(x_tutor_bot_secret: Optional[str] = Header(default=None)):

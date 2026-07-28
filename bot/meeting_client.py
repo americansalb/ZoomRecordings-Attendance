@@ -209,18 +209,18 @@ class PlaywrightZoomClient(MeetingClient):
                 "--disable-dev-shm-usage",
             ],
         )
-        # 800x450, not the 1280x720 default. The SDK sizes its gallery to the
-        # window and Zoom's simulcast picks a stream layer per rendered tile
-        # size, so the viewport is effectively the video decode budget: this
-        # is 40 percent of the default's pixels, which is what was killing
-        # 512 MB instances (OOM with a handful of cameras). Tile size scales
-        # with participant count, so small classes still get large tiles; in
-        # a full 25 tile grid each tile is 160x90 and Zoom sends its lowest
-        # layer, which is the point: a 30 camera class must fit in the same
-        # memory as a 4 camera one. Faces in a 160x90 tile still clear the
-        # detector's 30 pixel floor.
+        # 480x270. The viewport is effectively the video decode budget: the
+        # SDK sizes its gallery to the window and Zoom's simulcast picks a
+        # stream layer per rendered tile size. The number is this small
+        # because of when the worst spike happens: at join, landing in a
+        # room full of cameras spins up every decoder on the first gallery
+        # page at once, and at 800x450 that killed a 512 MB container with
+        # 25 cameras before the first observation finished. Small classes
+        # still get usable tiles (a 2x2 grid is 240x135 each); big classes
+        # trade face detail for staying alive, which is the right trade,
+        # because attendance and messages never depended on pixels.
         self._context = await self._browser.new_context(
-            viewport={"width": 800, "height": 450})
+            viewport={"width": 480, "height": 270})
         self._page = await self._context.new_page()
 
         # Capture what the page says about itself. Without this a script
@@ -419,9 +419,9 @@ class PlaywrightZoomClient(MeetingClient):
         if not self._page or getattr(self, "_viewport_shrunk", False):
             return
         try:
-            await self._page.set_viewport_size({"width": 480, "height": 270})
+            await self._page.set_viewport_size({"width": 320, "height": 180})
             self._viewport_shrunk = True
-            logger.warning("viewport shrunk to 480x270 under memory pressure")
+            logger.warning("viewport shrunk to 320x180 under memory pressure")
         except Exception as e:
             logger.warning("viewport shrink failed: %s", e)
 

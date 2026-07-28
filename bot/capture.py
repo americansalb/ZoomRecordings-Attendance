@@ -78,6 +78,7 @@ class CaptureLoop:
     MEM_SOFT_LIMIT = 0.85
     MEM_HARD_LIMIT = 0.92
     MEM_RESUME_BELOW = 0.70
+    WATCHDOG_SECONDS = 2
     MEM_CURRENT_PATHS = ("/sys/fs/cgroup/memory.current",
                          "/sys/fs/cgroup/memory/memory.usage_in_bytes")
     MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
@@ -131,7 +132,8 @@ class CaptureLoop:
         """Ask the loop to sweep immediately rather than finish its sleep."""
         self._wake.set()
 
-    def memory_fraction(self) -> float:
+    @classmethod
+    def memory_fraction(cls) -> float:
         """How full the container's memory cgroup is, 0.0 when unknowable."""
         def read_first(paths):
             for p in paths:
@@ -141,7 +143,7 @@ class CaptureLoop:
                 except OSError:
                     continue
             return None
-        cur, mx = read_first(self.MEM_CURRENT_PATHS), read_first(self.MEM_MAX_PATHS)
+        cur, mx = read_first(cls.MEM_CURRENT_PATHS), read_first(cls.MEM_MAX_PATHS)
         if not cur or not mx or mx == "max":
             return 0.0
         try:
@@ -152,6 +154,38 @@ class CaptureLoop:
         if max_b <= 0 or max_b > (1 << 50):
             return 0.0
         return cur_b / max_b
+
+    async def _pressure_escalate(self) -> None:
+        """Throttle and, at the edge, shrink. Called by the watchdog and at
+        every sweep; recovery lives in the sweep so it hysteresis-gates."""
+        frac = self.memory_fraction()
+        if frac >= self.MEM_SOFT_LIMIT and not self._throttled:
+            self._throttled = True
+            logger.warning(
+                "[CAPTURE] memory at %d%% of the container limit; pausing face "
+                "captures, attendance continues", int(frac * 100))
+        if frac >= self.MEM_HARD_LIMIT:
+            shrink = getattr(self.client, "shrink_viewport", None)
+            if shrink is not None:
+                try:
+                    await shrink()
+                except Exception as e:
+                    logger.warning("emergency viewport shrink failed: %s", e)
+
+    async def _memory_watchdog(self) -> None:
+        """Check pressure every couple of seconds, not once per sweep.
+
+        The worst spike is at join: landing in a room full of cameras spins
+        up every decoder on the first gallery page at once, and a container
+        died on it before the first observation finished. A per-sweep check
+        structurally cannot catch that; this can.
+        """
+        while not self._stop.is_set():
+            try:
+                await self._pressure_escalate()
+            except Exception as e:
+                logger.debug("watchdog check failed: %s", e)
+            await asyncio.sleep(self.WATCHDOG_SECONDS)
 
     def _is_self(self, user_id: str, name: str, ctx: CaptureContext) -> bool:
         """Never record the bot as a student.
@@ -213,26 +247,16 @@ class CaptureLoop:
 
         # The valve: under memory pressure, faces wait and attendance
         # continues. Unchecked people are recorded as not checked, the
-        # same honesty rule as a tile that never rendered.
-        mem = self.memory_fraction()
-        if not self._throttled and mem >= self.MEM_SOFT_LIMIT:
-            self._throttled = True
-            logger.warning(
-                "[CAPTURE] memory at %d%% of the container limit; pausing face "
-                "captures, attendance continues", int(mem * 100))
-        elif self._throttled and mem < self.MEM_RESUME_BELOW:
+        # same honesty rule as a tile that never rendered. Escalation also
+        # runs from the watchdog between sweeps; recovery only here, with
+        # hysteresis, so it cannot flap.
+        await self._pressure_escalate()
+        if self._throttled and self.memory_fraction() < self.MEM_RESUME_BELOW:
             self._throttled = False
-            logger.info("[CAPTURE] memory back to %d%%; face captures resume",
-                        int(mem * 100))
+            logger.info("[CAPTURE] memory back under %d%%; face captures resume",
+                        int(self.MEM_RESUME_BELOW * 100))
         if self._throttled:
             face_turn = set()
-            if mem >= self.MEM_HARD_LIMIT:
-                shrink = getattr(self.client, "shrink_viewport", None)
-                if shrink is not None:
-                    try:
-                        await shrink()
-                    except Exception as e:
-                        logger.warning("emergency viewport shrink failed: %s", e)
 
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
@@ -357,19 +381,23 @@ class CaptureLoop:
                     "recording presence and camera state only")
         except Exception:
             pass
-        while not self._stop.is_set():
-            elapsed = 0.0
-            if self._rearm_only:
-                # The wake was an interval change, not a request to observe.
-                self._rearm_only = False
-            else:
-                started = time.monotonic()
-                try:
-                    await self.run_once(ctx)
-                except Exception as e:  # keep the loop alive across transient errors
-                    logger.warning("[CAPTURE] run_once error: %s", e)
-                elapsed = time.monotonic() - started
-            await self._sleep_until_next(elapsed)
+        watchdog = asyncio.create_task(self._memory_watchdog())
+        try:
+            while not self._stop.is_set():
+                elapsed = 0.0
+                if self._rearm_only:
+                    # The wake was an interval change, not a request to observe.
+                    self._rearm_only = False
+                else:
+                    started = time.monotonic()
+                    try:
+                        await self.run_once(ctx)
+                    except Exception as e:  # keep the loop alive across transient errors
+                        logger.warning("[CAPTURE] run_once error: %s", e)
+                    elapsed = time.monotonic() - started
+                await self._sleep_until_next(elapsed)
+        finally:
+            watchdog.cancel()
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
 
     async def _sleep_until_next(self, elapsed: float = 0.0) -> None:

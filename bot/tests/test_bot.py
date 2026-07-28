@@ -528,6 +528,31 @@ def test_memory_valve():
     print("  memory pressure valve OK")
 
 
+async def _watchdog_escalation():
+    class ShrinkClient(FakeMeetingClient):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.shrinks = 0
+
+        async def shrink_viewport(self):
+            self.shrinks += 1
+
+    client = ShrinkClient()
+    loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                       store_images=False, face_detector=lambda d: True)
+    loop.memory_fraction = lambda: 0.95        # past the hard limit
+    await loop._pressure_escalate()
+    assert loop._throttled is True, "escalation throttles without waiting for a sweep"
+    assert client.shrinks == 1, "past the hard limit the window shrinks"
+    await loop._pressure_escalate()
+    assert client.shrinks == 2, "shrink stays idempotent client-side, escalation retries"
+
+
+def test_watchdog_escalation():
+    asyncio.run(_watchdog_escalation())
+    print("  watchdog escalation OK")
+
+
 def run():
     test_signature()
     test_capture()
@@ -540,6 +565,7 @@ def run():
     test_face_rotation()
     test_send_dedupe()
     test_memory_valve()
+    test_watchdog_escalation()
     print("BOT TESTS PASSED")
 
 
