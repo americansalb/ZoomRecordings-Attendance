@@ -295,27 +295,34 @@ class CaptureLoop:
         except Exception:
             pass
         while not self._stop.is_set():
+            elapsed = 0.0
             if self._rearm_only:
                 # The wake was an interval change, not a request to observe.
                 self._rearm_only = False
             else:
+                started = time.monotonic()
                 try:
                     await self.run_once(ctx)
                 except Exception as e:  # keep the loop alive across transient errors
                     logger.warning("[CAPTURE] run_once error: %s", e)
-            await self._sleep_until_next()
+                elapsed = time.monotonic() - started
+            await self._sleep_until_next(elapsed)
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
 
-    async def _sleep_until_next(self) -> None:
-        """Wait out the interval, but wake early on stop or on a nudge.
+    async def _sleep_until_next(self, elapsed: float = 0.0) -> None:
+        """Wait out the rest of the interval, but wake early on stop or a nudge.
 
-        A plain sleep meant an operator who wanted attendance right now, or who
-        shortened the interval, had to wait out the old one first.
+        The interval is measured start to start, so the sweep's own duration
+        counts against it: "observe every 10 seconds" used to mean "rest 10
+        seconds after each sweep", and with 4 to 8 second sweeps the real
+        cadence sat at 14 to 18. A sweep that outruns the interval gets a one
+        second breather so the API stays responsive, and that is the floor.
         """
+        timeout = max(1.0, self.interval_seconds - elapsed)
         waiters = [asyncio.ensure_future(self._stop.wait()),
                    asyncio.ensure_future(self._wake.wait())]
         try:
-            await asyncio.wait(waiters, timeout=self.interval_seconds,
+            await asyncio.wait(waiters, timeout=timeout,
                                return_when=asyncio.FIRST_COMPLETED)
         finally:
             for w in waiters:
