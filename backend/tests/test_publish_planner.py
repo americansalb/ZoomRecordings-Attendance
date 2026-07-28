@@ -238,6 +238,28 @@ class TestPlanRecording(unittest.TestCase):
         plan = plan_recording(rec, config_with(night_class(views=["speaker", "gallery"])))
         self.assertEqual([o["key"] for o in plan["outputs"]], ["speaker"])
 
+    def test_screen_plus_speaker_is_what_gets_preselected(self):
+        """The everyday case: don't make anyone pick it every single time."""
+        rec = recording(recording_files=[
+            {"id": "f1", "file_type": "MP4", "file_size": 1, "download_url": "u",
+             "recording_type": "shared_screen_with_gallery_view"},
+            {"id": "f2", "file_type": "MP4", "file_size": 2, "download_url": "u",
+             "recording_type": "shared_screen_with_speaker_view"},
+            {"id": "f3", "file_type": "MP4", "file_size": 3, "download_url": "u",
+             "recording_type": "gallery_view"},
+        ])
+        plan = plan_recording(rec, PublishConfig())
+        self.assertEqual([o["key"] for o in plan["outputs"]], ["speaker"])
+
+    def test_something_is_always_preselected(self):
+        """An empty selection disables Send and explains nothing."""
+        rec = recording(recording_files=[
+            {"id": "f1", "file_type": "MP4", "file_size": 1, "download_url": "u",
+             "recording_type": "gallery_view"},
+        ])
+        plan = plan_recording(rec, config_with(night_class(views=["speaker"])))
+        self.assertEqual([o["key"] for o in plan["outputs"]], ["gallery_only"])
+
     def test_unmatched_recording_is_flagged_not_crashed(self):
         plan = plan_recording(recording(topic="Makeup class Nov 15"), config_with(night_class()))
         self.assertFalse(plan["ready"])
