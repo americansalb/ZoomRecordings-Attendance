@@ -23,6 +23,7 @@ video_on from Zoom's per-user state remains authoritative for attendance.
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
@@ -187,6 +188,11 @@ class PlaywrightZoomClient(MeetingClient):
         self._page = None
         self._page_errors: List[str] = []
         self._page_console: List[str] = []
+        # Why each face capture worked or did not. Without this, "no frames
+        # checked" could mean a camera-off student, an unrendered tile, or
+        # a screenshot that timed out, and the console had to guess. It
+        # guessed wrong for a whole class.
+        self._capture_log: List[dict] = []
 
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
                    signature: str, sdk_key: str, zak: Optional[str] = None) -> None:
@@ -209,18 +215,15 @@ class PlaywrightZoomClient(MeetingClient):
                 "--disable-dev-shm-usage",
             ],
         )
-        # 480x270. The viewport is effectively the video decode budget: the
-        # SDK sizes its gallery to the window and Zoom's simulcast picks a
-        # stream layer per rendered tile size. The number is this small
-        # because of when the worst spike happens: at join, landing in a
-        # room full of cameras spins up every decoder on the first gallery
-        # page at once, and at 800x450 that killed a 512 MB container with
-        # 25 cameras before the first observation finished. Small classes
-        # still get usable tiles (a 2x2 grid is 240x135 each); big classes
-        # trade face detail for staying alive, which is the right trade,
-        # because attendance and messages never depended on pixels.
+        # The window must simply be big enough to hold the gallery, which
+        # is sized by CSS and the SDK's viewSizes (640x360), not by this.
+        # Believing otherwise cost a night: shrinking the window saved no
+        # memory at all, because the SDK kept rendering at its configured
+        # size, and it pushed the tiles outside the window where element
+        # screenshots could not reach them, which silently ended every
+        # face check. Keep this comfortably larger than the gallery.
         self._context = await self._browser.new_context(
-            viewport={"width": 480, "height": 270})
+            viewport={"width": 800, "height": 600})
         self._page = await self._context.new_page()
 
         # Capture what the page says about itself. Without this a script
@@ -365,6 +368,12 @@ class PlaywrightZoomClient(MeetingClient):
         """
         if not self._page:
             return None
+
+        def note(outcome: str, **extra):
+            self._capture_log.append({"at": time.time(), "user": str(user_id),
+                                      "outcome": outcome, **extra})
+            del self._capture_log[:-12]
+
         try:
             mark = await self._page.evaluate(
                 """async (uid) => await window.zoomMarkUserTile(uid)""", str(user_id)
@@ -373,6 +382,8 @@ class PlaywrightZoomClient(MeetingClient):
                 rendered = mark.get("rendered")
                 if rendered is not None:
                     logger.debug("no tile for %s; rendered tiles: %s", user_id, rendered)
+                note("no tile rendered for this user",
+                     renderedTiles=(rendered if rendered is not None else []))
                 return None
             # A tight budget on purpose. Playwright waits for the element to
             # be stable, and a renderer busy compositing several video
@@ -380,11 +391,15 @@ class PlaywrightZoomClient(MeetingClient):
             # cannot settle in 4 seconds was not going to yield a better
             # frame at 10 or 20, and every second spent here stretches the
             # whole sweep past the observation interval.
-            return await self._page.locator('[data-cap-target="1"]').screenshot(
+            shot = await self._page.locator('[data-cap-target="1"]').screenshot(
                 type="png", timeout=4000, animations="disabled"
             )
+            note("captured", strategy=mark.get("strategy"),
+                 size=f"{mark.get('width')}x{mark.get('height')}")
+            return shot
         except Exception as e:
             logger.warning("capture_user(%s) screenshot failed: %s", user_id, e)
+            note("screenshot failed", error=str(e)[:120])
             return None
         finally:
             try:
@@ -411,19 +426,24 @@ class PlaywrightZoomClient(MeetingClient):
     async def shrink_viewport(self) -> None:
         """Emergency decode shed under memory pressure.
 
-        A smaller window makes the SDK render fewer, smaller tiles, which is
-        the only decoded video memory we can hand back while staying in the
-        meeting. One way on purpose: re-inflating near the limit would
-        oscillate straight back into the pressure that triggered this.
+        Shrinks the gallery element, not the browser window: the element is
+        what the SDK renders into, so this is the only lever that actually
+        reduces decoded video while staying in the meeting. One way on
+        purpose, since re-inflating near the limit would oscillate straight
+        back into the pressure that triggered it.
         """
         if not self._page or getattr(self, "_viewport_shrunk", False):
             return
         try:
-            await self._page.set_viewport_size({"width": 320, "height": 180})
+            await self._page.evaluate(
+                """() => {
+                    const root = document.getElementById('zoom-root');
+                    if (root) { root.style.width = '320px'; root.style.height = '180px'; }
+                }""")
             self._viewport_shrunk = True
-            logger.warning("viewport shrunk to 320x180 under memory pressure")
+            logger.warning("gallery shrunk to 320x180 under memory pressure")
         except Exception as e:
-            logger.warning("viewport shrink failed: %s", e)
+            logger.warning("gallery shrink failed: %s", e)
 
     async def self_user_id(self) -> Optional[str]:
         try:
@@ -448,6 +468,7 @@ class PlaywrightZoomClient(MeetingClient):
 
         errors = [e for e in self._page_errors if not benign(e)]
         noise = [e for e in self._page_errors if benign(e)]
+        data["captureLog"] = self._capture_log[-12:]
         data["page_errors"] = errors[-6:]
         data["startup_noise"] = noise[-4:]
         data["console"] = [c for c in self._page_console if not benign(c)][-8:]

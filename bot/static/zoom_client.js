@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-13: SDK 6.2.0, waiting room admission, node-id tiles';
+const PAGE_BUILD = 'capture-20: SDK 6.2.0, 640x360 gallery, 4 tiles per page';
 
 let client = null;
 let selfUserId = null;
@@ -167,15 +167,23 @@ async function ensureClient() {
         video: {
           isResizable: false,
           defaultViewType: 'gallery',
+          // Half the linear size, a quarter of the pixels of the old
+          // 1280x720. This and maximumVideosInGalleryView below are the
+          // only two numbers that control how much video this container
+          // decodes, and they apply from the first frame at join, which
+          // is precisely when a full room killed a 512 MB container.
           viewSizes: {
-            default: { width: 1280, height: 720 },
-            ribbon: { width: 1280, height: 720 },
+            default: { width: 640, height: 360 },
+            ribbon: { width: 640, height: 360 },
           },
         },
       },
-      // 25 is the SDK's ceiling with SharedArrayBuffer, which this page has
-      // (COOP/COEP are set server-side and verified in diagnostics).
-      maximumVideosInGalleryView: 25,
+      // Four, not the SDK ceiling of 25. This is the handful at a time:
+      // the SDK decodes only the tiles on the visible gallery page, so a
+      // 25 camera class costs the same as a 4 camera one, and the bot
+      // steps the gallery each sweep so every page gets its turn. Four
+      // tiles in a 640x360 gallery is 320x180 each, plenty for a face.
+      maximumVideosInGalleryView: 4,
     });
   } catch (e) {
     client = null;               // let a retry re-init rather than reusing a dead client

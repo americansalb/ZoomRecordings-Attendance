@@ -40,7 +40,14 @@
     <script src="/static/vendor/zoom-meeting-embedded-ES5.min.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
-      #zoom-root { width: 1280px; height: 720px; }
+      /* This box, with viewSizes in the SDK init, IS the video decode
+         budget. The browser window size is irrelevant to it: the SDK
+         renders at these dimensions regardless, which is why shrinking
+         the window saved no memory and only pushed tiles off-screen
+         where they could not be screenshotted. 640x360 with a 4 tile
+         gallery gives 320x180 per tile, far above what face detection
+         needs, at a fraction of the decode. */
+      #zoom-root { width: 640px; height: 360px; }
       /* Off-screen canvas we render individual users into for capture. */
       #cap-canvas { position: absolute; left: -10000px; top: 0; }
     </style>
