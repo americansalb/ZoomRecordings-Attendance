@@ -215,6 +215,80 @@ class TestThe403Explanation(unittest.TestCase):
         self.assertEqual(result.reason, "attachment_not_visible")
 
 
+class TestDriveOnly(unittest.TestCase):
+    """Choosing Drive on its own must not touch Classroom at all."""
+
+    def _run_worker(self, drive_only: bool):
+        from services import publish_worker
+        from tests.test_drive_upload import FakeJobStore, a_video, NAME, PATH
+
+        request = {
+            "outputs": [{"key": "gallery", "folder": "Gallery + Screenshare",
+                         "filename": NAME, "drive_folders": PATH,
+                         "download_url": "https://zoom/x"}],
+            "session_code": "139", "start_seconds": 0, "end_seconds": 100,
+            "title": "Day 2", "course_id": "course-1", "drive_only": drive_only,
+        }
+        store = FakeJobStore(request)
+        clip = a_video()
+        posted: List[Any] = []
+        granted: List[Any] = []
+
+        class FakeTrimmer:
+            def __init__(self, output_dir=None): pass
+            def trim_from_source(self, **kw): return clip
+            def cleanup(self): pass
+
+        class FakeDrive:
+            def ensure_path(self, folder_names): return "f"
+            def grant_access(self, file_id, email, role="writer"):
+                granted.append(file_id)
+                return True
+            def upload_to_path(self, **kw):
+                return {"file_id": "f1", "name": NAME,
+                        "web_view_link": "https://drive/f1", "folder_path": PATH}
+
+        class FakeClassroom:
+            def post_material(self, **kw):
+                posted.append(kw)
+                from services.classroom_service import ClassroomResult
+                return ClassroomResult(ok=True, material_id="m1")
+
+        patches = {"get_job_store": lambda: store, "VideoTrimmerService": FakeTrimmer,
+                   "drive_service": FakeDrive(), "classroom_service": FakeClassroom()}
+        originals = {k: getattr(publish_worker, k) for k in patches}
+        for k, v in patches.items():
+            setattr(publish_worker, k, v)
+        try:
+            publish_worker.run_publish_job("job-1")
+        finally:
+            for k, v in originals.items():
+                setattr(publish_worker, k, v)
+        return store, posted, granted
+
+    def test_classroom_is_never_called(self):
+        _, posted, _ = self._run_worker(drive_only=True)
+        self.assertEqual(posted, [])
+
+    def test_the_teacher_is_not_granted_access_either(self):
+        """Nothing was shared with Classroom, so nothing needs sharing."""
+        _, _, granted = self._run_worker(drive_only=True)
+        self.assertEqual(granted, [])
+
+    def test_it_finishes_as_a_success_not_a_partial_failure(self):
+        store, _, _ = self._run_worker(drive_only=True)
+        final = store.final()
+        self.assertEqual(final["status"], "completed")
+        self.assertNotIn("Not posted", final["message"])
+        self.assertEqual(final["result"]["classroom"]["reason"], "drive_only")
+
+    def test_the_normal_path_still_posts(self):
+        store, posted, granted = self._run_worker(drive_only=False)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(granted, ["f1"])
+        self.assertEqual(store.final()["status"], "completed")
+
+
 class TestGrantingTheTeacherAccess(unittest.TestCase):
     def test_the_worker_grants_before_posting(self):
         """Ordering matters: granting after the post is useless."""
