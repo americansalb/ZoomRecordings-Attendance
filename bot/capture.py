@@ -369,8 +369,6 @@ class CaptureLoop:
                 stored = bool(drive_file_id or image_url)
 
             attendance = {
-                "session_ref": ctx.session_ref,
-                "runtime_id": ctx.runtime_id,
                 "participant_id": row.user_id,
                 "participant_name": row.name,
                 "registrant_id": None,
@@ -386,8 +384,6 @@ class CaptureLoop:
                 "is_host": is_host,
                 "is_cohost": is_cohost,
             }
-            await self.backend.post_attendance(attendance)
-
             manifest = {
                 "session_ref": ctx.session_ref,
                 "runtime_id": ctx.runtime_id,
@@ -411,6 +407,14 @@ class CaptureLoop:
             if data is not None or stored:
                 await self.backend.post_screenshot(manifest)
             rows.append(attendance)
+
+        # The whole sweep's attendance goes in one request. Per-person posts
+        # made the wire the bottleneck: 25 people at a one second pace was
+        # 25 sequential round trips per sweep.
+        if rows:
+            await self.backend.post_attendance_batch(
+                session_ref=ctx.session_ref, runtime_id=ctx.runtime_id,
+                captured_at=captured_at, rows=rows)
 
         # The other half of the "handful at a time" design: the browser only
         # decodes the gallery page it shows, so when someone's face turn

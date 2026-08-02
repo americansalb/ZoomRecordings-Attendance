@@ -40,6 +40,10 @@ class FakeBackend:
     async def post_attendance(self, r):
         self.attendance.append(r)
 
+    async def post_attendance_batch(self, *, session_ref, runtime_id, captured_at, rows):
+        self.batches = getattr(self, "batches", 0) + 1
+        self.attendance.extend(rows)
+
 
 class FakeDriveStorage(Storage):
     @property

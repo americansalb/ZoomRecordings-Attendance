@@ -45,5 +45,21 @@ class BackendClient:
     async def post_attendance(self, row: Dict[str, Any]) -> None:
         await self._post("/api/tutor/bot/attendance", row)
 
+    async def post_attendance_batch(self, *, session_ref: str, runtime_id: str,
+                                    captured_at: float, rows: list) -> None:
+        """One request per sweep, not one per person.
+
+        The ingest accepts {rows: [...]} and lands each row on its own
+        timestamp. The old way, 25 people at a one second pace was 25
+        sequential round trips per sweep, several seconds of pure wire
+        time: the difference between a one second notebook and a lie.
+        """
+        await self._post("/api/tutor/bot/attendance", {
+            "session_ref": session_ref,
+            "runtime_id": runtime_id,
+            "captured_at": captured_at,
+            "rows": rows,
+        })
+
     async def post_screenshot(self, row: Dict[str, Any]) -> None:
         await self._post("/api/tutor/bot/screenshots", row)
