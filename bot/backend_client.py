@@ -22,6 +22,7 @@ class BackendClient:
         self.base_url = base_url.rstrip("/")
         self.shared_secret = shared_secret
         self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
 
     def _headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -29,12 +30,23 @@ class BackendClient:
             h["X-Tutor-Bot-Secret"] = self.shared_secret
         return h
 
+    def _http(self) -> httpx.AsyncClient:
+        # One live connection, reused. A fresh client per post meant a full
+        # TLS handshake every second at a one second observation pace,
+        # which is pure churn and puts handshake latency inside the sweep.
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
     async def _post(self, path: str, body: Dict[str, Any]) -> None:
         url = f"{self.base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(url, json=body, headers=self._headers())
-                resp.raise_for_status()
+            resp = await self._http().post(url, json=body, headers=self._headers())
+            resp.raise_for_status()
         except httpx.HTTPError as e:
             # Never let a backend hiccup crash the meeting bot.
             logger.warning("backend POST %s failed: %s", path, e)

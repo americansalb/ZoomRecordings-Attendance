@@ -36,7 +36,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-25"
+BUILD = "capture-26"
 
 
 class MessageIn(BaseModel):
@@ -98,6 +98,9 @@ def build_app(
     @app.on_event("shutdown")
     async def _shutdown():
         await manager.shutdown()
+        closer = getattr(backend, "aclose", None)
+        if closer is not None:
+            await closer()
 
     @app.get("/healthz")
     async def healthz():
