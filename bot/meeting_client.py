@@ -319,6 +319,8 @@ class PlaywrightZoomClient(MeetingClient):
                 # ceiling; tunable down without a rebuild if the memory
                 # meter on /healthz ever argues for it.
                 "galleryTiles": _gallery_tiles(),
+                # Kill switch for the in-page watcher, no rebuild needed.
+                "seatWatcher": os.environ.get("BOT_SEAT_WATCHER", "on"),
             },
         )
 

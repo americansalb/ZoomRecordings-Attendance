@@ -31,12 +31,16 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-21: SDK 6.2.0, 640x360 gallery, in-page seat watcher';
+const PAGE_BUILD = 'capture-22: SDK 6.2.0, seat watcher loads only when a camera is on';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
 // 50 person room is two alternating pages by Zoom's rules, not ours.
 let galleryTilesWanted = 25;
+// Seat watcher switch (BOT_SEAT_WATCHER, default on) and its live phase,
+// so diagnostics can say exactly where it is instead of leaving a blank.
+let seatWatcherEnabled = true;
+let watcherPhase = 'not started';
 
 let client = null;
 let selfUserId = null;
@@ -294,6 +298,7 @@ async function ensureClient() {
 window.zoomJoin = async (cfg) => {
   const wanted = parseInt(cfg.galleryTiles, 10);
   if (Number.isFinite(wanted)) galleryTilesWanted = Math.max(4, Math.min(25, wanted));
+  seatWatcherEnabled = !/^(0|off|false|no)$/i.test(String(cfg.seatWatcher || 'on'));
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -479,10 +484,12 @@ window.zoomDiagnostics = async () => {
     error: null,
   };
   if (!client) { out.error = 'no client'; return out; }
-  // The seat watcher's live report: whether it is on, which pixel path
-  // proved readable, its achieved checks per second, and per-seat state.
-  try { out.watcher = window.SeatWatcher ? SeatWatcher.state() : { enabled: false }; }
-  catch (e) { out.watcher = { enabled: false, initState: 'state read failed' }; }
+  // The seat watcher's live report: its phase in plain words, which pixel
+  // path proved readable, achieved checks per second, and per-seat state.
+  try {
+    out.watcher = window.SeatWatcher ? SeatWatcher.state() : { enabled: false };
+    out.watcher.phase = watcherPhase;
+  } catch (e) { out.watcher = { enabled: false, phase: watcherPhase, initState: 'state read failed' }; }
   // The camera-state signals received, newest last, and which tiles are
   // actually attached right now. Together these say whether a wrong camera
   // reading is Zoom never telling us, or us mishandling what it said.
@@ -654,26 +661,40 @@ window.zoomVideoInventory = async () => videoSurfaceInventory();
  * fail a join, and its state (including why it is off, and which pixel
  * path proved readable) is reported through diagnostics either way.
  */
+function liveTiles() {
+  const seen = new Map();
+  for (const el of document.querySelectorAll('[node-id]')) {
+    if (el.getAttribute('media-type') === 'preview') continue;
+    const id = el.getAttribute('node-id');
+    if (!id || id === '0') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 16 || r.height < 16) continue;
+    const area = r.width * r.height;
+    const prev = seen.get(id);
+    if (!prev || area > prev.area) seen.set(id, { id, el, area });
+  }
+  return [...seen.values()];
+}
+
 async function startSeatWatcher() {
   try {
-    if (!window.SeatWatcher) return;
+    if (!window.SeatWatcher) { watcherPhase = 'engine not loaded'; return; }
+    if (!seatWatcherEnabled) { watcherPhase = 'switched off by BOT_SEAT_WATCHER'; return; }
+    // The detector costs real memory the moment it loads, so it must not
+    // load while there is nothing to watch. A meeting with every camera
+    // off, common in tests, pays nothing at all.
+    watcherPhase = 'waiting for a camera';
+    while (joined && liveTiles().length === 0) {
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    if (!joined) { watcherPhase = 'meeting ended before any camera came on'; return; }
+    watcherPhase = 'loading detector';
     const ok = await SeatWatcher.init('/static/vendor/mediapipe/');
-    if (!ok) return;
-    SeatWatcher.start(() => {
-      const seen = new Map();
-      for (const el of document.querySelectorAll('[node-id]')) {
-        if (el.getAttribute('media-type') === 'preview') continue;
-        const id = el.getAttribute('node-id');
-        if (!id || id === '0') continue;
-        const r = el.getBoundingClientRect();
-        if (r.width < 16 || r.height < 16) continue;
-        const area = r.width * r.height;
-        const prev = seen.get(id);
-        if (!prev || area > prev.area) seen.set(id, { id, el, area });
-      }
-      return [...seen.values()];
-    });
+    if (!ok) { watcherPhase = 'detector failed to load'; return; }
+    watcherPhase = 'running';
+    SeatWatcher.start(liveTiles);
   } catch (e) {
+    watcherPhase = 'failed: ' + String(e && e.message || e).slice(0, 120);
     console.error('seat watcher failed to start', e);
   }
 }
