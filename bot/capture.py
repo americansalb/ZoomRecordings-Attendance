@@ -79,6 +79,9 @@ class CaptureLoop:
     MEM_HARD_LIMIT = 0.92
     MEM_RESUME_BELOW = 0.70
     WATCHDOG_SECONDS = 2
+
+    # A watcher reading older than this is not evidence about right now.
+    WATCHER_FRESH_MS = 5000
     MEM_CURRENT_PATHS = ("/sys/fs/cgroup/memory.current",
                          "/sys/fs/cgroup/memory/memory.usage_in_bytes")
     MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
@@ -224,6 +227,29 @@ class CaptureLoop:
         folder = f"LiveTutor {ctx.session_label}".strip()
         captured_at = snapshot.at or time.time()
 
+        # The in-page watcher checks every rendered seat about once a second.
+        # When it has a fresh reading for someone, that reading IS their face
+        # result this sweep, and no screenshot is taken for them: full
+        # coverage at watcher speed. Anyone it cannot see (tiles unreadable,
+        # watcher off, other gallery page) falls back to the screenshot
+        # rotation below, so the worst case is exactly the old behaviour.
+        wusers = {}
+        try:
+            wstate = await self.client.watcher_state()
+            if wstate and wstate.get("running"):
+                wusers = wstate.get("users") or {}
+        except Exception:
+            wusers = {}
+        now_ms = time.time() * 1000
+
+        def watcher_face(uid) -> Optional[bool]:
+            s = wusers.get(str(uid))
+            if not s or not s.get("readable"):
+                return None
+            if now_ms - (s.get("lastCheckedAt") or 0) > self.WATCHER_FRESH_MS:
+                return None
+            return bool(s.get("facePresent"))
+
         # Who is eligible for a face check this sweep. With the cap, a room
         # of thirty cameras costs the same per sweep as a room of four; the
         # cursor walks the list so nobody is starved across sweeps.
@@ -236,7 +262,9 @@ class CaptureLoop:
             if p is not None and p.is_hold:
                 continue
             if (bool(p.video_on) if p else bool(row.video_on)):
-                eligible.append(str(row.user_id))
+                # Covered by the watcher means no screenshot turn needed.
+                if watcher_face(row.user_id) is None:
+                    eligible.append(str(row.user_id))
         if len(eligible) <= self.FACE_CHECKS_PER_SWEEP:
             face_turn = set(eligible)
         else:
@@ -275,8 +303,9 @@ class CaptureLoop:
             is_host = bool(p.is_host) if p else False
             is_cohost = bool(p.is_co_host) if p else False
 
+            wface = watcher_face(row.user_id) if video_on else None
             data: Optional[bytes] = None
-            if video_on and str(row.user_id) in face_turn:
+            if video_on and wface is None and str(row.user_id) in face_turn:
                 try:
                     data = await self.client.capture_user(row.user_id)
                 except Exception as e:
@@ -293,8 +322,8 @@ class CaptureLoop:
             # report could show 0 of 27 checks failing when no check ever ran.
             # Per-user frames are unavailable on this SDK, so today this is
             # always None; it must stay honest if that ever changes.
-            face: Optional[bool] = None
-            if data:
+            face: Optional[bool] = wface
+            if wface is None and data:
                 face = False
                 # OpenCV decode + Haar cascade is CPU-bound and was running
                 # inline on the event loop, stalling chat and the other
@@ -329,7 +358,7 @@ class CaptureLoop:
                 "video_on_seconds": row.video_on_seconds,
                 "observed_seconds": row.observed_seconds,
                 "face_present": face,
-                "face_checked": data is not None,
+                "face_checked": (data is not None) or (wface is not None),
                 "is_host": is_host,
                 "is_cohost": is_cohost,
             }

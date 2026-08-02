@@ -77,6 +77,10 @@ class PresenceSnapshot:
 
 
 class MeetingClient(ABC):
+    async def watcher_state(self) -> Optional[dict]:
+        """Live seat watcher report, when the client has one. None means
+        no watcher, and the sweep falls back to screenshot capture."""
+        return None
     on_chat: Optional[ChatHandler] = None
     on_lifecycle: Optional[LifecycleHandler] = None
 
@@ -421,6 +425,15 @@ class PlaywrightZoomClient(MeetingClient):
                 await self._page.evaluate("""async () => await window.zoomUnmarkTile()""")
             except Exception:
                 pass
+
+    async def watcher_state(self) -> Optional[dict]:
+        if not self._page:
+            return None
+        try:
+            return await self._page.evaluate(
+                """async () => await window.zoomWatcherState()""") or None
+        except Exception:
+            return None
 
     async def gallery_advance(self) -> dict:
         """Step the SDK's gallery to its next page, wrapping at the end.

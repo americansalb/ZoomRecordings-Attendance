@@ -553,6 +553,50 @@ def test_watchdog_escalation():
     print("  watchdog escalation OK")
 
 
+async def _watcher_feeds_sweep():
+    import time as _t
+
+    class WatchingClient(FakeMeetingClient):
+        def __init__(self, wusers, **kw):
+            super().__init__(**kw)
+            self.wusers = wusers
+            self.captured = []
+
+        async def watcher_state(self):
+            return {"running": True, "users": self.wusers}
+
+        async def capture_user(self, user_id):
+            self.captured.append(str(user_id))
+            return await super().capture_user(user_id)
+
+    parts = [Participant("1", "Maria Gomez", video_on=True),
+             Participant("2", "Sam Lee", video_on=True)]
+    now_ms = _t.time() * 1000
+    # Maria has a fresh in-page reading; Sam's is stale, so he must fall
+    # back to the screenshot path.
+    wusers = {
+        "1": {"readable": True, "facePresent": True, "lastCheckedAt": now_ms},
+        "2": {"readable": True, "facePresent": True, "lastCheckedAt": now_ms - 60_000},
+    }
+    client = WatchingClient(wusers, participants=parts, frames={"2": b"F"}, self_id="99")
+    loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                       store_images=False, face_detector=lambda d: False)
+    ctx = CaptureContext(runtime_id="r", session_ref="5", meeting_id="m",
+                         session_label="5", bot_name="AALB Assistant")
+    rows = {r["participant_id"]: r for r in await loop.run_once(ctx)}
+
+    assert rows["1"]["face_present"] is True and rows["1"]["face_checked"] is True, \
+        "a fresh watcher reading is the face result"
+    assert "1" not in client.captured, "watcher coverage takes no screenshot"
+    assert "2" in client.captured, "a stale reading falls back to the screenshot path"
+    assert rows["2"]["face_present"] is False, "fallback still runs the detector"
+
+
+def test_watcher_feeds_sweep():
+    asyncio.run(_watcher_feeds_sweep())
+    print("  watcher feeds the sweep OK")
+
+
 def run():
     test_signature()
     test_capture()
@@ -566,6 +610,7 @@ def run():
     test_send_dedupe()
     test_memory_valve()
     test_watchdog_escalation()
+    test_watcher_feeds_sweep()
     print("BOT TESTS PASSED")
 
 
