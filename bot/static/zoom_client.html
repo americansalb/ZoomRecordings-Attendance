@@ -38,6 +38,15 @@
     <script src="/static/vendor/lib/vendor/redux-thunk.min.js"></script>
     <script src="/static/vendor/lib/vendor/lodash.min.js"></script>
     <script src="/static/vendor/zoom-meeting-embedded-ES5.min.js"></script>
+    <!--
+      In-page face watching. MediaPipe face detection is vendored like the
+      SDK (see Dockerfile) so every seat on screen can be checked about
+      once a second inside this browser, instead of one screenshot at a
+      time through Python. If these files are absent the watcher reports
+      itself disabled and the screenshot pipeline carries on unchanged.
+    -->
+    <script src="/static/vendor/mediapipe/face_detection.js"></script>
+    <script src="/static/watcher.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
       /* This box, with viewSizes in the SDK init, IS the video decode

@@ -34,6 +34,29 @@ COPY bot/ ./bot/
 # them ("Messages can't be synced to this meeting chat"), which made every
 # direct message silently vanish on the receiving device. The page's method
 # surface was runtime-verified identical on 3.13.2 and 6.2.0.
+# MediaPipe face detection, vendored the same way for the same reasons.
+# It powers the in-page seat watcher: detection runs inside the browser
+# that is already decoding the video, so every rendered seat is checked
+# about once a second, instead of one screenshot at a time via Python.
+# The short-range model is built for webcam-distance faces.
+ARG MEDIAPIPE_FD_VERSION=0.4.1646425229
+RUN set -eux; \
+    mkdir -p /tmp/mpfd bot/static/vendor/mediapipe; \
+    curl -fsSL "https://registry.npmjs.org/@mediapipe/face_detection/-/face_detection-${MEDIAPIPE_FD_VERSION}.tgz" \
+      -o /tmp/mpfd.tgz; \
+    tar -xzf /tmp/mpfd.tgz -C /tmp/mpfd; \
+    cp /tmp/mpfd/package/face_detection.js \
+       /tmp/mpfd/package/face_detection_short.binarypb \
+       /tmp/mpfd/package/face_detection_short_range.tflite \
+       /tmp/mpfd/package/face_detection_solution_simd_wasm_bin.js \
+       /tmp/mpfd/package/face_detection_solution_simd_wasm_bin.wasm \
+       /tmp/mpfd/package/face_detection_solution_simd_wasm_bin.data \
+       /tmp/mpfd/package/face_detection_solution_wasm_bin.js \
+       /tmp/mpfd/package/face_detection_solution_wasm_bin.wasm \
+       bot/static/vendor/mediapipe/; \
+    rm -rf /tmp/mpfd /tmp/mpfd.tgz; \
+    test -f bot/static/vendor/mediapipe/face_detection.js
+
 ARG ZOOM_SDK_VERSION=6.2.0
 RUN set -eux; \
     mkdir -p /tmp/zsdk bot/static/vendor; \

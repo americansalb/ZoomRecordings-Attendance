@@ -23,12 +23,21 @@ video_on from Zoom's per-user state remains authoritative for attendance.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _gallery_tiles() -> int:
+    """Tiles per gallery page, from BOT_GALLERY_TILES, clamped 4 to 25."""
+    try:
+        return max(4, min(25, int(os.environ.get("BOT_GALLERY_TILES", "25") or 25)))
+    except ValueError:
+        return 25
 
 ChatHandler = Callable[[dict], Awaitable[None]]
 LifecycleHandler = Callable[[str, Optional[str]], Awaitable[None]]
@@ -306,6 +315,10 @@ class PlaywrightZoomClient(MeetingClient):
                 "userName": display_name,
                 # Bearer credential: never log this.
                 "zak": zak or None,
+                # Tiles per gallery page. 25 is Zoom's own per-participant
+                # ceiling; tunable down without a rebuild if the memory
+                # meter on /healthz ever argues for it.
+                "galleryTiles": _gallery_tiles(),
             },
         )
 

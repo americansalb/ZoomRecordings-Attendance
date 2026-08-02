@@ -31,7 +31,12 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-20: SDK 6.2.0, 640x360 gallery, 4 tiles per page';
+const PAGE_BUILD = 'capture-21: SDK 6.2.0, 640x360 gallery, in-page seat watcher';
+
+// How many tiles the gallery renders per page. Set by Python at join from
+// BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
+// 50 person room is two alternating pages by Zoom's rules, not ours.
+let galleryTilesWanted = 25;
 
 let client = null;
 let selfUserId = null;
@@ -178,12 +183,13 @@ async function ensureClient() {
           },
         },
       },
-      // Four, not the SDK ceiling of 25. This is the handful at a time:
-      // the SDK decodes only the tiles on the visible gallery page, so a
-      // 25 camera class costs the same as a 4 camera one, and the bot
-      // steps the gallery each sweep so every page gets its turn. Four
-      // tiles in a 640x360 gallery is 320x180 each, plenty for a face.
-      maximumVideosInGalleryView: 4,
+      // The SDK decodes only the tiles on the visible page, and at a
+      // 640x360 gallery a full 25 tile page is 128x72 per tile: Zoom
+      // sends its smallest stream for each, so even a full page is a
+      // modest decode. The count is configurable from the outside
+      // (BOT_GALLERY_TILES) so it can be stepped down without a rebuild
+      // if the memory meter on /healthz ever disagrees.
+      maximumVideosInGalleryView: galleryTilesWanted,
     });
   } catch (e) {
     client = null;               // let a retry re-init rather than reusing a dead client
@@ -286,6 +292,8 @@ async function ensureClient() {
 }
 
 window.zoomJoin = async (cfg) => {
+  const wanted = parseInt(cfg.galleryTiles, 10);
+  if (Number.isFinite(wanted)) galleryTilesWanted = Math.max(4, Math.min(25, wanted));
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -354,6 +362,7 @@ window.zoomJoin = async (cfg) => {
   }
   clearInterval(waitingWatch);
   joined = true;
+  startSeatWatcher();
 
   // Everything past this point is bookkeeping. It used to run unguarded, and
   // one bad call here (getMediaStream, which this SDK does not have) rejected
@@ -470,6 +479,10 @@ window.zoomDiagnostics = async () => {
     error: null,
   };
   if (!client) { out.error = 'no client'; return out; }
+  // The seat watcher's live report: whether it is on, which pixel path
+  // proved readable, its achieved checks per second, and per-seat state.
+  try { out.watcher = window.SeatWatcher ? SeatWatcher.state() : { enabled: false }; }
+  catch (e) { out.watcher = { enabled: false, initState: 'state read failed' }; }
   // The camera-state signals received, newest last, and which tiles are
   // actually attached right now. Together these say whether a wrong camera
   // reading is Zoom never telling us, or us mishandling what it said.
@@ -634,6 +647,39 @@ function videoSurfaceInventory() {
 }
 
 window.zoomVideoInventory = async () => videoSurfaceInventory();
+
+/*
+ * Start the continuous seat watcher over Zoom's own rendered tiles.
+ * Fire-and-forget from the join: the watcher failing to start must never
+ * fail a join, and its state (including why it is off, and which pixel
+ * path proved readable) is reported through diagnostics either way.
+ */
+async function startSeatWatcher() {
+  try {
+    if (!window.SeatWatcher) return;
+    const ok = await SeatWatcher.init('/static/vendor/mediapipe/');
+    if (!ok) return;
+    SeatWatcher.start(() => {
+      const seen = new Map();
+      for (const el of document.querySelectorAll('[node-id]')) {
+        if (el.getAttribute('media-type') === 'preview') continue;
+        const id = el.getAttribute('node-id');
+        if (!id || id === '0') continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 16 || r.height < 16) continue;
+        const area = r.width * r.height;
+        const prev = seen.get(id);
+        if (!prev || area > prev.area) seen.set(id, { id, el, area });
+      }
+      return [...seen.values()];
+    });
+  } catch (e) {
+    console.error('seat watcher failed to start', e);
+  }
+}
+
+window.zoomWatcherState = async () =>
+  (window.SeatWatcher ? SeatWatcher.state() : { enabled: false, initState: 'not loaded' });
 
 window.zoomMarkUserTile = async (userId) => {
   for (const el of document.querySelectorAll('[data-cap-target]')) {
