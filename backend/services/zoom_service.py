@@ -188,12 +188,31 @@ class ZoomService:
                 logger.error(f"Zoom token request error for {account.name}: {str(e)}")
                 raise
 
+    # Endpoints proven to need scopes this app does not have (Zoom code
+    # 4711). Retrying them is pointless by definition: without the scope
+    # every call fails identically, and the minute-by-minute live monitor
+    # was burning roughly 19,000 doomed requests a day and flooding the
+    # logs with the same 13 errors per cycle. First 4711 per endpoint
+    # shape disables it for the life of the process, with one line that
+    # says how to re-enable: grant the scope to the Zoom app.
+    _scope_blocked: set = set()
+
+    @staticmethod
+    def _endpoint_shape(method: str, endpoint: str) -> str:
+        parts = [p if len(p) < 12 and p.isalpha() else "{id}"
+                 for p in endpoint.strip("/").split("/")]
+        return f"{method} /" + "/".join(parts)
+
     async def _make_request(self, method: str, endpoint: str, account: ZoomAccount, **kwargs) -> dict:
         """Make an authenticated request to Zoom API"""
+        shape = self._endpoint_shape(method, endpoint)
+        if shape in self._scope_blocked:
+            raise PermissionError(f"skipped: the Zoom app lacks the scope for {shape}")
+
         token = await self._get_access_token(account)
 
         url = f"{self.BASE_URL}{endpoint}"
-        logger.info(f"Zoom API request ({account.name}): {method} {url}")
+        logger.debug(f"Zoom API request ({account.name}): {method} {url}")
 
         async with httpx.AsyncClient() as client:
             try:
@@ -209,7 +228,14 @@ class ZoomService:
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"Zoom API error ({account.name}): {method} {endpoint} -> {e.response.status_code}: {e.response.text}")
+                if e.response.status_code == 400 and '"code":4711' in e.response.text:
+                    self._scope_blocked.add(shape)
+                    logger.warning(
+                        f"Zoom scope missing for {shape}; this call is now disabled "
+                        f"until the scope is granted to the Zoom app and the service "
+                        f"restarts. Zoom said: {e.response.text}")
+                else:
+                    logger.error(f"Zoom API error ({account.name}): {method} {endpoint} -> {e.response.status_code}: {e.response.text}")
                 raise
             except Exception as e:
                 logger.error(f"Zoom API request failed ({account.name}): {method} {endpoint} -> {str(e)}")

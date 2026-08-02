@@ -400,7 +400,13 @@ class PlaywrightZoomClient(MeetingClient):
             if not mark.get("ok"):
                 rendered = mark.get("rendered")
                 if rendered is not None:
-                    logger.debug("no tile for %s; rendered tiles: %s", user_id, rendered)
+                    # INFO on purpose: "face never checked" was undiagnosable
+                    # from the Render logs the owner actually reads, because
+                    # the reason only lived at debug level and in a console
+                    # panel nobody opens. Throttled naturally by the per-user
+                    # screenshot gap.
+                    logger.info("face capture: no tile rendered for %s; rendered right now: %s",
+                                user_id, rendered or "none")
                 note("no tile rendered for this user",
                      renderedTiles=(rendered if rendered is not None else []))
                 return None

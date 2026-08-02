@@ -112,7 +112,10 @@ class LiveMonitorService:
                     live_sessions.append(session)
                     seen_meeting_ids.add(session.meeting_id)
                     self._active_sessions[session.meeting_id] = session
-            logger.info(f"[LIVE] Dashboard API returned {len(dashboard_sessions)} meetings")
+            if dashboard_sessions:
+                logger.info(f"[LIVE] Dashboard API returned {len(dashboard_sessions)} meetings")
+        except PermissionError:
+            pass   # scope known missing; already announced once at disable time
         except Exception as e:
             logger.warning(f"[LIVE] Dashboard API failed (may require Business plan): {e}")
 
@@ -124,11 +127,15 @@ class LiveMonitorService:
                     live_sessions.append(session)
                     seen_meeting_ids.add(session.meeting_id)
                     self._active_sessions[session.meeting_id] = session
-            logger.info(f"[LIVE] User meetings API returned {len(user_sessions)} additional meetings")
+            if user_sessions:
+                logger.info(f"[LIVE] User meetings API returned {len(user_sessions)} additional meetings")
+        except PermissionError:
+            pass
         except Exception as e:
             logger.warning(f"[LIVE] User meetings check failed: {e}")
 
-        logger.info(f"[LIVE] Total active meetings found: {len(live_sessions)}")
+        if live_sessions:
+            logger.info(f"[LIVE] Total active meetings found: {len(live_sessions)}")
         return live_sessions
 
     async def _get_live_from_dashboard(self) -> List[LiveSession]:
@@ -156,6 +163,10 @@ class LiveMonitorService:
 
     async def _get_live_from_users(self) -> List[LiveSession]:
         """Get live meetings by checking each user's meetings."""
+        # Once the per-user meetings scope is known missing, listing all
+        # users every minute just to skip each of them is pure noise.
+        if "GET /users/{id}/meetings" in getattr(self.zoom_service, "_scope_blocked", set()):
+            raise PermissionError("user meetings scope missing")
         sessions = []
 
         for account in self.zoom_service.accounts.values():
