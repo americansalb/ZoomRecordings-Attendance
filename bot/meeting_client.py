@@ -435,6 +435,17 @@ class PlaywrightZoomClient(MeetingClient):
         except Exception:
             return None
 
+    async def watcher_arm(self) -> Optional[dict]:
+        """Ask the page to load and start the detector. Idempotent; the
+        caller holds the memory verdict, this only holds the machinery."""
+        if not self._page:
+            return None
+        try:
+            return await self._page.evaluate(
+                """async () => await window.zoomWatcherArm()""") or None
+        except Exception:
+            return None
+
     async def gallery_advance(self) -> dict:
         """Step the SDK's gallery to its next page, wrapping at the end.
 

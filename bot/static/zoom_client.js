@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-22: SDK 6.2.0, seat watcher loads only when a camera is on';
+const PAGE_BUILD = 'capture-27: SDK 6.2.0, detector armed only with memory headroom';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -676,28 +676,34 @@ function liveTiles() {
   return [...seen.values()];
 }
 
-async function startSeatWatcher() {
+function startSeatWatcher() {
+  // Arming moved to the Python side on purpose: loading the detector is a
+  // sudden bite of memory, and only Python can read the container's real
+  // meter at the moment cameras appear. The page just reports its phase
+  // and waits to be armed. A camera coming on at 3:17 followed by the
+  // container dying at 3:17 is the failure this closes.
+  if (!window.SeatWatcher) { watcherPhase = 'engine not loaded'; return; }
+  if (!seatWatcherEnabled) { watcherPhase = 'switched off by BOT_SEAT_WATCHER'; return; }
+  watcherPhase = 'waiting: armed only when a camera is on and memory has headroom';
+}
+
+window.zoomWatcherArm = async () => {
   try {
-    if (!window.SeatWatcher) { watcherPhase = 'engine not loaded'; return; }
-    if (!seatWatcherEnabled) { watcherPhase = 'switched off by BOT_SEAT_WATCHER'; return; }
-    // The detector costs real memory the moment it loads, so it must not
-    // load while there is nothing to watch. A meeting with every camera
-    // off, common in tests, pays nothing at all.
-    watcherPhase = 'waiting for a camera';
-    while (joined && liveTiles().length === 0) {
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-    if (!joined) { watcherPhase = 'meeting ended before any camera came on'; return; }
+    if (!window.SeatWatcher) return { ok: false, phase: 'engine not loaded' };
+    if (!seatWatcherEnabled) return { ok: false, phase: watcherPhase };
+    if (watcherPhase === 'running') return { ok: true, phase: 'running' };
+    if (liveTiles().length === 0) return { ok: false, phase: watcherPhase };
     watcherPhase = 'loading detector';
     const ok = await SeatWatcher.init('/static/vendor/mediapipe/');
-    if (!ok) { watcherPhase = 'detector failed to load'; return; }
+    if (!ok) { watcherPhase = 'detector failed to load'; return { ok: false, phase: watcherPhase }; }
     watcherPhase = 'running';
     SeatWatcher.start(liveTiles);
+    return { ok: true, phase: watcherPhase };
   } catch (e) {
     watcherPhase = 'failed: ' + String(e && e.message || e).slice(0, 120);
-    console.error('seat watcher failed to start', e);
+    return { ok: false, phase: watcherPhase };
   }
-}
+};
 
 window.zoomWatcherState = async () =>
   (window.SeatWatcher ? SeatWatcher.state() : { enabled: false, initState: 'not loaded' });

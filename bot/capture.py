@@ -95,6 +95,12 @@ class CaptureLoop:
 
     # A watcher reading older than this is not evidence about right now.
     WATCHER_FRESH_MS = 5000
+
+    # The detector is only loaded while the container is at most this full.
+    # Loading it is a sudden bite of memory, and the last crash landed at
+    # the exact moment a first camera made it load. Above this line, faces
+    # ride the screenshot fallback and the container stays alive.
+    WATCHER_ARM_MAX_MEM = 0.60
     MEM_CURRENT_PATHS = ("/sys/fs/cgroup/memory.current",
                          "/sys/fs/cgroup/memory/memory.usage_in_bytes")
     MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
@@ -254,6 +260,16 @@ class CaptureLoop:
             wstate = await self.client.watcher_state()
             if wstate and wstate.get("running"):
                 wusers = wstate.get("users") or {}
+            elif (wstate is not None and not self._throttled
+                    and self.memory_fraction() < self.WATCHER_ARM_MAX_MEM):
+                # Cameras may be on while the detector is not loaded yet.
+                # Arm it only with real headroom, measured now, not at join.
+                arm = getattr(self.client, "watcher_arm", None)
+                if arm is not None:
+                    armed = await arm()
+                    if armed and armed.get("ok"):
+                        logger.info("[CAPTURE] seat watcher armed (memory at %d%%)",
+                                    int(self.memory_fraction() * 100))
         except Exception:
             wusers = {}
         now_ms = time.time() * 1000
