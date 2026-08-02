@@ -55,10 +55,23 @@ def _safe(name: str) -> str:
 
 
 class CaptureLoop:
-    # Floor on the cadence. A tick is two cheap page reads plus, when frames
-    # exist, a face check per student, so it is not free -- but it is far
-    # lighter than it was when every tick tried to render video per user.
-    MIN_INTERVAL_SECONDS = 10
+    # Floor on the cadence: one second, the owner's requirement. A tick is
+    # two cheap page reads plus the watcher's already-computed face states;
+    # the expensive parts are throttled independently below (screenshots by
+    # POLAROID_MIN_GAP_SECONDS, paging by its own trigger), so a one second
+    # notebook does not mean one second screenshot storms.
+    MIN_INTERVAL_SECONDS = 1
+
+    # Fallback screenshots for people the watcher cannot see are never
+    # taken more often than this per person, whatever the observation
+    # pace. Screenshots are the one genuinely heavy step left in a sweep.
+    POLAROID_MIN_GAP_SECONDS = 10
+
+    # Gallery pages are never flipped faster than this. A freshly shown
+    # tile needs a second or two before it displays real video, so
+    # flipping every sweep at a one second pace would photograph loading
+    # tiles forever and churn stream subscriptions.
+    PAGE_FLIP_MIN_GAP_SECONDS = 10
 
     # Face checks are the expensive part of a sweep: each one renders a
     # tile, screenshots it and runs the detector, while presence and camera
@@ -114,6 +127,9 @@ class CaptureLoop:
         # Rotation cursor for the per-sweep face check cap.
         self._face_rr = 0
         self._throttled = False
+        # user id -> monotonic time of their last fallback screenshot.
+        self._last_polaroid: dict = {}
+        self._last_advance = 0.0
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -255,6 +271,7 @@ class CaptureLoop:
         # cursor walks the list so nobody is starved across sweeps.
         starved = False
         eligible = []
+        fallback_needed = 0
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
                 continue
@@ -262,9 +279,15 @@ class CaptureLoop:
             if p is not None and p.is_hold:
                 continue
             if (bool(p.video_on) if p else bool(row.video_on)):
-                # Covered by the watcher means no screenshot turn needed.
-                if watcher_face(row.user_id) is None:
-                    eligible.append(str(row.user_id))
+                # Covered by the watcher means no screenshot turn needed,
+                # and nobody gets a fallback screenshot more often than
+                # POLAROID_MIN_GAP_SECONDS regardless of the notebook pace.
+                uid = str(row.user_id)
+                if watcher_face(uid) is None:
+                    fallback_needed += 1
+                    if (time.monotonic() - self._last_polaroid.get(uid, 0.0)
+                            >= self.POLAROID_MIN_GAP_SECONDS):
+                        eligible.append(uid)
         if len(eligible) <= self.FACE_CHECKS_PER_SWEEP:
             face_turn = set(eligible)
         else:
@@ -306,6 +329,7 @@ class CaptureLoop:
             wface = watcher_face(row.user_id) if video_on else None
             data: Optional[bytes] = None
             if video_on and wface is None and str(row.user_id) in face_turn:
+                self._last_polaroid[str(row.user_id)] = time.monotonic()
                 try:
                     data = await self.client.capture_user(row.user_id)
                 except Exception as e:
@@ -379,7 +403,13 @@ class CaptureLoop:
                 "is_host": is_host,
                 "is_cohost": is_cohost,
             }
-            await self.backend.post_screenshot(manifest)
+            # The manifest exists to account for captured pixels. At a one
+            # second pace with the watcher carrying faces, most ticks have
+            # no pixels, and posting an empty manifest per person per
+            # second would double the wire traffic for nothing. The
+            # attendance row above carries presence, camera, and face.
+            if data is not None or stored:
+                await self.backend.post_screenshot(manifest)
             rows.append(attendance)
 
         # The other half of the "handful at a time" design: the browser only
@@ -388,11 +418,17 @@ class CaptureLoop:
         # holds, step the gallery so the next page gets its turn. One step
         # per sweep; the capture rotation and this rotation mesh over a few
         # sweeps to cover everyone at a constant memory cost.
-        # Not while throttled: turning a fresh page spins up fresh decoders,
-        # the opposite of what memory pressure needs.
-        if (starved or len(eligible) > self.FACE_CHECKS_PER_SWEEP) and not self._throttled:
+        # Flip the gallery when people still need coverage the current page
+        # cannot give them. Not while throttled (fresh pages spin up fresh
+        # decoders, the opposite of what memory pressure needs) and never
+        # faster than the dwell gap, or a fast notebook pace would flip to
+        # tiles still loading and photograph nothing forever.
+        if ((starved or fallback_needed > self.FACE_CHECKS_PER_SWEEP)
+                and not self._throttled
+                and time.monotonic() - self._last_advance >= self.PAGE_FLIP_MIN_GAP_SECONDS):
             advance = getattr(self.client, "gallery_advance", None)
             if advance is not None:
+                self._last_advance = time.monotonic()
                 try:
                     await advance()
                 except Exception as e:

@@ -90,7 +90,10 @@ async def _capture_pipeline():
     # claim we looked and saw nobody, and downstream counts checks by
     # "face_present is not null": sending False invents a check that never ran.
     assert sam["face_present"] is None and sam["face_checked"] is False
-    assert len(backend.shots) == 2
+    # Manifests account for captured pixels; Sam had no frame, so no
+    # manifest. His attendance row above is the record of his tick.
+    assert len(backend.shots) == 1
+    assert backend.shots[0]["participant_name"] == "Maria Gomez"
     # attendance is reported alongside the manifest, with durations
     assert len(backend.attendance) == 2
     att = {r["participant_name"]: r for r in backend.attendance}
@@ -106,7 +109,7 @@ async def _capture_pipeline():
     await loop2.run_once(ctx)
     m2 = {r["participant_name"]: r for r in backend2.shots}
     assert m2["Maria Gomez"]["stored"] is True and m2["Maria Gomez"]["image_url"].startswith("https://drive/")
-    assert m2["Sam Lee"]["stored"] is False, "camera-off student isn't uploaded"
+    assert "Sam Lee" not in m2, "no frame means no manifest, and nothing uploaded"
     print("  capture pipeline OK")
 
 
@@ -466,9 +469,13 @@ async def _face_rotation():
     await loop.run_once(ctx)
     assert set(client.captured) == {str(i) for i in range(1, 7)}, \
         "the rotation reaches everyone across sweeps"
-    # More cameras than one sweep's cap: the gallery steps each sweep so
-    # every page of tiles gets its turn at a constant decode cost.
-    assert client.advances == 2, "gallery advances once per sweep when over the cap"
+    # More cameras than one sweep's cap flips the gallery, but never
+    # faster than the dwell gap: two back-to-back sweeps flip once.
+    assert client.advances == 1, "back-to-back sweeps stay on the page for the dwell gap"
+    loop._last_advance = 0.0
+    loop._last_polaroid.clear()
+    await loop.run_once(ctx)
+    assert client.advances == 2, "after the dwell gap the gallery flips again"
 
 
 def test_face_rotation():
