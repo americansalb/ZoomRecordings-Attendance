@@ -488,6 +488,134 @@ class TestEveryViewIsNamed(unittest.TestCase):
             self.assertEqual(v["drive_folders"][0], "Unsorted")
 
 
+def mp4(file_id: str, recording_type: str, size: int = 1_000, url: str = "u"):
+    return {"id": file_id, "file_type": "MP4", "file_size": size,
+            "download_url": url, "recording_type": recording_type}
+
+
+class TestWhichFilesZoomActuallySent(unittest.TestCase):
+    """
+    Reading Zoom's file list.
+
+    The bug this class exists for: a class recorded with closed captions comes
+    back as `shared_screen_with_speaker_view(CC)`. Comparing the raw strings
+    missed it, so the publish screen offered the gallery files only and a class
+    went up with no shared screen in it — with nothing on the screen to say the
+    screen share was sitting in Zoom the whole time.
+    """
+
+    def test_closed_caption_variant_is_the_same_screen_plus_speaker(self):
+        rec = recording(recording_files=[
+            mp4("f1", "shared_screen_with_speaker_view(CC)", 1_800_000_000),
+            mp4("f2", "shared_screen_with_gallery_view", 1_100_000_000),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertIn("speaker", [v["key"] for v in plan["available_views"]])
+        self.assertEqual([o["key"] for o in plan["outputs"]], ["speaker"])
+        self.assertEqual(plan["outputs"][0]["file_id"], "f1")
+        self.assertEqual(plan["view_note"], "")
+
+    def test_decorated_names_match_however_zoom_spells_them(self):
+        for raw in ("shared_screen_with_speaker_view(CC)",
+                    "shared_screen_with_speaker_view (CC)",
+                    "shared_screen_with_speaker_view(cc)",
+                    "SHARED_SCREEN_WITH_SPEAKER_VIEW"):
+            with self.subTest(recording_type=raw):
+                plan = plan_recording(
+                    recording(recording_files=[mp4("f1", raw)]),
+                    config_with(night_class()),
+                )
+                self.assertEqual([o["key"] for o in plan["outputs"]], ["speaker"])
+
+    def test_zooms_own_type_survives_a_replan(self):
+        # The review screen sends available_views back to /publish/plan as the
+        # file list when the class or day changes. Rewriting the type to our
+        # canonical spelling would work by luck; keeping Zoom's own value is
+        # what makes the round trip exact.
+        rec = recording(recording_files=[mp4("f1", "shared_screen_with_speaker_view(CC)")])
+        first = plan_recording(rec, config_with(night_class()))
+        view = first["available_views"][0]
+        self.assertEqual(view["zoom_type"], "shared_screen_with_speaker_view(CC)")
+
+        replanned = plan_recording(
+            recording(recording_files=[
+                {"id": view["file_id"], "file_type": "MP4", "file_size": view["size_bytes"],
+                 "download_url": view["download_url"], "recording_type": view["zoom_type"]},
+            ]),
+            config_with(night_class()),
+            day_override=6,
+        )
+        self.assertEqual([o["key"] for o in replanned["outputs"]], ["speaker"])
+
+    def test_transcripts_and_chat_logs_are_not_offered_as_videos(self):
+        rec = recording(recording_files=[
+            mp4("f1", "shared_screen_with_speaker_view"),
+            {"id": "t1", "file_type": "TRANSCRIPT", "file_size": 90,
+             "download_url": "u", "recording_type": "audio_transcript"},
+            {"id": "c1", "file_type": "CHAT", "file_size": 40,
+             "download_url": "u", "recording_type": "chat_file"},
+            {"id": "l1", "file_type": "TIMELINE", "file_size": 12,
+             "download_url": "u", "recording_type": "timeline"},
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual([v["key"] for v in plan["available_views"]], ["speaker"])
+
+    def test_a_video_type_we_have_no_name_for_is_still_sendable(self):
+        """Zoom renaming a type must never make a class recording invisible."""
+        rec = recording(recording_files=[mp4("x1", "brand_new_zoom_layout", 500)])
+        plan = plan_recording(rec, config_with(night_class()))
+        view = plan["available_views"][0]
+        self.assertEqual(view["name"], "Brand New Zoom Layout")
+        self.assertIn("brand_new_zoom_layout", view["description"])
+        self.assertTrue(view["filename"].endswith(".mp4"))
+        self.assertEqual([o["key"] for o in plan["outputs"]], [view["key"]])
+        self.assertTrue(plan["can_send"])
+
+    def test_an_unnamed_type_never_outranks_screen_plus_speaker(self):
+        rec = recording(recording_files=[
+            mp4("x1", "brand_new_zoom_layout", 9_000),
+            mp4("f1", "shared_screen_with_speaker_view", 100),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["available_views"][0]["key"], "speaker")
+        self.assertEqual([o["key"] for o in plan["outputs"]], ["speaker"])
+
+    def test_a_stopped_and_restarted_recording_sends_the_longest_part(self):
+        rec = recording(recording_files=[
+            mp4("part1", "shared_screen_with_speaker_view", 400_000),
+            mp4("part2", "shared_screen_with_speaker_view", 3_000_000),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        speaker = plan["available_views"][0]
+        self.assertEqual(speaker["file_id"], "part2")
+        self.assertEqual(speaker["part_count"], 2)
+
+    def test_a_file_with_no_download_url_loses_to_one_that_has_it(self):
+        rec = recording(recording_files=[
+            mp4("still-processing", "shared_screen_with_speaker_view", 9_000_000, url=""),
+            mp4("ready", "shared_screen_with_speaker_view", 10),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["available_views"][0]["file_id"], "ready")
+
+    def test_audio_only_still_matches_its_m4a(self):
+        plan = plan_recording(recording(), config_with(night_class()))
+        audio = next(v for v in plan["available_views"] if v["key"] == "audio")
+        self.assertEqual(audio["file_id"], "f3")
+
+    def test_a_missing_view_is_explained_not_silently_swapped(self):
+        """What Catherine hit: gallery published because speaker wasn't there."""
+        rec = recording(recording_files=[mp4("f2", "shared_screen_with_gallery_view")])
+        plan = plan_recording(rec, config_with(night_class(views=["speaker"])))
+        self.assertEqual([o["key"] for o in plan["outputs"]], ["gallery"])
+        self.assertIn("shared screen + active speaker", plan["view_note"])
+        self.assertIn("Zoom", plan["view_note"])
+
+    def test_no_note_when_the_class_got_what_it_asked_for(self):
+        plan = plan_recording(recording(), config_with(night_class(views=["speaker", "gallery"])))
+        self.assertEqual(plan["view_note"], "")
+
+
 class TestFormatTime(unittest.TestCase):
     def test_formats(self):
         self.assertEqual(format_time(0), "0:00:00")

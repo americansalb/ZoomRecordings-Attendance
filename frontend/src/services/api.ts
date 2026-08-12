@@ -576,6 +576,9 @@ export interface PublishOutput {
   folder: string
   filename: string
   drive_folders: string[]
+  // How many files of this type Zoom returned. More than one means the
+  // recording was stopped and restarted mid-class; we send the longest.
+  part_count?: number
 }
 
 export interface PublishTrim {
@@ -619,6 +622,9 @@ export interface PublishPlan {
   trim: PublishTrim
   available_views: PublishOutput[]
   outputs: PublishOutput[]
+  // Set when the class asked for a view Zoom didn't produce, so the screen can
+  // say which one is missing instead of quietly sending something else.
+  view_note?: string
 
   title: string
   course_id: string

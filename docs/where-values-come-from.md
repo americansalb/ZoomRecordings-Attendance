@@ -84,6 +84,25 @@ plain names. Zoom's naming is misleading, so this table is the translation:
 
 Only the types Zoom actually produced for that meeting are offered.
 
+**Zoom does not always spell these the way its own table does.** A recording made
+with closed captions comes back as `shared_screen_with_speaker_view(CC)` — the
+same screen-plus-speaker video under a decorated name. Matching the raw string
+meant that recording appeared to have no screen share at all, and the review
+screen offered only the gallery files. So `services/publish_planner.py ::
+collect_views` matches on the type with the decoration and casing stripped
+(`services/class_config.py :: normalize_zoom_type`), and follows three more rules:
+
+| Situation | What happens |
+| --- | --- |
+| A video type we have no name for | Offered anyway, named from Zoom's own type — never dropped |
+| A transcript, chat log or timeline | Never offered; it isn't a recording of the class |
+| Several files of one type (recording stopped and restarted) | The longest one is sent, and the screen says how many there were |
+| The class asked for a view Zoom didn't record | The next best is preselected **and** the screen names what's missing |
+
+That last one is a Zoom-side setting, not something this tool can fix after the
+fact: the layouts Zoom records are chosen in the hosting account's cloud
+recording settings, before the class runs.
+
 ### 8–9. Filename and title
 
 Tokens available in both patterns: `{session}` `{day}` `{date}` `{view}`

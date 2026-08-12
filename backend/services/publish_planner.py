@@ -23,6 +23,8 @@ from services.class_config import (
     VIEW_TYPES,
     ClassSettings,
     PublishConfig,
+    normalize_zoom_type,
+    view_key_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,6 +165,100 @@ def compute_trim(
     }
 
 
+# Zoom returns transcripts, chat logs and timeline JSON in the same list as the
+# videos. Only these two file types are a recording of the class.
+MEDIA_FILE_TYPES = {"MP4", "M4A"}
+
+# Key prefix for a video whose recording_type we have no name for. It stays
+# sendable rather than being dropped: an unrecognised type is exactly how a
+# class once got published with no shared screen and nothing saying why.
+UNKNOWN_VIEW_PREFIX = "other_"
+
+
+def _describe_unknown(raw_type: str) -> Dict[str, str]:
+    """A name, a folder and an honest description for a type we don't know."""
+    words = re.sub(r"[^a-z0-9]+", " ", (raw_type or "").lower()).strip()
+    label = words.title() if words else "Unnamed video"
+    return {
+        "name": label,
+        "description": (
+            f'Zoom calls this "{raw_type}". We have no plain-English name for it, '
+            f"but it is a video and it can be sent."
+        ),
+        "folder": label,
+    }
+
+
+def collect_views(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Every video Zoom produced for one recording, keyed by our view names.
+
+    Two things this does that comparing `recording_type` strings did not:
+
+      * It matches Zoom's decorated names. A class recorded with closed captions
+        comes back as `shared_screen_with_speaker_view(CC)`, which used to match
+        nothing — the screen share existed and the publish screen said it didn't.
+      * It keeps a video whose type we don't recognise, under a name built from
+        Zoom's own, instead of dropping it. Whatever Zoom calls it next, it stays
+        visible and sendable.
+
+    Ordered as VIEW_TYPES is (the everyday one first), with anything unrecognised
+    after it.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for f in files:
+        file_type = (f.get("file_type") or "").upper()
+        raw_type = (f.get("recording_type") or "").strip()
+        key = view_key_for(raw_type)
+        if key is None:
+            # An unrecognised type is only worth offering if it is plainly a
+            # video: a transcript or a chat log is not the class.
+            if file_type != "MP4":
+                continue
+            key = UNKNOWN_VIEW_PREFIX + (normalize_zoom_type(raw_type) or "video")
+            logger.info(f"[PLAN] Zoom sent a video type we don't name: {raw_type!r}")
+        elif file_type and file_type not in MEDIA_FILE_TYPES:
+            continue
+        grouped.setdefault(key, []).append(f)
+
+    ordered = [k for k in VIEW_TYPES if k in grouped]
+    ordered += sorted(k for k in grouped if k not in VIEW_TYPES)
+
+    available: Dict[str, Dict[str, Any]] = {}
+    for key in ordered:
+        # A recording that was stopped and restarted mid-class comes back as
+        # several files of the same type. Send the longest one that can actually
+        # be downloaded, and count the rest so the screen can say so — taking
+        # whichever Zoom listed first threw part of the class away in silence.
+        matches = sorted(
+            grouped[key],
+            key=lambda f: (bool(f.get("download_url")), f.get("file_size") or 0),
+            reverse=True,
+        )
+        best = matches[0]
+        spec = VIEW_TYPES.get(key) or _describe_unknown(best.get("recording_type", ""))
+        available[key] = {
+            "key": key,
+            "name": spec["name"],
+            "description": spec.get("description", ""),
+            # Zoom's own value, not our canonical one, so the frontend can hand
+            # this exact file back when it asks for a replan.
+            "zoom_type": best.get("recording_type") or spec.get("zoom_type", ""),
+            "folder": spec["folder"],
+            "file_id": best.get("id"),
+            "download_url": best.get("download_url"),
+            "size_bytes": best.get("file_size") or 0,
+            "part_count": len(matches),
+        }
+    return available
+
+
+def _sentence_list(items: List[str]) -> str:
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
 DEFAULT_CLASS_MINUTES = 180        # classes run three hours
 DEFAULT_PAD_BEFORE_MINUTES = 5     # keep five minutes before the start
 DEFAULT_PAD_AFTER_MINUTES = 10     # and ten after the end, where the recording has them
@@ -256,32 +352,34 @@ def plan_recording(
     # real duration once ffprobe has seen the file.
     duration_seconds = float(recording.get("duration") or 0) * 60
 
-    files = recording.get("recording_files") or []
-    available: Dict[str, Dict[str, Any]] = {}
-    for key, spec in VIEW_TYPES.items():
-        match = next((f for f in files if f.get("recording_type") == spec["zoom_type"]), None)
-        if match:
-            available[key] = {
-                "key": key,
-                "name": spec["name"],
-                "description": spec.get("description", ""),
-                "zoom_type": spec["zoom_type"],
-                "file_id": match.get("id"),
-                "download_url": match.get("download_url"),
-                "size_bytes": match.get("file_size") or 0,
-            }
+    available = collect_views(recording.get("recording_files") or [])
 
     # Screen + speaker is what nearly every class sends, so it's the default
     # when the class hasn't said otherwise, and the fallback when what the class
     # asked for isn't among the files Zoom produced. Failing both, preselect
     # whatever there is — an empty selection means a disabled Send button and no
     # explanation of why.
-    wanted = [v for v in (settings.views if settings else [PRIMARY_VIEW]) if v in available]
+    requested = list(settings.views) if settings else [PRIMARY_VIEW]
+    wanted = [v for v in requested if v in available]
     if not wanted:
         if PRIMARY_VIEW in available:
             wanted = [PRIMARY_VIEW]
         elif available:
             wanted = [next(iter(available))]
+
+    # Falling back is fine; falling back without saying so is what left a class
+    # published as gallery-only. Name what's missing and where to go and turn it
+    # on, rather than leaving someone to wonder why the option isn't there.
+    missing_names = [VIEW_TYPES[v]["name"] for v in requested
+                     if v not in available and v in VIEW_TYPES]
+    view_note = ""
+    if available and missing_names:
+        view_note = (
+            f"Zoom didn't produce {_sentence_list(missing_names).lower()} for this "
+            f"recording, so it isn't in the list below. If you expected it, turn that "
+            f"layout on in the cloud recording settings of the Zoom account that hosts "
+            f"this class — it can't be recovered for a class already recorded."
+        )
 
     day_number = day_override
     if day_number is None and settings:
@@ -333,23 +431,22 @@ def plan_recording(
     # Name EVERY available view, not just the ones selected by default —
     # otherwise ticking an extra view in the UI sends a file with no filename
     # and previews a blank destination.
-    for key, view in available.items():
-        spec = VIEW_TYPES[key]
+    for view in available.values():
+        folder = view["folder"]
         if settings:
             filename = _fill(
                 settings.filename_pattern,
-                {**tokens, "view": spec["folder"]},
+                {**tokens, "view": folder},
                 "Session {session} - Day {day} - {date} ({view}).mp4",
             )
         else:
             # No class: keep Zoom's own title so the file is still identifiable,
             # and include the day if one was typed in.
             day_part = f" - Day {day_number}" if day_number is not None else ""
-            filename = f"{safe_filename(topic)}{day_part} - {date_key} ({spec['folder']}).mp4"
+            filename = f"{safe_filename(topic)}{day_part} - {date_key} ({folder}).mp4"
 
-        view["folder"] = spec["folder"]
         view["filename"] = filename
-        view["drive_folders"] = [root_folder, spec["folder"]]
+        view["drive_folders"] = [root_folder, folder]
 
     outputs = [available[key] for key in wanted]
 
@@ -387,6 +484,7 @@ def plan_recording(
         "trim": trim,
         "available_views": list(available.values()),
         "outputs": outputs,
+        "view_note": view_note,
 
         "title": title,
         "course_id": settings.classroom_course_id if settings else "",

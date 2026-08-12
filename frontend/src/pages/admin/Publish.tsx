@@ -667,6 +667,22 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
           <p className="text-sm text-gray-600">Zoom has no video files for this recording yet.</p>
         )}
 
+        {/* When the class asked for a layout Zoom didn't record, say so here.
+            Silently sending the next-best one is how a class went up with no
+            shared screen and nobody knew until a student asked. */}
+        {draft.view_note && (
+          <p
+            className="text-sm rounded-lg border p-3 mb-3"
+            style={{
+              color: COLORS.amber.ink,
+              borderColor: COLORS.amber.ink,
+              background: COLORS.amber.soft,
+            }}
+          >
+            {draft.view_note}
+          </p>
+        )}
+
         {/* The everyday choice is one click, because it's the same choice
             almost every time. The checkboxes below stay for the exceptions. */}
         {draft.available_views.length > 1 && !readOnly && (
@@ -722,6 +738,12 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
               <span className="flex-1 min-w-0">
                 <b className="block text-sm font-semibold">{v.name}</b>
                 <span className="block text-xs text-gray-500">{v.description}</span>
+                {(v.part_count || 1) > 1 && (
+                  <span className="block text-xs mt-0.5" style={{ color: COLORS.amber.ink }}>
+                    Zoom returned {v.part_count} files of this view — the recording was
+                    stopped and restarted. Sending the longest one.
+                  </span>
+                )}
               </span>
               <span className="text-sm text-gray-600 tabular-nums">{gb(v.size_bytes)}</span>
             </label>

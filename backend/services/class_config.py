@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
@@ -75,6 +76,32 @@ VIEW_TYPES: Dict[str, Dict[str, str]] = {
 }
 
 PRIMARY_VIEW = "speaker"
+
+
+def normalize_zoom_type(recording_type: str) -> str:
+    """
+    A Zoom recording_type reduced to the layout it names.
+
+    Zoom decorates the name when the recording carries closed captions:
+    `shared_screen_with_speaker_view(CC)` is the same screen-plus-speaker video
+    as `shared_screen_with_speaker_view`. Comparing the raw strings meant such a
+    recording looked to us like it had no screen share at all — the publish
+    screen offered only the gallery files, with nothing to say the screen share
+    was sitting right there in Zoom. Reducing both sides to the same shape costs
+    nothing and survives the next suffix Zoom invents.
+    """
+    text = re.sub(r"\([^)]*\)", " ", (recording_type or "").lower())
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+_VIEW_BY_ZOOM_TYPE: Dict[str, str] = {
+    normalize_zoom_type(spec["zoom_type"]): key for key, spec in VIEW_TYPES.items()
+}
+
+
+def view_key_for(recording_type: str) -> Optional[str]:
+    """Our view key for a Zoom recording_type, or None if it isn't one we name."""
+    return _VIEW_BY_ZOOM_TYPE.get(normalize_zoom_type(recording_type))
 
 
 def _config_path() -> str:
