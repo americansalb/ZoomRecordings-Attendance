@@ -36,7 +36,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-29"
+BUILD = "capture-30"
 
 
 class MessageIn(BaseModel):
@@ -200,7 +200,15 @@ def build_app(
             session = manager._require(runtime_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown runtime_id")
-        return await session.client.diagnostics()
+        data = await session.client.diagnostics()
+        # The container's own memory meter rides along. Face checking is
+        # governed by it, so the console can say "faces are waiting because
+        # memory is at 91 percent" instead of showing a silent zero.
+        try:
+            data["memory"] = round(CaptureLoop.memory_fraction(), 3)
+        except Exception:
+            pass
+        return data
 
     @app.post("/bots/{runtime_id}/capture")
     async def capture_now(runtime_id: str,
