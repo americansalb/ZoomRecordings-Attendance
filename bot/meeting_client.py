@@ -33,11 +33,20 @@ logger = logging.getLogger(__name__)
 
 
 def _gallery_tiles() -> int:
-    """Tiles per gallery page, from BOT_GALLERY_TILES, clamped 4 to 25."""
+    """Tiles per gallery page, from BOT_GALLERY_TILES, clamped 4 to 25.
+
+    Default 9, not Zoom's 25 ceiling. Every rendered tile is a live video
+    decoder, and decoders are what actually fill a 512 MB container: a
+    25-tile landing spiked memory hard enough to kill a container before
+    its first observation, and left no headroom for the face detector.
+    Camera on/off for the WHOLE room comes from the roster regardless of
+    tiles; only face checks ride the rendered page, and the gallery
+    rotation still covers everyone a page at a time.
+    """
     try:
-        return max(4, min(25, int(os.environ.get("BOT_GALLERY_TILES", "25") or 25)))
+        return max(4, min(25, int(os.environ.get("BOT_GALLERY_TILES", "9") or 9)))
     except ValueError:
-        return 25
+        return 9
 
 ChatHandler = Callable[[dict], Awaitable[None]]
 LifecycleHandler = Callable[[str, Optional[str]], Awaitable[None]]

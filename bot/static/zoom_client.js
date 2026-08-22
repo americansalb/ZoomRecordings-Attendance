@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-27: SDK 6.2.0, detector armed only with memory headroom';
+const PAGE_BUILD = 'capture-28: detector loads at join, gallery capped for memory';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -677,14 +677,23 @@ function liveTiles() {
 }
 
 function startSeatWatcher() {
-  // Arming moved to the Python side on purpose: loading the detector is a
-  // sudden bite of memory, and only Python can read the container's real
-  // meter at the moment cameras appear. The page just reports its phase
-  // and waits to be armed. A camera coming on at 3:17 followed by the
-  // container dying at 3:17 is the failure this closes.
+  // The detector LOADS here, at the join: the cheapest moment this
+  // container will ever see, before the gallery has spun up its video
+  // decoders. Waiting to load it until cameras appeared meant paying the
+  // memory bite at the room's most expensive moment, and in real meetings
+  // the meter never cleared the bar: the watcher sat installed and entire
+  // sessions ended with zero face checks. Python still decides when to
+  // START watching, which after this costs almost nothing.
   if (!window.SeatWatcher) { watcherPhase = 'engine not loaded'; return; }
   if (!seatWatcherEnabled) { watcherPhase = 'switched off by BOT_SEAT_WATCHER'; return; }
-  watcherPhase = 'waiting: armed only when a camera is on and memory has headroom';
+  watcherPhase = 'loading detector';
+  SeatWatcher.init('/static/vendor/mediapipe/').then((ok) => {
+    watcherPhase = ok
+      ? 'ready: watching starts with the first rendered camera'
+      : 'detector failed to load';
+  }).catch((e) => {
+    watcherPhase = 'failed: ' + String(e && e.message || e).slice(0, 120);
+  });
 }
 
 window.zoomWatcherArm = async () => {

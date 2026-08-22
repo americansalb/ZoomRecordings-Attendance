@@ -96,14 +96,15 @@ class CaptureLoop:
     # A watcher reading older than this is not evidence about right now.
     WATCHER_FRESH_MS = 5000
 
-    # The detector is only loaded while the container has the headroom to
-    # survive the load, which is a sudden bite of roughly 15 percent of a
-    # 512 MB box. 0.60 was stricter than this machine's normal in-meeting
-    # level, so the watcher sat installed and never once permitted to arm,
-    # silently. 0.72 leaves the bite plus margin before the 0.92 shrink
-    # line, and declining now says so in the logs instead of saying
-    # nothing anywhere.
-    WATCHER_ARM_MAX_MEM = 0.72
+    # The page now loads the detector at join, the cheapest moment the
+    # container ever sees, so arming here only STARTS the watch loop and
+    # costs almost nothing. The 0.72 gate came from when arming carried
+    # the detector load itself, a bite of roughly 15 percent of a 512 MB
+    # box; measured mid-meeting with a gallery decoding, memory routinely
+    # sat above it and the watcher never armed, which is why entire
+    # sessions ended with zero face checks. The gate now matches the
+    # throttle line: face work starts whenever face work is allowed at all.
+    WATCHER_ARM_MAX_MEM = MEM_SOFT_LIMIT
     MEM_CURRENT_PATHS = ("/sys/fs/cgroup/memory.current",
                          "/sys/fs/cgroup/memory/memory.usage_in_bytes")
     MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
@@ -316,13 +317,21 @@ class CaptureLoop:
                     if (time.monotonic() - self._last_polaroid.get(uid, 0.0)
                             >= self.POLAROID_MIN_GAP_SECONDS):
                         eligible.append(uid)
-        if len(eligible) <= self.FACE_CHECKS_PER_SWEEP:
+        # At a fast observation pace the sweep itself must stay near the
+        # interval, and screenshots are the one step that cannot. Four
+        # captures at up to four seconds each inside a one second notebook
+        # meant the loop ran flat out doing screenshots back to back, CPU
+        # pinned, for the whole meeting: the cadence lied and the container
+        # lived on the edge. One capture per fast sweep still rotates
+        # through everyone; the watcher carries the rest.
+        cap = self.FACE_CHECKS_PER_SWEEP if self.interval_seconds >= 10 else 1
+        if len(eligible) <= cap:
             face_turn = set(eligible)
         else:
             start = self._face_rr % len(eligible)
             face_turn = {eligible[(start + i) % len(eligible)]
-                         for i in range(self.FACE_CHECKS_PER_SWEEP)}
-            self._face_rr = (start + self.FACE_CHECKS_PER_SWEEP) % len(eligible)
+                         for i in range(cap)}
+            self._face_rr = (start + cap) % len(eligible)
 
         # The valve: under memory pressure, faces wait and attendance
         # continues. Unchecked people are recorded as not checked, the
@@ -455,7 +464,7 @@ class CaptureLoop:
         # decoders, the opposite of what memory pressure needs) and never
         # faster than the dwell gap, or a fast notebook pace would flip to
         # tiles still loading and photograph nothing forever.
-        if ((starved or fallback_needed > self.FACE_CHECKS_PER_SWEEP)
+        if ((starved or fallback_needed > cap)
                 and not self._throttled
                 and time.monotonic() - self._last_advance >= self.PAGE_FLIP_MIN_GAP_SECONDS):
             advance = getattr(self.client, "gallery_advance", None)
