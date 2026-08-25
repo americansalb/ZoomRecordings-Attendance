@@ -118,6 +118,7 @@ class CaptureLoop:
         *,
         interval_seconds: int,
         store_images: bool,
+        room_snapshot_seconds: int = 0,
         face_detector: Callable[[bytes], bool] = default_face_detector,
     ):
         self.client = client
@@ -125,6 +126,13 @@ class CaptureLoop:
         self.storage = storage
         self.interval_seconds = self._clamp(interval_seconds)
         self.store_images = store_images
+        # A picture of the WHOLE gallery view on its own relaxed clock,
+        # saved to storage for later review. 0 means off, and off is the
+        # default: a session has to ask for room evidence.
+        self.room_snapshot_seconds = max(0, int(room_snapshot_seconds or 0))
+        # None means no shot yet: the first one goes immediately, so the
+        # evidence starts when the bot does instead of one window late.
+        self._last_room_shot = None
         self.face_detector = face_detector
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -474,6 +482,28 @@ class CaptureLoop:
                     await advance()
                 except Exception as e:
                     logger.debug("gallery advance skipped: %s", e)
+
+        # One picture of the whole room, on its own relaxed clock, for later
+        # review. The gallery shows up to nine seats and rotates, so across a
+        # few shots everyone appears. Skipped under memory pressure for the
+        # same reason face work is, and never allowed to fail the sweep. The
+        # shot rides the sweep, so the real floor on its cadence is the
+        # observation interval itself.
+        if (self.room_snapshot_seconds > 0
+                and not self._throttled
+                and (self._last_room_shot is None
+                     or time.monotonic() - self._last_room_shot >= self.room_snapshot_seconds)):
+            self._last_room_shot = time.monotonic()
+            try:
+                shot = await self.client.page_screenshot()
+                if shot:
+                    ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+                    await self.storage.upload(
+                        data=shot,
+                        filename=f"room_{_safe(ctx.session_label)}_{ts}.png",
+                        session_folder=folder)
+            except Exception as e:
+                logger.warning("room snapshot failed: %s", e)
 
         return rows
 

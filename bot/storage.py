@@ -109,6 +109,56 @@ class DriveStorage(Storage):
             return (None, None)
 
 
+def purge_drive_older_than(parent_folder_id: Optional[str], days: int) -> int:
+    """Delete session folders older than `days` under OUR parent folder only.
+
+    The fence is deliberate: the service account may be able to see files
+    that are not ours, and a janitor without a fence must not exist, so a
+    missing parent folder means no purge at all. Files inside a stale
+    session folder are deleted first, then the folder, so nothing is left
+    orphaned.
+    """
+    if not parent_folder_id or days <= 0:
+        return 0
+    import datetime
+
+    svc = DriveStorage(parent_folder_id=parent_folder_id)._get_service()
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    q = (f"'{parent_folder_id}' in parents"
+         " and mimeType='application/vnd.google-apps.folder'"
+         f" and createdTime < '{cutoff}' and trashed=false")
+    deleted = 0
+    page_token = None
+    while True:
+        resp = svc.files().list(
+            q=q, fields="nextPageToken, files(id, name)", pageToken=page_token,
+            pageSize=50, supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+        for folder in resp.get("files", []):
+            child_token = None
+            while True:
+                children = svc.files().list(
+                    q=f"'{folder['id']}' in parents and trashed=false",
+                    fields="nextPageToken, files(id)", pageToken=child_token,
+                    pageSize=100, supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                ).execute()
+                for f in children.get("files", []):
+                    svc.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+                    deleted += 1
+                child_token = children.get("nextPageToken")
+                if not child_token:
+                    break
+            svc.files().delete(fileId=folder["id"], supportsAllDrives=True).execute()
+            deleted += 1
+            logger.info("retention: removed expired session folder %r", folder.get("name"))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return deleted
+
+
 def build_storage(store_images: bool, parent_folder_id: Optional[str]) -> Storage:
     if not store_images:
         return NullStorage()

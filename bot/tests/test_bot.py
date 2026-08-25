@@ -627,3 +627,63 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+async def _room_snapshots():
+    """Room pictures ride the sweep on their own clock, and only when asked.
+
+    A session that never asked for room evidence must produce zero room
+    files, whatever else it stores. One that asked gets a whole-page
+    picture named for the session, at most once per snapshot window, and a
+    page that cannot be photographed must not fail the sweep.
+    """
+    class RecordingStorage(Storage):
+        def __init__(self):
+            self.uploads = []
+
+        @property
+        def stores_images(self):
+            return True
+
+        async def upload(self, *, data, filename, session_folder):
+            self.uploads.append((filename, session_folder, len(data)))
+            return ("fid", "https://drive/" + filename)
+
+    class SnappableClient(FakeMeetingClient):
+        async def page_screenshot(self):
+            return b"PAGEPIXELS"
+
+    parts = [Participant("1", "Maria Gomez", video_on=True)]
+    ctx = CaptureContext(runtime_id="r", session_ref="61", meeting_id="m",
+                         session_label="botsession:61", bot_name="AALB Assistant")
+
+    # Off by default: no room files, even with storage that could keep them.
+    store_off = RecordingStorage()
+    loop = CaptureLoop(SnappableClient(participants=parts), FakeBackend(), store_off,
+                       interval_seconds=300, store_images=False)
+    await loop.run_once(ctx)
+    assert store_off.uploads == [], "room snapshots must be opt-in"
+
+    # On: one shot in the window, not one per sweep.
+    store_on = RecordingStorage()
+    loop2 = CaptureLoop(SnappableClient(participants=parts), FakeBackend(), store_on,
+                        interval_seconds=300, store_images=False,
+                        room_snapshot_seconds=3600)
+    await loop2.run_once(ctx)
+    await loop2.run_once(ctx)
+    room_files = [u for u in store_on.uploads if u[0].startswith("room_")]
+    assert len(room_files) == 1, f"expected one room shot in the window, got {room_files}"
+    assert "botsession-61" in room_files[0][0]
+    assert room_files[0][1].endswith("botsession:61")
+
+    # A page that cannot be photographed is a skipped shot, not a failed sweep.
+    store_broken = RecordingStorage()
+    loop3 = CaptureLoop(FakeMeetingClient(participants=parts), FakeBackend(), store_broken,
+                        interval_seconds=300, store_images=False,
+                        room_snapshot_seconds=3600)
+    rows = await loop3.run_once(ctx)
+    assert len(rows) == 1 and store_broken.uploads == []
+
+
+def test_room_snapshots():
+    asyncio.run(_room_snapshots())

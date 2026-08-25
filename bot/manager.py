@@ -195,11 +195,18 @@ class BotManager:
         # who left screenshots off got no attendance record at all.
         capture = payload.get("capture") or {}
         store_images = bool(capture.get("enabled")) and bool(capture.get("store_images", True))
-        storage = self.storage_factory(store_images, self.config.drive_folder_id)
+        # Whole-room pictures on their own clock, independent of the
+        # per-person frame switch: a session can keep individual frames off
+        # and still ask for room evidence. Real storage is needed if either
+        # wants to keep pixels.
+        room_snapshot_seconds = int(capture.get("room_snapshot_seconds", 0) or 0)
+        storage = self.storage_factory(
+            store_images or room_snapshot_seconds > 0, self.config.drive_folder_id)
         loop = CaptureLoop(
             client, self.backend, storage,
             interval_seconds=int(capture.get("interval_seconds", 300)),
             store_images=store_images,
+            room_snapshot_seconds=room_snapshot_seconds,
         )
         ctx = CaptureContext(
             runtime_id=runtime_id,
@@ -312,7 +319,8 @@ class BotManager:
 
     def set_capture_config(self, runtime_id: str, *,
                            interval_seconds: Optional[int] = None,
-                           store_images: Optional[bool] = None) -> Dict[str, Any]:
+                           store_images: Optional[bool] = None,
+                           room_snapshot_seconds: Optional[int] = None) -> Dict[str, Any]:
         """Reconfigure a running loop, so a settings change does not require
         dismissing and re-summoning the bot."""
         session = self._require(runtime_id)
@@ -322,9 +330,19 @@ class BotManager:
             session.loop.set_interval(interval_seconds)
         if store_images is not None:
             session.loop.store_images = bool(store_images)
+        if room_snapshot_seconds is not None:
+            # Turning room pictures on mid-session needs storage that
+            # actually keeps pixels; a session that joined with everything
+            # off was built with the throwaway store.
+            session.loop.room_snapshot_seconds = max(0, int(room_snapshot_seconds))
+            if (session.loop.room_snapshot_seconds > 0
+                    and not session.loop.storage.stores_images):
+                session.loop.storage = self.storage_factory(
+                    True, self.config.drive_folder_id)
         return {
             "interval_seconds": session.loop.interval_seconds,
             "store_images": session.loop.store_images,
+            "room_snapshot_seconds": session.loop.room_snapshot_seconds,
         }
 
     # How long a delivered message shields against an identical resend.

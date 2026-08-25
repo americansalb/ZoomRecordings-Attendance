@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -36,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-31"
+BUILD = "capture-32"
 
 
 class MessageIn(BaseModel):
@@ -48,6 +49,7 @@ class MessageIn(BaseModel):
 class CaptureConfigIn(BaseModel):
     interval_seconds: Optional[int] = None
     store_images: Optional[bool] = None
+    room_snapshot_seconds: Optional[int] = None
 
 
 def build_app(
@@ -94,6 +96,32 @@ def build_app(
     vendor_lib = static_dir / "vendor" / "lib"
     if vendor_lib.exists():
         app.mount("/lib", StaticFiles(directory=str(vendor_lib)), name="zoomsdk-lib")
+
+    @app.on_event("startup")
+    async def _snapshot_janitor():
+        """Delete room and face pictures older than the retention window.
+
+        Runs once a day. Refuses to run without a configured parent folder:
+        the janitor must never roam beyond the fence of our own snapshot
+        folder. BOT_IMAGE_RETENTION_DAYS=0 switches it off.
+        """
+        days = int(os.getenv("BOT_IMAGE_RETENTION_DAYS", "30") or 30)
+        if days <= 0 or not config.drive_folder_id:
+            return
+
+        async def run():
+            from .storage import purge_drive_older_than
+            while True:
+                try:
+                    n = await asyncio.to_thread(
+                        purge_drive_older_than, config.drive_folder_id, days)
+                    if n:
+                        logger.info("[JANITOR] deleted %d expired snapshot files and folders", n)
+                except Exception as e:
+                    logger.warning("[JANITOR] retention purge failed: %s", e)
+                await asyncio.sleep(24 * 3600)
+
+        asyncio.create_task(run())
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -233,6 +261,7 @@ def build_app(
                 runtime_id,
                 interval_seconds=body.interval_seconds,
                 store_images=body.store_images,
+                room_snapshot_seconds=body.room_snapshot_seconds,
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown runtime_id")
