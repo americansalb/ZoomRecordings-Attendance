@@ -687,3 +687,127 @@ async def _room_snapshots():
 
 def test_room_snapshots():
     asyncio.run(_room_snapshots())
+
+
+async def _lookout_mode():
+    """A lookout records the room and touches no pixels.
+
+    Presence and camera state come from the one roster read; face checks,
+    the watcher, per-person screenshots and room pictures all stay off for
+    the life of the session, and a settings change cannot switch pixels
+    back on, because the page never rendered enough video for them to mean
+    anything.
+    """
+    class WatcherClient(FakeMeetingClient):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.watcher_reads = 0
+            self.captured = set()
+
+        async def watcher_state(self):
+            self.watcher_reads += 1
+            return {"running": False}
+
+        async def capture_user(self, user_id):
+            self.captured.add(str(user_id))
+            return await super().capture_user(user_id)
+
+        async def page_screenshot(self):
+            return b"PAGEPIXELS"
+
+    class RecordingStorage(Storage):
+        def __init__(self):
+            self.uploads = []
+
+        @property
+        def stores_images(self):
+            return True
+
+        async def upload(self, *, data, filename, session_folder):
+            self.uploads.append(filename)
+            return ("fid", "https://drive/" + filename)
+
+    parts = [
+        Participant("1", "Maria Gomez", video_on=True),
+        Participant("2", "Sam Lee", video_on=False),
+    ]
+    client = WatcherClient(participants=parts, frames={"1": b"FACEDATA"},
+                           self_id="99")
+    backend = FakeBackend()
+    store = RecordingStorage()
+    ctx = CaptureContext(runtime_id="r", session_ref="7", meeting_id="m",
+                         session_label="7", bot_name="AALB Assistant")
+    # Everything pixel-hungry is asked for, and lookout must win anyway.
+    loop = CaptureLoop(client, backend, store, interval_seconds=300,
+                       store_images=True, room_snapshot_seconds=60,
+                       lookout=True)
+
+    rows = {r["participant_id"]: r for r in await loop.run_once(ctx)}
+
+    # The record is intact: presence and camera state for the whole room.
+    assert rows["1"]["video_on"] is True and rows["1"]["present"] is True
+    assert rows["2"]["video_on"] is False
+    # And honest: no face was checked, and nothing claims one was.
+    assert rows["1"]["face_present"] is None
+    assert rows["1"]["face_checked"] is False
+    # No pixels were touched anywhere.
+    assert not client.captured, "a lookout must never screenshot a person"
+    assert client.watcher_reads == 0, "a lookout never consults the watcher"
+    assert store.uploads == [], "a lookout keeps no pixels"
+    assert backend.shots == [], "no pixels means no manifest rows"
+    assert loop.store_images is False
+    assert loop.room_snapshot_seconds == 0
+
+
+async def _lookout_is_manager_default():
+    """The manager treats lookout as the default and pins it for the session.
+
+    A join that never mentions lookout gets one; the client is told at join
+    time (the page sizes its video from that flag); the live listing says
+    so; and a later settings call cannot smuggle pixel work back in.
+    """
+    created = []
+
+    class RecordingJoinClient(FakeMeetingClient):
+        async def join(self, **kwargs):
+            self.join_kwargs = kwargs
+            await super().join(**kwargs)
+
+    def client_factory(page_url, headless):
+        c = RecordingJoinClient(
+            participants=[Participant("1", "Maria", video_on=True)], self_id="99")
+        created.append(c)
+        return c
+
+    cfg = Config(backend_url="http://backend", bot_shared_secret=None,
+                 sdk_key="KEY", sdk_secret="SECRET",
+                 public_base_url="http://bot", headless=True, drive_folder_id=None)
+    manager = BotManager(cfg, FakeBackend(), client_factory=client_factory,
+                         storage_factory=lambda s, f: NullStorage())
+
+    rid = await manager.join({"meeting_id": "98765", "session_ref": "7",
+                              "display_name": "AALB Assistant",
+                              "capture": {"enabled": True, "interval_seconds": 3600,
+                                          "room_snapshot_seconds": 60}})
+    assert created[-1].join_kwargs["lookout"] is True
+    assert manager.list_sessions()[0]["lookout"] is True
+
+    got = manager.set_capture_config(rid, store_images=True,
+                                     room_snapshot_seconds=120)
+    assert got["lookout"] is True
+    assert got["store_images"] is False, "a lookout cannot start keeping frames"
+    assert got["room_snapshot_seconds"] == 0, "a lookout cannot start room shots"
+    await manager.leave(rid)
+
+    # Asking to watch video still works: the opt-in survives the gut.
+    rid2 = await manager.join({"meeting_id": "98765", "session_ref": "8",
+                               "display_name": "AALB Assistant",
+                               "capture": {"lookout": False, "enabled": True}})
+    assert created[-1].join_kwargs["lookout"] is False
+    assert manager.list_sessions()[0]["lookout"] is False
+    await manager.leave(rid2)
+
+
+def test_lookout_mode():
+    asyncio.run(_lookout_mode())
+    asyncio.run(_lookout_is_manager_default())

@@ -127,6 +127,14 @@ class BotManager:
         # `role` is overridable because the pairing is not absolute: a ZAK for
         # a user who is neither host nor alternative host must still sign
         # role 0, and signing role 1 there is rejected.
+        # Lookout: presence, camera state, and chat only, no video work of
+        # any kind. The default, because it is the mode that survives a
+        # room of any size on this machine; watching video is the opt-in.
+        # Parsed before the join because the browser page needs to know at
+        # init time how much video it is allowed to render.
+        capture = payload.get("capture") or {}
+        lookout = bool(capture.get("lookout", True))
+
         zak = payload.get("zak") or None
         role = payload.get("role")
         role = int(role) if role is not None else (1 if zak else 0)
@@ -148,6 +156,7 @@ class BotManager:
                 signature=signature,
                 sdk_key=self.config.sdk_key,
                 zak=zak,
+                lookout=lookout,
             )
         except Exception as e:
             # A join that raises partway can still have left a browser in the
@@ -193,13 +202,15 @@ class BotManager:
         # frames are grabbed and kept, not whether attendance is taken -- the
         # two were previously the same switch, so a privacy-conscious operator
         # who left screenshots off got no attendance record at all.
-        capture = payload.get("capture") or {}
-        store_images = bool(capture.get("enabled")) and bool(capture.get("store_images", True))
+        store_images = (not lookout
+                        and bool(capture.get("enabled"))
+                        and bool(capture.get("store_images", True)))
         # Whole-room pictures on their own clock, independent of the
         # per-person frame switch: a session can keep individual frames off
         # and still ask for room evidence. Real storage is needed if either
-        # wants to keep pixels.
-        room_snapshot_seconds = int(capture.get("room_snapshot_seconds", 0) or 0)
+        # wants to keep pixels. A lookout keeps no pixels at all.
+        room_snapshot_seconds = (
+            0 if lookout else int(capture.get("room_snapshot_seconds", 0) or 0))
         storage = self.storage_factory(
             store_images or room_snapshot_seconds > 0, self.config.drive_folder_id)
         loop = CaptureLoop(
@@ -207,6 +218,7 @@ class BotManager:
             interval_seconds=int(capture.get("interval_seconds", 300)),
             store_images=store_images,
             room_snapshot_seconds=room_snapshot_seconds,
+            lookout=lookout,
         )
         ctx = CaptureContext(
             runtime_id=runtime_id,
@@ -219,8 +231,8 @@ class BotManager:
         session.ctx = ctx
         session.task = asyncio.create_task(loop.run(ctx))
 
-        logger.info("[BOT] joined meeting %s as %s (store_images=%s)",
-                    meeting_id, runtime_id, store_images)
+        logger.info("[BOT] joined meeting %s as %s (lookout=%s, store_images=%s)",
+                    meeting_id, runtime_id, lookout, store_images)
         return runtime_id
 
     async def leave(self, runtime_id: str) -> None:
@@ -291,6 +303,7 @@ class BotManager:
                 "session_ref": s.session_ref,
                 "display_name": s.display_name,
                 "capturing": bool(s.task and not s.task.done()),
+                "lookout": bool(s.loop.lookout) if s.loop else False,
             }
             for s in self._sessions.values()
         ]
@@ -328,6 +341,12 @@ class BotManager:
             raise RuntimeError("no attendance loop for this session")
         if interval_seconds is not None:
             session.loop.set_interval(interval_seconds)
+        # A lookout keeps no pixels, and that is a join-time promise: the
+        # page never rendered enough video to make pixels worth keeping,
+        # so turning these on mid-session would only pretend to work.
+        if session.loop.lookout:
+            store_images = None
+            room_snapshot_seconds = None
         if store_images is not None:
             session.loop.store_images = bool(store_images)
         if room_snapshot_seconds is not None:
@@ -343,6 +362,7 @@ class BotManager:
             "interval_seconds": session.loop.interval_seconds,
             "store_images": session.loop.store_images,
             "room_snapshot_seconds": session.loop.room_snapshot_seconds,
+            "lookout": session.loop.lookout,
         }
 
     # How long a delivered message shields against an identical resend.

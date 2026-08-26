@@ -31,12 +31,18 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-28: detector loads at join, gallery capped for memory';
+const PAGE_BUILD = 'capture-29: lookout mode joins without watching video';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
 // 50 person room is two alternating pages by Zoom's rules, not ours.
 let galleryTilesWanted = 25;
+// Lookout mode: presence, camera state, and chat only. Those all ride
+// Zoom's signaling (the roster and user-added/updated/removed events), so
+// the page keeps only a thumbnail-sized view alive and never loads the
+// face detector. Video decode is what fills a small container; a lookout
+// costs the same in a room of 5 or 250.
+let lookoutMode = false;
 // Seat watcher switch (BOT_SEAT_WATCHER, default on) and its live phase,
 // so diagnostics can say exactly where it is instead of leaving a blank.
 let seatWatcherEnabled = true;
@@ -181,7 +187,13 @@ async function ensureClient() {
           // only two numbers that control how much video this container
           // decodes, and they apply from the first frame at join, which
           // is precisely when a full room killed a 512 MB container.
-          viewSizes: {
+          // A lookout shrinks further still: it never captures a frame,
+          // so the view exists only to keep the SDK in a normal state,
+          // and thumbnail-sized tiles are the cheapest normal there is.
+          viewSizes: lookoutMode ? {
+            default: { width: 320, height: 180 },
+            ribbon: { width: 320, height: 180 },
+          } : {
             default: { width: 640, height: 360 },
             ribbon: { width: 640, height: 360 },
           },
@@ -192,8 +204,9 @@ async function ensureClient() {
       // sends its smallest stream for each, so even a full page is a
       // modest decode. The count is configurable from the outside
       // (BOT_GALLERY_TILES) so it can be stepped down without a rebuild
-      // if the memory meter on /healthz ever disagrees.
-      maximumVideosInGalleryView: galleryTilesWanted,
+      // if the memory meter on /healthz ever disagrees. A lookout pins
+      // it at the floor: four thumbnails, a constant cost in any room.
+      maximumVideosInGalleryView: lookoutMode ? 4 : galleryTilesWanted,
     });
   } catch (e) {
     client = null;               // let a retry re-init rather than reusing a dead client
@@ -299,6 +312,10 @@ window.zoomJoin = async (cfg) => {
   const wanted = parseInt(cfg.galleryTiles, 10);
   if (Number.isFinite(wanted)) galleryTilesWanted = Math.max(4, Math.min(25, wanted));
   seatWatcherEnabled = !/^(0|off|false|no)$/i.test(String(cfg.seatWatcher || 'on'));
+  lookoutMode = !!cfg.lookout;
+  // A lookout never face-checks, so the detector must not load either:
+  // its memory bite is exactly what this mode exists to avoid.
+  if (lookoutMode) seatWatcherEnabled = false;
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -494,6 +511,7 @@ window.zoomDiagnostics = async () => {
   // actually attached right now. Together these say whether a wrong camera
   // reading is Zoom never telling us, or us mishandling what it said.
   out.pageBuild = PAGE_BUILD;
+  out.lookout = lookoutMode;
   out.videoEvents = videoEvents.slice(-30);
   out.chatLog = chatLog.slice(-20);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }

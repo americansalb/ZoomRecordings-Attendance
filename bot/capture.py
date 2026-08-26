@@ -119,17 +119,27 @@ class CaptureLoop:
         interval_seconds: int,
         store_images: bool,
         room_snapshot_seconds: int = 0,
+        lookout: bool = False,
         face_detector: Callable[[bytes], bool] = default_face_detector,
     ):
         self.client = client
         self.backend = backend
         self.storage = storage
         self.interval_seconds = self._clamp(interval_seconds)
-        self.store_images = store_images
+        # Lookout: presence, camera state, and chat only. Every pixel path
+        # (face checks, the watcher, screenshots, room shots, gallery
+        # paging) stays off for the life of the session. Video decode is
+        # what fills a small container; the roster costs almost nothing,
+        # so a lookout survives a room of any size on the same machine.
+        self.lookout = bool(lookout)
+        self.store_images = store_images and not self.lookout
         # A picture of the WHOLE gallery view on its own relaxed clock,
         # saved to storage for later review. 0 means off, and off is the
-        # default: a session has to ask for room evidence.
-        self.room_snapshot_seconds = max(0, int(room_snapshot_seconds or 0))
+        # default: a session has to ask for room evidence. A lookout shows
+        # four thumbnails, so a room shot of it would be evidence of
+        # nothing: forced off.
+        self.room_snapshot_seconds = (
+            0 if self.lookout else max(0, int(room_snapshot_seconds or 0)))
         # None means no shot yet: the first one goes immediately, so the
         # evidence starts when the bot does instead of one window late.
         self._last_room_shot = None
@@ -269,7 +279,7 @@ class CaptureLoop:
         # rotation below, so the worst case is exactly the old behaviour.
         wusers = {}
         try:
-            wstate = await self.client.watcher_state()
+            wstate = None if self.lookout else await self.client.watcher_state()
             if wstate and wstate.get("running"):
                 wusers = wstate.get("users") or {}
             elif wstate is not None and not self._throttled:
@@ -309,7 +319,9 @@ class CaptureLoop:
         starved = False
         eligible = []
         fallback_needed = 0
-        for row in snapshot.rows:
+        # A lookout takes no screenshot turns at all: presence and camera
+        # state for the whole room already came from the one roster read.
+        for row in ([] if self.lookout else snapshot.rows):
             if self._is_self(row.user_id, row.name, ctx):
                 continue
             p = participants.get(row.user_id)
@@ -508,8 +520,9 @@ class CaptureLoop:
         return rows
 
     async def run(self, ctx: CaptureContext) -> None:
-        logger.info("[CAPTURE] attendance loop started for session %s every %ss",
-                    ctx.session_ref, self.interval_seconds)
+        logger.info("[CAPTURE] attendance loop started for session %s every %ss%s",
+                    ctx.session_ref, self.interval_seconds,
+                    " (lookout: no video work)" if self.lookout else "")
         try:
             if not await self.client.capture_supported():
                 logger.info(

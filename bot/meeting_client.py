@@ -95,7 +95,8 @@ class MeetingClient(ABC):
 
     @abstractmethod
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
-                   signature: str, sdk_key: str, zak: Optional[str] = None) -> None: ...
+                   signature: str, sdk_key: str, zak: Optional[str] = None,
+                   lookout: bool = False) -> None: ...
 
     @abstractmethod
     async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
@@ -217,7 +218,8 @@ class PlaywrightZoomClient(MeetingClient):
         self._capture_log: List[dict] = []
 
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
-                   signature: str, sdk_key: str, zak: Optional[str] = None) -> None:
+                   signature: str, sdk_key: str, zak: Optional[str] = None,
+                   lookout: bool = False) -> None:
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
@@ -334,6 +336,9 @@ class PlaywrightZoomClient(MeetingClient):
                 "galleryTiles": _gallery_tiles(),
                 # Kill switch for the in-page watcher, no rebuild needed.
                 "seatWatcher": os.environ.get("BOT_SEAT_WATCHER", "on"),
+                # Lookout: thumbnail view, no detector, no face work. The
+                # page enforces its side of the bargain from this flag.
+                "lookout": bool(lookout),
             },
         )
 
