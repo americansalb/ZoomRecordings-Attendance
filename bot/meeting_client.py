@@ -217,28 +217,43 @@ class PlaywrightZoomClient(MeetingClient):
         # guessed wrong for a whole class.
         self._capture_log: List[dict] = []
 
-    async def join(self, *, meeting_number: str, passcode: str, display_name: str,
-                   signature: str, sdk_key: str, zak: Optional[str] = None,
-                   lookout: bool = False) -> None:
-        from playwright.async_api import async_playwright
+    # Flags: fake media so Chromium grants mic/cam without hardware, and the
+    # WebRTC bits the Web SDK needs in a container.
+    BASE_ARGS = [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        "--autoplay-policy=no-user-gesture-required",
+        "--no-sandbox",
+        # Containers give /dev/shm 64MB by default and Chromium keeps
+        # decoded video frames there. A meeting with several cameras
+        # exhausts it and the renderer dies mid-meeting with no error
+        # that reaches Python.
+        "--disable-dev-shm-usage",
+    ]
 
-        self._pw = await async_playwright().start()
-        # Flags: fake media so Chromium grants mic/cam without hardware, and the
-        # WebRTC bits the Web SDK needs in a container.
+    # The lookout diet. Chromium normally runs as several separate
+    # programs (browser, renderer, GPU, network), each with its own heap;
+    # collapsing to one process measured about 20 percent off the whole
+    # engine's memory (PSS, fair accounting) with the Zoom SDK loaded. A
+    # lookout renders four thumbnails and takes no screenshots, so it has
+    # nothing to lose from the rougher mode: a crash of the one process
+    # equals a crash of the whole browser, which is already how every
+    # failure here ends. Not used for video watching sessions: those do
+    # real rendering and capture, and get the well-trodden path.
+    LOOKOUT_ARGS = [
+        "--single-process",
+        "--no-zygote",
+        "--disable-gpu",
+        "--mute-audio",
+    ]
+
+    async def _open_page(self, args: list) -> None:
+        """Launch Chromium with the given flags and load the client page up
+        to the point where the Zoom SDK global exists. Everything before
+        the actual meeting join lives here so a flag set that cannot get
+        this far can be retried with a different one."""
         self._browser = await self._pw.chromium.launch(
-            headless=self.headless,
-            args=[
-                "--use-fake-ui-for-media-stream",
-                "--use-fake-device-for-media-stream",
-                "--autoplay-policy=no-user-gesture-required",
-                "--no-sandbox",
-                # Containers give /dev/shm 64MB by default and Chromium keeps
-                # decoded video frames there. A meeting with several cameras
-                # exhausts it and the renderer dies mid-meeting with no error
-                # that reaches Python.
-                "--disable-dev-shm-usage",
-            ],
-        )
+            headless=self.headless, args=args)
         # The window must simply be big enough to hold the gallery, which
         # is sized by CSS and the SDK's viewSizes (640x360), not by this.
         # Believing otherwise cost a night: shrinking the window saved no
@@ -319,6 +334,31 @@ class PlaywrightZoomClient(MeetingClient):
                 "(window.ZoomMtgEmbedded undefined after 45s). "
                 f"Page errors: {detail}. Console: {console}"
             ) from None
+
+    async def join(self, *, meeting_number: str, passcode: str, display_name: str,
+                   signature: str, sdk_key: str, zak: Optional[str] = None,
+                   lookout: bool = False) -> None:
+        from playwright.async_api import async_playwright
+
+        self._pw = await async_playwright().start()
+        try:
+            await self._open_page(
+                self.BASE_ARGS + (self.LOOKOUT_ARGS if lookout else []))
+        except Exception as e:
+            if not lookout:
+                raise
+            # The diet must never cost a join. If the collapsed browser
+            # cannot start, or its page cannot reach a ready SDK, close it
+            # and take the well-trodden flags instead; the memory saving
+            # is worth trying for, never worth failing a class over.
+            logger.warning(
+                "lookout diet browser failed before the join, retrying on "
+                "normal flags: %s", str(e)[:300])
+            await self.close()
+            self._pw = await async_playwright().start()
+            self._page_errors.clear()
+            self._page_console.clear()
+            await self._open_page(self.BASE_ARGS)
 
         await self._page.evaluate(
             """async (cfg) => { await window.zoomJoin(cfg); }""",
