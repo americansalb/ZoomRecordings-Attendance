@@ -22,12 +22,31 @@ video_on from Zoom's per-user state remains authoritative for attendance.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
+
+
+def _looks_like_browser_death(exc: BaseException) -> bool:
+    """Distinguish 'the browser died under us' from 'Zoom said no'.
+
+    The join retries on normal flags only for the first kind: a rejected
+    passcode or a waiting room denial would fail identically on any flag
+    set, and retrying those doubles the worst-case join time for nothing.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return bool(re.search(
+        r"Target (page|context|browser).*?(closed|crashed)"
+        r"|browser has been closed"
+        r"|[Pp]age crashed"
+        r"|[Bb]rowser.*disconnected"
+        r"|Connection closed while reading from the driver",
+        text))
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +235,15 @@ class PlaywrightZoomClient(MeetingClient):
         # a screenshot that timed out, and the console had to guess. It
         # guessed wrong for a whole class.
         self._capture_log: List[dict] = []
+        # Teardown vs death bookkeeping. _closing marks an intentional
+        # close so the death handlers stay quiet; _joining marks the join
+        # window, where the join's own retry logic owns crash recovery;
+        # _gone_reported makes the death report once; _diet_active says
+        # the collapsed single-process browser is the one running.
+        self._closing = False
+        self._joining = False
+        self._gone_reported = False
+        self._diet_active = False
 
     # Flags: fake media so Chromium grants mic/cam without hardware, and the
     # WebRTC bits the Web SDK needs in a container.
@@ -252,6 +280,8 @@ class PlaywrightZoomClient(MeetingClient):
         to the point where the Zoom SDK global exists. Everything before
         the actual meeting join lives here so a flag set that cannot get
         this far can be retried with a different one."""
+        self._closing = False
+        self._gone_reported = False
         self._browser = await self._pw.chromium.launch(
             headless=self.headless, args=args)
         # The window must simply be big enough to hold the gallery, which
@@ -264,6 +294,30 @@ class PlaywrightZoomClient(MeetingClient):
         self._context = await self._browser.new_context(
             viewport={"width": 800, "height": 600})
         self._page = await self._context.new_page()
+
+        # A collapsed browser dies as one piece, and nothing else would
+        # notice: a dead page cannot report its own end, and the capture
+        # loop swallows per-sweep errors by design, so the session would
+        # sit as a zombie that still says "capturing" while suppressing
+        # the control plane's replacement bot. Wire the death itself to
+        # the lifecycle instead: the manager reaps the session, the bot
+        # leaves /bots, and the replacement machinery takes over.
+        def _gone(reason: str) -> None:
+            if self._closing or self._joining or self._gone_reported:
+                return
+            self._gone_reported = True
+            logger.warning("[BOT] browser gone mid-session: %s", reason)
+            handler = getattr(self, "on_lifecycle", None)
+            if handler:
+                try:
+                    asyncio.get_running_loop().create_task(
+                        handler("ended", reason))
+                except RuntimeError:
+                    pass  # no running loop means shutdown is already underway
+
+        self._page.on("crash", lambda _page: _gone("the page crashed"))
+        self._browser.on("disconnected",
+                         lambda: _gone("the browser process died"))
 
         # Capture what the page says about itself. Without this a script
         # that throws halfway through is invisible: the error never
@@ -341,28 +395,25 @@ class PlaywrightZoomClient(MeetingClient):
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
+        self._joining = True
+        self._diet_active = bool(lookout)
         try:
-            await self._open_page(
-                self.BASE_ARGS + (self.LOOKOUT_ARGS if lookout else []))
-        except Exception as e:
-            if not lookout:
-                raise
-            # The diet must never cost a join. If the collapsed browser
-            # cannot start, or its page cannot reach a ready SDK, close it
-            # and take the well-trodden flags instead; the memory saving
-            # is worth trying for, never worth failing a class over.
-            logger.warning(
-                "lookout diet browser failed before the join, retrying on "
-                "normal flags: %s", str(e)[:300])
-            await self.close()
-            self._pw = await async_playwright().start()
-            self._page_errors.clear()
-            self._page_console.clear()
-            await self._open_page(self.BASE_ARGS)
+            try:
+                await self._open_page(
+                    self.BASE_ARGS + (self.LOOKOUT_ARGS if lookout else []))
+            except Exception as e:
+                if not lookout:
+                    raise
+                # The diet must never cost a join. If the collapsed browser
+                # cannot start, or its page cannot reach a ready SDK, close
+                # it and take the well-trodden flags instead; the memory
+                # saving is worth trying for, never worth failing a class.
+                logger.warning(
+                    "lookout diet browser failed before the join, retrying on "
+                    "normal flags: %s", str(e)[:300])
+                await self._relaunch_normal()
 
-        await self._page.evaluate(
-            """async (cfg) => { await window.zoomJoin(cfg); }""",
-            {
+            cfg = {
                 "sdkKey": sdk_key,
                 "signature": signature,
                 "meetingNumber": str(meeting_number),
@@ -379,8 +430,36 @@ class PlaywrightZoomClient(MeetingClient):
                 # Lookout: thumbnail view, no detector, no face work. The
                 # page enforces its side of the bargain from this flag.
                 "lookout": bool(lookout),
-            },
-        )
+            }
+            try:
+                await self._page.evaluate(
+                    """async (cfg) => { await window.zoomJoin(cfg); }""", cfg)
+            except Exception as e:
+                # The join itself is where a collapsed browser is most
+                # fragile: the SDK spins up its media machinery right here.
+                # Retry on normal flags only when the browser actually died;
+                # a Zoom rejection (bad passcode, waiting room denial)
+                # would fail the same way on any flags.
+                if not (self._diet_active and _looks_like_browser_death(e)):
+                    raise
+                logger.warning(
+                    "lookout diet browser died during the join, retrying on "
+                    "normal flags: %s", str(e)[:300])
+                await self._relaunch_normal()
+                await self._page.evaluate(
+                    """async (cfg) => { await window.zoomJoin(cfg); }""", cfg)
+        finally:
+            self._joining = False
+
+    async def _relaunch_normal(self) -> None:
+        """Tear the diet browser down and reopen the page on normal flags."""
+        from playwright.async_api import async_playwright
+        self._diet_active = False
+        await self.close()
+        self._pw = await async_playwright().start()
+        self._page_errors.clear()
+        self._page_console.clear()
+        await self._open_page(self.BASE_ARGS)
 
     async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
         result = await self._page.evaluate(
@@ -557,7 +636,12 @@ class PlaywrightZoomClient(MeetingClient):
             data = await self._page.evaluate(
                 """async () => await window.zoomDiagnostics()""") or {}
         except Exception as e:
-            return {"error": f"diagnostics failed: {e}"}
+            return {"error": f"diagnostics failed: {e}",
+                    "dietActive": self._diet_active}
+        # Whether the collapsed single-process browser is the one running,
+        # or the safety net fell back to the normal one. Answerable from
+        # the console instead of by archaeology on the deploy logs.
+        data["dietActive"] = self._diet_active
         # The SDK races several Zoom datacenters at join and cancels the
         # losers, and its virtual background engine fails to start headless.
         # Both are one-time startup noise, not faults, and showing them in
@@ -598,6 +682,7 @@ class PlaywrightZoomClient(MeetingClient):
         """Tear down the browser. Safe to call twice, and safe to call on a
         half-built client -- which matters, because a join that fails partway
         must not leave a Chromium (and a ghost participant) behind."""
+        self._closing = True
         for closer in (self._context, self._browser):
             try:
                 if closer:

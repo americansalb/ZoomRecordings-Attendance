@@ -787,8 +787,7 @@ async def _lookout_is_manager_default():
 
     rid = await manager.join({"meeting_id": "98765", "session_ref": "7",
                               "display_name": "AALB Assistant",
-                              "capture": {"enabled": True, "interval_seconds": 3600,
-                                          "room_snapshot_seconds": 60}})
+                              "capture": {"interval_seconds": 3600}})
     assert created[-1].join_kwargs["lookout"] is True
     assert manager.list_sessions()[0]["lookout"] is True
 
@@ -797,6 +796,10 @@ async def _lookout_is_manager_default():
     assert got["lookout"] is True
     assert got["store_images"] is False, "a lookout cannot start keeping frames"
     assert got["room_snapshot_seconds"] == 0, "a lookout cannot start room shots"
+    assert "no pixels" in got.get("note", ""), (
+        "declining pixel work must be said, not silently succeeded")
+    # A plain settings change carries no note: nothing was declined.
+    assert "note" not in manager.set_capture_config(rid, interval_seconds=30)
     await manager.leave(rid)
 
     # Asking to watch video still works: the opt-in survives the gut.
@@ -807,7 +810,58 @@ async def _lookout_is_manager_default():
     assert manager.list_sessions()[0]["lookout"] is False
     await manager.leave(rid2)
 
+    # A caller that predates the flag and asks for pixels keeps the watcher
+    # it always had: absent lookout defers to capture.enabled.
+    rid3 = await manager.join({"meeting_id": "98765", "session_ref": "9",
+                               "display_name": "AALB Assistant",
+                               "capture": {"enabled": True, "store_images": True}})
+    assert created[-1].join_kwargs["lookout"] is False
+    await manager.leave(rid3)
+
 
 def test_lookout_mode():
     asyncio.run(_lookout_mode())
     asyncio.run(_lookout_is_manager_default())
+
+
+def test_lookout_parsing():
+    """The flag's edge cases: JSON null, strings, and legacy callers.
+
+    bool() alone turned an explicit null into the heavy video path and the
+    string "false" into a lookout, each the opposite of what was asked.
+    """
+    from bot.manager import _parse_lookout
+    assert _parse_lookout({}) is True
+    assert _parse_lookout({"lookout": None}) is True
+    assert _parse_lookout({"lookout": None, "enabled": True}) is False
+    assert _parse_lookout({"enabled": True}) is False
+    assert _parse_lookout({"enabled": False}) is True
+    assert _parse_lookout({"lookout": True}) is True
+    assert _parse_lookout({"lookout": False, "enabled": False}) is False
+    assert _parse_lookout({"lookout": "false"}) is False
+    assert _parse_lookout({"lookout": "off"}) is False
+    assert _parse_lookout({"lookout": "true"}) is True
+
+
+def test_browser_death_classifier():
+    """Only a dead browser earns the normal-flags retry during a join.
+
+    A Zoom rejection fails identically on any flag set, so retrying it
+    would just double the worst-case join time.
+    """
+    from bot.meeting_client import _looks_like_browser_death
+    dead = [
+        "Page.evaluate: Target page, context or browser has been closed",
+        "Page crashed",
+        "Browser has been disconnected",
+        "Connection closed while reading from the driver",
+    ]
+    alive = [
+        "Zoom join rejected: wrong passcode",
+        "Zoom join failed: admission from the waiting room never completed",
+        "Zoom SDK init failed",
+    ]
+    for msg in dead:
+        assert _looks_like_browser_death(RuntimeError(msg)), msg
+    for msg in alive:
+        assert not _looks_like_browser_death(RuntimeError(msg)), msg

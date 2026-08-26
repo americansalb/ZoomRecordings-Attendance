@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-29: lookout mode joins without watching video';
+const PAGE_BUILD = 'capture-30: lookout watcher phase says lookout, not the env switch';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -312,10 +312,12 @@ window.zoomJoin = async (cfg) => {
   const wanted = parseInt(cfg.galleryTiles, 10);
   if (Number.isFinite(wanted)) galleryTilesWanted = Math.max(4, Math.min(25, wanted));
   seatWatcherEnabled = !/^(0|off|false|no)$/i.test(String(cfg.seatWatcher || 'on'));
+  // A lookout never face-checks, so the detector must not load either: its
+  // memory bite is exactly what this mode exists to avoid. The watcher
+  // paths check lookoutMode themselves and say so in their phase, rather
+  // than borrowing the BOT_SEAT_WATCHER switch and pointing whoever reads
+  // diagnostics at an env var that is actually set to on.
   lookoutMode = !!cfg.lookout;
-  // A lookout never face-checks, so the detector must not load either:
-  // its memory bite is exactly what this mode exists to avoid.
-  if (lookoutMode) seatWatcherEnabled = false;
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -702,6 +704,7 @@ function startSeatWatcher() {
   // the meter never cleared the bar: the watcher sat installed and entire
   // sessions ended with zero face checks. Python still decides when to
   // START watching, which after this costs almost nothing.
+  if (lookoutMode) { watcherPhase = 'off: lookout session, no video work'; return; }
   if (!window.SeatWatcher) { watcherPhase = 'engine not loaded'; return; }
   if (!seatWatcherEnabled) { watcherPhase = 'switched off by BOT_SEAT_WATCHER'; return; }
   watcherPhase = 'loading detector';
@@ -716,6 +719,7 @@ function startSeatWatcher() {
 
 window.zoomWatcherArm = async () => {
   try {
+    if (lookoutMode) return { ok: false, phase: 'off: lookout session, no video work' };
     if (!window.SeatWatcher) return { ok: false, phase: 'engine not loaded' };
     if (!seatWatcherEnabled) return { ok: false, phase: watcherPhase };
     if (watcherPhase === 'running') return { ok: true, phase: 'running' };

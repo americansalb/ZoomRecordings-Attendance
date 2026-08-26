@@ -39,6 +39,24 @@ class BotSession:
     recent_sends: Dict[Tuple[Optional[str], str], float] = field(default_factory=dict)
 
 
+def _parse_lookout(capture: Dict[str, Any]) -> bool:
+    """Whether this session is a lookout (no video work of any kind).
+
+    Absent means: lookout unless the caller asked for pixels. Callers that
+    predate the flag (the tutor backend) send capture.enabled for their
+    screenshot pipeline and must keep the watcher they always had; every
+    caller that knows about lookout sends it explicitly. JSON null is
+    treated the same as absent, and a string "false" means false: bool()
+    on either would quietly flip the meaning.
+    """
+    raw = capture.get("lookout")
+    if raw is None:
+        return not bool(capture.get("enabled"))
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("false", "0", "no", "off")
+    return bool(raw)
+
+
 def _passcode_from_join_url(join_url: Optional[str]) -> str:
     if not join_url:
         return ""
@@ -133,7 +151,7 @@ class BotManager:
         # Parsed before the join because the browser page needs to know at
         # init time how much video it is allowed to render.
         capture = payload.get("capture") or {}
-        lookout = bool(capture.get("lookout", True))
+        lookout = _parse_lookout(capture)
 
         zak = payload.get("zak") or None
         role = payload.get("role")
@@ -343,7 +361,15 @@ class BotManager:
             session.loop.set_interval(interval_seconds)
         # A lookout keeps no pixels, and that is a join-time promise: the
         # page never rendered enough video to make pixels worth keeping,
-        # so turning these on mid-session would only pretend to work.
+        # so turning these on mid-session would only pretend to work. Say
+        # so in the response instead of silently succeeding: the caller
+        # writes its own record first and would otherwise store a setting
+        # this bot will never honor.
+        declined = None
+        if session.loop.lookout and (
+                bool(store_images) or int(room_snapshot_seconds or 0) > 0):
+            declined = ("lookout sessions keep no pixels; send the bot with "
+                        "video watching on to store frames or room pictures")
         if session.loop.lookout:
             store_images = None
             room_snapshot_seconds = None
@@ -358,12 +384,15 @@ class BotManager:
                     and not session.loop.storage.stores_images):
                 session.loop.storage = self.storage_factory(
                     True, self.config.drive_folder_id)
-        return {
+        resp = {
             "interval_seconds": session.loop.interval_seconds,
             "store_images": session.loop.store_images,
             "room_snapshot_seconds": session.loop.room_snapshot_seconds,
             "lookout": session.loop.lookout,
         }
+        if declined:
+            resp["note"] = declined
+        return resp
 
     # How long a delivered message shields against an identical resend.
     # Long enough to cover the control plane's retry pass, short enough
