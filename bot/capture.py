@@ -109,6 +109,15 @@ class CaptureLoop:
                          "/sys/fs/cgroup/memory/memory.usage_in_bytes")
     MEM_MAX_PATHS = ("/sys/fs/cgroup/memory.max",
                      "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    # memory.current counts file pages the machine merely read from disk
+    # (Chromium's own binary, the vendored SDK) alongside what it holds.
+    # The kernel gives those back before it kills anything, so the meter
+    # subtracts the inactive file cache, the way docker stats and the
+    # Kubernetes working set do. Measured: a fresh container read 93
+    # percent while launching a browser that later rested at 69.
+    MEM_STAT_PATHS = ("/sys/fs/cgroup/memory.stat",
+                      "/sys/fs/cgroup/memory/memory.stat")
+    MEM_STAT_INACTIVE_KEYS = ("inactive_file", "total_inactive_file")
 
     def __init__(
         self,
@@ -195,17 +204,39 @@ class CaptureLoop:
         self._wake.set()
 
     @classmethod
-    def memory_fraction(cls) -> float:
-        """How full the container's memory cgroup is, 0.0 when unknowable."""
-        def read_first(paths):
-            for p in paths:
+    def _read_first(cls, paths):
+        for p in paths:
+            try:
+                with open(p) as f:
+                    return f.read().strip()
+            except OSError:
+                continue
+        return None
+
+    @classmethod
+    def _inactive_file_bytes(cls) -> int:
+        """The reclaimable file cache the cgroup is holding, 0 when unknown."""
+        text = cls._read_first(cls.MEM_STAT_PATHS)
+        if not text:
+            return 0
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in cls.MEM_STAT_INACTIVE_KEYS:
                 try:
-                    with open(p) as f:
-                        return f.read().strip()
-                except OSError:
-                    continue
-            return None
-        cur, mx = read_first(cls.MEM_CURRENT_PATHS), read_first(cls.MEM_MAX_PATHS)
+                    return max(0, int(parts[1]))
+                except ValueError:
+                    return 0
+        return 0
+
+    @classmethod
+    def memory_fraction(cls, *, with_cache: bool = False) -> float:
+        """How full the container's memory cgroup is, 0.0 when unknowable.
+
+        The working set by default: what is held, minus the inactive file
+        cache the kernel reclaims before it kills anything. with_cache
+        gives the raw cgroup number for comparison on the health page.
+        """
+        cur, mx = cls._read_first(cls.MEM_CURRENT_PATHS), cls._read_first(cls.MEM_MAX_PATHS)
         if not cur or not mx or mx == "max":
             return 0.0
         try:
@@ -215,6 +246,8 @@ class CaptureLoop:
         # cgroup v1 reports "no limit" as an enormous number.
         if max_b <= 0 or max_b > (1 << 50):
             return 0.0
+        if not with_cache:
+            cur_b = max(0, cur_b - cls._inactive_file_bytes())
         return cur_b / max_b
 
     async def _pressure_escalate(self) -> None:

@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-41"
+BUILD = "capture-42"
 
 
 class MessageIn(BaseModel):
@@ -138,8 +138,12 @@ def build_app(
         # container's own meter, live, so nobody has to guess how close to
         # the kill line a class is running: 0.85 throttles, at 1.0 the
         # platform kills the container.
+        # memory is the working set (held memory minus the file cache the
+        # kernel reclaims first); memory_with_cache is the raw cgroup
+        # number, shown so the two can be compared on a live machine.
         return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD,
-                "memory": round(CaptureLoop.memory_fraction(), 3)}
+                "memory": round(CaptureLoop.memory_fraction(), 3),
+                "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3)}
 
     @app.get("/bots")
     async def list_bots(x_tutor_bot_secret: Optional[str] = Header(default=None)):

@@ -1041,3 +1041,21 @@ def test_camera_report_carries_zooms_own_words():
         "[error] video encoder init failed: wasm not ready",
         "[warning] getUserMedia NotAllowedError: permission denied",
     ]
+
+
+def test_memory_meter_is_the_working_set(tmp_path, monkeypatch):
+    """The meter subtracts the inactive file cache from what the cgroup
+    reports, the way docker stats does, and the raw number stays
+    available beside it. A missing stat file leaves the raw number."""
+    from bot.capture import CaptureLoop
+    cur, mx, stat = tmp_path / "memory.current", tmp_path / "memory.max", tmp_path / "memory.stat"
+    cur.write_text("480000000\n")
+    mx.write_text("536870912\n")
+    stat.write_text("anon 300000000\nfile 170000000\ninactive_file 120000000\nactive_file 50000000\n")
+    monkeypatch.setattr(CaptureLoop, "MEM_CURRENT_PATHS", (str(cur),))
+    monkeypatch.setattr(CaptureLoop, "MEM_MAX_PATHS", (str(mx),))
+    monkeypatch.setattr(CaptureLoop, "MEM_STAT_PATHS", (str(stat),))
+    assert round(CaptureLoop.memory_fraction(with_cache=True), 3) == round(480000000 / 536870912, 3)
+    assert round(CaptureLoop.memory_fraction(), 3) == round(360000000 / 536870912, 3)
+    monkeypatch.setattr(CaptureLoop, "MEM_STAT_PATHS", (str(tmp_path / "absent"),))
+    assert round(CaptureLoop.memory_fraction(), 3) == round(480000000 / 536870912, 3)
