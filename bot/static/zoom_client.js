@@ -300,7 +300,11 @@ async function ensureClient() {
         for (const row of presence.values()) {
           if (row.leftAt === null) { settleVideo(row, false); row.leftAt = nowMs(); }
         }
-        emitLifecycle('ended', String(state));
+        // The reason rides along in words ("kicked by host", "ended by
+        // host"): the control plane must tell a host removing the bot
+        // from the meeting simply ending, and never walk back into the
+        // first one.
+        emitLifecycle('ended', payload.reason ? `${state}: ${payload.reason}` : String(state));
       }
     } catch (e) { console.error('connection-change handler error', e); }
   });

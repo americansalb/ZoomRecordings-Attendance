@@ -136,6 +136,19 @@ class BotManager:
         client.on_chat = _on_chat
         client.on_lifecycle = _on_lifecycle
 
+        # The camera picture for this join, picked by the control plane
+        # from the pool the console manages. Best effort: no photo, or a
+        # photo that will not decode, means the built-in picture.
+        fetch_photo = getattr(self.backend, "fetch_camera_photo", None)
+        wear = getattr(client, "set_camera_face", None)
+        if fetch_photo is not None and wear is not None:
+            try:
+                photo = await fetch_photo(session_ref)
+                if photo and wear(photo):
+                    logger.info("[BOT] wearing a picture from the pool (%d bytes)", len(photo))
+            except Exception as e:
+                logger.warning("[BOT] camera photo skipped: %s", e)
+
         # Role must agree with how we are authenticating. A ZAK joins as
         # a specific, authenticated Zoom user (ours, set as alternative
         # host on the meeting), which is a role-1 join. Signing role 0

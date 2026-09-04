@@ -75,3 +75,19 @@ class BackendClient:
 
     async def post_screenshot(self, row: Dict[str, Any]) -> None:
         await self._post("/api/tutor/bot/screenshots", row)
+
+    async def fetch_camera_photo(self, session_ref: str) -> Optional[bytes]:
+        """The bot's camera picture for this join, picked by the control
+        plane from the pool the console manages. None when the pool is
+        empty or the backend is unreachable: the bot wears its built-in
+        picture then, and a missing photo never delays a join."""
+        url = f"{self.base_url}/api/tutor/bot/photo"
+        try:
+            resp = await self._http().get(
+                url, params={"session_ref": session_ref}, headers=self._headers(), timeout=8.0)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+            return None
+        except httpx.HTTPError as e:
+            logger.warning("camera photo fetch failed: %s", e)
+            return None

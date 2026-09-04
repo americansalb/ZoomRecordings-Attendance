@@ -33,6 +33,42 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
 
+def image_bytes_to_y4m(data: bytes, path: str, width: int = 640, height: int = 360,
+                       fps: int = 10) -> bool:
+    """Decode an image (JPEG, PNG, WebP) and write it as a two-frame Y4M
+    file Chromium's fake webcam can play, letterboxed onto 16:9 so the
+    whole picture shows in a Zoom tile. False when the image cannot be
+    decoded; the caller keeps the built-in picture then.
+    """
+    try:
+        import numpy as np
+        import cv2
+    except Exception:
+        return False
+    try:
+        arr = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return False
+        h, w = img.shape[:2]
+        scale = min(width / w, height / h)
+        nw, nh = max(2, int(round(w * scale))), max(2, int(round(h * scale)))
+        resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+        canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        canvas[:] = (20, 20, 12)
+        y0, x0 = (height - nh) // 2, (width - nw) // 2
+        canvas[y0:y0 + nh, x0:x0 + nw] = resized
+        # I420 is exactly the planar Y, U, V layout a C420 Y4M frame wants.
+        frame = cv2.cvtColor(canvas, cv2.COLOR_BGR2YUV_I420).tobytes()
+        with open(path, "wb") as f:
+            f.write(f"YUV4MPEG2 W{width} H{height} F{fps}:1 Ip A1:1 C420jpeg\n".encode())
+            for _ in range(2):
+                f.write(b"FRAME\n" + frame)
+        return True
+    except Exception:
+        return False
+
+
 def _looks_like_browser_death(exc: BaseException) -> bool:
     """Distinguish 'the browser died under us' from 'Zoom said no'.
 
@@ -249,6 +285,9 @@ class PlaywrightZoomClient(MeetingClient):
         self._joining = False
         self._gone_reported = False
         self._diet_active = False
+        # A picture from the console's pool for this join, converted to
+        # the fake webcam's format in a temp file; None means built-in.
+        self._camera_face_path: Optional[str] = None
 
     # Flags: fake media so Chromium grants mic/cam without hardware, and the
     # WebRTC bits the Web SDK needs in a container.
@@ -292,15 +331,43 @@ class PlaywrightZoomClient(MeetingClient):
     CAMERA_FACE_MAX_MEM = 0.70
 
     @classmethod
+    def camera_face_switched_on(cls) -> bool:
+        return os.environ.get("BOT_CAMERA_FACE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+    @classmethod
     def camera_face_enabled(cls) -> bool:
-        if os.environ.get("BOT_CAMERA_FACE", "on").strip().lower() in ("0", "off", "false", "no"):
+        return cls.camera_face_switched_on() and cls.CAMERA_FACE_FILE.is_file()
+
+    def _face_file(self) -> Path:
+        """The picture for this join: one from the pool if the control
+        plane sent one, otherwise the built-in one."""
+        if self._camera_face_path:
+            return Path(self._camera_face_path)
+        return self.CAMERA_FACE_FILE
+
+    def set_camera_face(self, image_bytes: Optional[bytes]) -> bool:
+        """Wear this picture for the coming join instead of the built-in
+        one. Converted into the fake webcam's format in a temp file that
+        close() removes. False leaves the built-in picture in place."""
+        if not image_bytes:
             return False
-        return cls.CAMERA_FACE_FILE.is_file()
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="bot-face-", suffix=".y4m")
+        os.close(fd)
+        if image_bytes_to_y4m(image_bytes, path):
+            self._camera_face_path = path
+            return True
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return False
 
     def _launch_args(self, lookout: bool) -> list:
         args = list(self.BASE_ARGS)
-        if self.camera_face_enabled():
-            args.append(f"--use-file-for-fake-video-capture={self.CAMERA_FACE_FILE}")
+        face = self._face_file()
+        if self.camera_face_switched_on() and face.is_file():
+            args.append(f"--use-file-for-fake-video-capture={face}")
         if lookout:
             args += self.LOOKOUT_ARGS
         return args
@@ -311,7 +378,7 @@ class PlaywrightZoomClient(MeetingClient):
         Measured right before the join, with the browser and SDK already
         loaded: a machine already near the line gets no cosmetics.
         """
-        if not self.camera_face_enabled():
+        if not (self.camera_face_switched_on() and self._face_file().is_file()):
             return False
         from .capture import CaptureLoop
         frac = CaptureLoop.memory_fraction()
@@ -756,6 +823,12 @@ class PlaywrightZoomClient(MeetingClient):
         except Exception:
             pass
         self._pw = None
+        if self._camera_face_path:
+            try:
+                os.unlink(self._camera_face_path)
+            except OSError:
+                pass
+            self._camera_face_path = None
 
 
 def build_meeting_client(page_url: str, headless: bool) -> MeetingClient:

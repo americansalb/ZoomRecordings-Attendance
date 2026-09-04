@@ -966,3 +966,33 @@ def test_camera_picture_yields_under_pressure(monkeypatch):
     asyncio.run(loop._pressure_escalate())
     asyncio.run(loop._pressure_escalate())
     assert stops == [1]
+
+
+def test_pool_picture_becomes_the_camera(tmp_path, monkeypatch):
+    """A picture from the console's pool is converted for the fake webcam
+    and takes the built-in picture's place in the launch flags; a picture
+    that will not decode leaves the built-in one alone."""
+    import numpy as np
+    import cv2
+    from bot.meeting_client import PlaywrightZoomClient, image_bytes_to_y4m
+
+    img = np.zeros((300, 400, 3), dtype=np.uint8)
+    img[:, :, 1] = 200
+    ok, png = cv2.imencode(".png", img)
+    assert ok
+    out = tmp_path / "face.y4m"
+    assert image_bytes_to_y4m(png.tobytes(), str(out))
+    data = out.read_bytes()
+    assert data.startswith(b"YUV4MPEG2 W640 H360 F10:1")
+    header_len = data.index(b"\n") + 1
+    frame_len = 640 * 360 * 3 // 2
+    assert len(data) == header_len + 2 * (len(b"FRAME\n") + frame_len)
+
+    monkeypatch.delenv("BOT_CAMERA_FACE", raising=False)
+    c = PlaywrightZoomClient(page_url="http://x", headless=True)
+    assert c.set_camera_face(png.tobytes())
+    args = c._launch_args(lookout=True)
+    flag = next(a for a in args if a.startswith("--use-file-for-fake-video-capture="))
+    assert flag.endswith(".y4m") and "assets/bot-face.y4m" not in flag
+    assert c.set_camera_face(b"not an image") is False
+    assert c.set_camera_face(None) is False
