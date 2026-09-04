@@ -378,15 +378,22 @@ class PlaywrightZoomClient(MeetingClient):
         Measured right before the join, with the browser and SDK already
         loaded: a machine already near the line gets no cosmetics.
         """
-        if not (self.camera_face_switched_on() and self._face_file().is_file()):
-            return False
+        return self._camera_face_decision()[0]
+
+    def _camera_face_decision(self):
+        """(wanted, reason): the reason is what the console shows when the
+        picture stays off, in words the owner can act on."""
+        if not self.camera_face_switched_on():
+            return False, "switched off with BOT_CAMERA_FACE"
+        if not self._face_file().is_file():
+            return False, "no picture file on the machine"
         from .capture import CaptureLoop
         frac = CaptureLoop.memory_fraction()
         if frac >= self.CAMERA_FACE_MAX_MEM:
             logger.info("[BOT] camera picture skipped: memory at %d%% before the join",
                         int(frac * 100))
-            return False
-        return True
+            return False, f"memory was at {int(frac * 100)} percent before the join, the limit is {int(self.CAMERA_FACE_MAX_MEM * 100)}"
+        return True, f"memory at {int(frac * 100)} percent before the join"
 
     async def _open_page(self, args: list) -> None:
         """Launch Chromium with the given flags and load the client page up
@@ -525,6 +532,7 @@ class PlaywrightZoomClient(MeetingClient):
                     "normal flags: %s", str(e)[:300])
                 await self._relaunch_normal()
 
+            camera_face = self._camera_face_decision()
             cfg = {
                 "sdkKey": sdk_key,
                 "signature": signature,
@@ -544,7 +552,8 @@ class PlaywrightZoomClient(MeetingClient):
                 "lookout": bool(lookout),
                 # The camera picture: on only when the machine has room
                 # for it right now. The page presses Zoom's own button.
-                "cameraFace": self._camera_face_now(),
+                "cameraFace": camera_face[0],
+                "cameraFaceReason": camera_face[1],
             }
             try:
                 await self._page.evaluate(
