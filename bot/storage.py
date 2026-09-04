@@ -26,8 +26,14 @@ class Storage(ABC):
     def stores_images(self) -> bool: ...
 
     @abstractmethod
-    async def upload(self, *, data: bytes, filename: str, session_folder: str) -> Tuple[Optional[str], Optional[str]]:
-        """Return (file_id, web_view_link); (None, None) if nothing was stored."""
+    async def upload(self, *, data: bytes, filename: str, session_folder: str,
+                     subfolder: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+        """Return (file_id, web_view_link); (None, None) if nothing was stored.
+
+        `subfolder` files the image one level deeper, inside the session
+        folder: that is how one student's photos end up together in a
+        folder of their own instead of scattered through the session.
+        """
 
 
 class NullStorage(Storage):
@@ -35,7 +41,8 @@ class NullStorage(Storage):
     def stores_images(self) -> bool:
         return False
 
-    async def upload(self, *, data: bytes, filename: str, session_folder: str):
+    async def upload(self, *, data: bytes, filename: str, session_folder: str,
+                     subfolder: Optional[str] = None):
         return (None, None)
 
 
@@ -72,25 +79,34 @@ class DriveStorage(Storage):
             self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
         return self._service
 
-    def _ensure_folder(self, name: str) -> str:
+    def _ensure_folder(self, name: str, parent_id: Optional[str] = None) -> str:
+        """The folder `name` under `parent_id` (our configured parent when
+        none is given), created once and remembered. Cached by the full
+        path so two students with the same name in different sessions
+        cannot collide onto one folder."""
+        parent = parent_id if parent_id is not None else self.parent_folder_id
+        cache_key = f"{parent or 'root'}/{name}"
         with self._lock:
-            if name in self._folder_cache:
-                return self._folder_cache[name]
+            if cache_key in self._folder_cache:
+                return self._folder_cache[cache_key]
             svc = self._get_service()
             meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
-            if self.parent_folder_id:
-                meta["parents"] = [self.parent_folder_id]
+            if parent:
+                meta["parents"] = [parent]
             folder = svc.files().create(
                 body=meta, fields="id", supportsAllDrives=True
             ).execute()
-            self._folder_cache[name] = folder["id"]
+            self._folder_cache[cache_key] = folder["id"]
             return folder["id"]
 
-    def _upload_sync(self, data: bytes, filename: str, session_folder: str) -> Tuple[str, str]:
+    def _upload_sync(self, data: bytes, filename: str, session_folder: str,
+                     subfolder: Optional[str] = None) -> Tuple[str, str]:
         from googleapiclient.http import MediaInMemoryUpload
 
         svc = self._get_service()
         folder_id = self._ensure_folder(session_folder)
+        if subfolder:
+            folder_id = self._ensure_folder(subfolder, parent_id=folder_id)
         media = MediaInMemoryUpload(data, mimetype="image/png")
         f = svc.files().create(
             body={"name": filename, "parents": [folder_id]},
@@ -100,10 +116,12 @@ class DriveStorage(Storage):
         ).execute()
         return f["id"], f.get("webViewLink")
 
-    async def upload(self, *, data: bytes, filename: str, session_folder: str):
+    async def upload(self, *, data: bytes, filename: str, session_folder: str,
+                     subfolder: Optional[str] = None):
         import asyncio
         try:
-            return await asyncio.to_thread(self._upload_sync, data, filename, session_folder)
+            return await asyncio.to_thread(
+                self._upload_sync, data, filename, session_folder, subfolder)
         except Exception as e:
             logger.warning("Drive upload failed for %s: %s", filename, e)
             return (None, None)

@@ -119,6 +119,7 @@ class CaptureLoop:
         interval_seconds: int,
         store_images: bool,
         room_snapshot_seconds: int = 0,
+        student_photo_seconds: int = 0,
         lookout: bool = False,
         face_detector: Callable[[bytes], bool] = default_face_detector,
     ):
@@ -143,6 +144,17 @@ class CaptureLoop:
         # None means no shot yet: the first one goes immediately, so the
         # evidence starts when the bot does instead of one window late.
         self._last_room_shot = None
+        # One student at a time, each on their own clock: every
+        # `student_photo_seconds` the person longest overdue gets one
+        # picture, filed in a folder of their own. 0 means off. A room
+        # picture only proves the class looked normal; a per-person photo
+        # is the one that can answer whether a named student was there
+        # and on camera at a given minute. Off for a lookout, which never
+        # renders a tile to photograph.
+        self.student_photo_seconds = (
+            0 if self.lookout else max(0, int(student_photo_seconds or 0)))
+        # user id -> monotonic time of their last student photo.
+        self._last_student_photo: dict = {}
         self.face_detector = face_detector
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -516,6 +528,49 @@ class CaptureLoop:
                         session_folder=folder)
             except Exception as e:
                 logger.warning("room snapshot failed: %s", e)
+
+        # One student, photographed on their own clock and filed in a
+        # folder of their own. Whoever is longest overdue goes next, so a
+        # class rotates fairly instead of favouring whoever sits on the
+        # first gallery page. Only people with a camera on are eligible:
+        # a camera-off student has no tile, so there is nothing to
+        # photograph and a missing photo must never be mistaken for a
+        # photo of an empty seat. One capture per sweep, skipped under
+        # memory pressure like every other pixel path.
+        if self.student_photo_seconds > 0 and not self._throttled:
+            now_mono = time.monotonic()
+            due = []
+            for row in snapshot.rows:
+                if self._is_self(row.user_id, row.name, ctx):
+                    continue
+                p = participants.get(row.user_id)
+                if p is not None and (p.is_hold or p.is_host):
+                    continue
+                if not (bool(p.video_on) if p else bool(row.video_on)):
+                    continue
+                last = self._last_student_photo.get(str(row.user_id))
+                if last is not None and now_mono - last < self.student_photo_seconds:
+                    continue
+                # Never photographed yet sorts first, then longest overdue.
+                due.append((last if last is not None else -1.0, row))
+            if due:
+                due.sort(key=lambda x: x[0])
+                row = due[0][1]
+                self._last_student_photo[str(row.user_id)] = now_mono
+                try:
+                    shot = await self.client.capture_user(row.user_id)
+                    if shot:
+                        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+                        # The folder is named for the person and carries
+                        # their Zoom id, so two students with the same
+                        # display name never share a folder.
+                        await self.storage.upload(
+                            data=shot,
+                            filename=f"{_safe(row.name)}_{ts}.png",
+                            session_folder=folder,
+                            subfolder=f"{_safe(row.name)}_{_safe(str(row.user_id))}")
+                except Exception as e:
+                    logger.warning("student photo failed for %s: %s", row.user_id, e)
 
         return rows
 

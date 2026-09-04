@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-36"
+BUILD = "capture-37"
 
 
 class MessageIn(BaseModel):
@@ -50,6 +50,7 @@ class CaptureConfigIn(BaseModel):
     interval_seconds: Optional[int] = None
     store_images: Optional[bool] = None
     room_snapshot_seconds: Optional[int] = None
+    student_photo_seconds: Optional[int] = None
 
 
 def build_app(
@@ -262,6 +263,7 @@ def build_app(
                 interval_seconds=body.interval_seconds,
                 store_images=body.store_images,
                 room_snapshot_seconds=body.room_snapshot_seconds,
+                student_photo_seconds=body.student_photo_seconds,
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown runtime_id")

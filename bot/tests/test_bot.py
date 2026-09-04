@@ -50,7 +50,7 @@ class FakeDriveStorage(Storage):
     def stores_images(self):
         return True
 
-    async def upload(self, *, data, filename, session_folder):
+    async def upload(self, *, data, filename, session_folder, subfolder=None):
         return ("fid-" + filename, "https://drive/" + filename)
 
 
@@ -645,7 +645,7 @@ async def _room_snapshots():
         def stores_images(self):
             return True
 
-        async def upload(self, *, data, filename, session_folder):
+        async def upload(self, *, data, filename, session_folder, subfolder=None):
             self.uploads.append((filename, session_folder, len(data)))
             return ("fid", "https://drive/" + filename)
 
@@ -689,6 +689,73 @@ def test_room_snapshots():
     asyncio.run(_room_snapshots())
 
 
+async def _student_photos():
+    """One student at a time, filed in a folder of their own.
+
+    Opt-in. One photo per sweep at most, each person on their own clock,
+    the longest overdue going next so a class rotates fairly. Cameras-off
+    students are not photographed: there is no tile, and a missing photo
+    must never read as a picture of an empty seat.
+    """
+    class RecordingStorage(Storage):
+        def __init__(self):
+            self.uploads = []
+
+        @property
+        def stores_images(self):
+            return True
+
+        async def upload(self, *, data, filename, session_folder, subfolder=None):
+            self.uploads.append((filename, session_folder, subfolder))
+            return ("fid", "https://drive/" + filename)
+
+    parts = [
+        Participant("1", "Maria Gomez", video_on=True),
+        Participant("2", "Daniel Reyes", video_on=True),
+        Participant("3", "Sam Lee", video_on=False),
+    ]
+    frames = {"1": b"MARIA", "2": b"DANIEL", "3": b"SAM"}
+    ctx = CaptureContext(runtime_id="r", session_ref="61", meeting_id="m",
+                         session_label="botsession:61", bot_name="AALB Assistant")
+
+    # Off by default.
+    off = RecordingStorage()
+    loop = CaptureLoop(FakeMeetingClient(participants=parts, frames=frames),
+                       FakeBackend(), off, interval_seconds=300, store_images=False)
+    await loop.run_once(ctx)
+    assert off.uploads == [], "student photos must be opt-in"
+
+    # On: one per sweep, rotating, and each lands in its own folder.
+    store = RecordingStorage()
+    loop2 = CaptureLoop(FakeMeetingClient(participants=parts, frames=frames),
+                        FakeBackend(), store, interval_seconds=300,
+                        store_images=False, student_photo_seconds=3600)
+    await loop2.run_once(ctx)
+    await loop2.run_once(ctx)
+    await loop2.run_once(ctx)
+    assert len(store.uploads) == 2, (
+        f"one photo per sweep for each camera-on student, got {store.uploads}")
+    folders = sorted(u[2] for u in store.uploads)
+    assert folders == ["Daniel-Reyes_2", "Maria-Gomez_1"], folders
+    assert all(u[1].endswith("botsession:61") for u in store.uploads)
+    assert not any("Sam" in (u[2] or "") for u in store.uploads), (
+        "a camera-off student has no tile to photograph"
+    )
+
+    # A lookout never photographs anyone, whatever it is asked for.
+    lookout_store = RecordingStorage()
+    loop3 = CaptureLoop(FakeMeetingClient(participants=parts, frames=frames),
+                        FakeBackend(), lookout_store, interval_seconds=300,
+                        store_images=True, student_photo_seconds=30, lookout=True)
+    await loop3.run_once(ctx)
+    assert loop3.student_photo_seconds == 0
+    assert lookout_store.uploads == []
+
+
+def test_student_photos():
+    asyncio.run(_student_photos())
+
+
 async def _lookout_mode():
     """A lookout records the room and touches no pixels.
 
@@ -723,7 +790,7 @@ async def _lookout_mode():
         def stores_images(self):
             return True
 
-        async def upload(self, *, data, filename, session_folder):
+        async def upload(self, *, data, filename, session_folder, subfolder=None):
             self.uploads.append(filename)
             return ("fid", "https://drive/" + filename)
 

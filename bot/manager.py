@@ -229,13 +229,20 @@ class BotManager:
         # wants to keep pixels. A lookout keeps no pixels at all.
         room_snapshot_seconds = (
             0 if lookout else int(capture.get("room_snapshot_seconds", 0) or 0))
+        # One student at a time, filed under that student. Same rule as
+        # every other pixel path: a lookout renders no tile, so it has
+        # nothing to photograph.
+        student_photo_seconds = (
+            0 if lookout else int(capture.get("student_photo_seconds", 0) or 0))
         storage = self.storage_factory(
-            store_images or room_snapshot_seconds > 0, self.config.drive_folder_id)
+            store_images or room_snapshot_seconds > 0 or student_photo_seconds > 0,
+            self.config.drive_folder_id)
         loop = CaptureLoop(
             client, self.backend, storage,
             interval_seconds=int(capture.get("interval_seconds", 300)),
             store_images=store_images,
             room_snapshot_seconds=room_snapshot_seconds,
+            student_photo_seconds=student_photo_seconds,
             lookout=lookout,
         )
         ctx = CaptureContext(
@@ -351,7 +358,8 @@ class BotManager:
     def set_capture_config(self, runtime_id: str, *,
                            interval_seconds: Optional[int] = None,
                            store_images: Optional[bool] = None,
-                           room_snapshot_seconds: Optional[int] = None) -> Dict[str, Any]:
+                           room_snapshot_seconds: Optional[int] = None,
+                           student_photo_seconds: Optional[int] = None) -> Dict[str, Any]:
         """Reconfigure a running loop, so a settings change does not require
         dismissing and re-summoning the bot."""
         session = self._require(runtime_id)
@@ -367,12 +375,15 @@ class BotManager:
         # this bot will never honor.
         declined = None
         if session.loop.lookout and (
-                bool(store_images) or int(room_snapshot_seconds or 0) > 0):
+                bool(store_images) or int(room_snapshot_seconds or 0) > 0
+                or int(student_photo_seconds or 0) > 0):
             declined = ("lookout sessions keep no pixels; send the bot with "
-                        "video watching on to store frames or room pictures")
+                        "video watching on to store frames, room pictures, "
+                        "or student photos")
         if session.loop.lookout:
             store_images = None
             room_snapshot_seconds = None
+            student_photo_seconds = None
         if store_images is not None:
             session.loop.store_images = bool(store_images)
         if room_snapshot_seconds is not None:
@@ -384,10 +395,17 @@ class BotManager:
                     and not session.loop.storage.stores_images):
                 session.loop.storage = self.storage_factory(
                     True, self.config.drive_folder_id)
+        if student_photo_seconds is not None:
+            session.loop.student_photo_seconds = max(0, int(student_photo_seconds))
+            if (session.loop.student_photo_seconds > 0
+                    and not session.loop.storage.stores_images):
+                session.loop.storage = self.storage_factory(
+                    True, self.config.drive_folder_id)
         resp = {
             "interval_seconds": session.loop.interval_seconds,
             "store_images": session.loop.store_images,
             "room_snapshot_seconds": session.loop.room_snapshot_seconds,
+            "student_photo_seconds": session.loop.student_photo_seconds,
             "lookout": session.loop.lookout,
         }
         if declined:
