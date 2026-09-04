@@ -167,6 +167,9 @@ class CaptureLoop:
         # Rotation cursor for the per-sweep face check cap.
         self._face_rr = 0
         self._throttled = False
+        # The bot's own camera picture is cosmetic, so at the memory hard
+        # limit it is the first thing switched off, once.
+        self._camera_stopped = False
         # user id -> monotonic time of their last fallback screenshot.
         self._last_polaroid: dict = {}
         self._last_advance = 0.0
@@ -230,6 +233,19 @@ class CaptureLoop:
                     await shrink()
                 except Exception as e:
                     logger.warning("emergency viewport shrink failed: %s", e)
+            # The cat yields before the class does: the bot's camera picture
+            # costs an encoder, and an encoder is the first thing to give
+            # back when the machine is this close to the line.
+            stop = getattr(self.client, "stop_video", None)
+            if stop is not None and not self._camera_stopped:
+                self._camera_stopped = True
+                try:
+                    await stop()
+                    logger.warning(
+                        "[CAPTURE] memory at %d%%; the bot's camera picture is switched "
+                        "off to make room", int(frac * 100))
+                except Exception as e:
+                    logger.warning("camera picture stop failed: %s", e)
 
     async def _memory_watchdog(self) -> None:
         """Check pressure every couple of seconds, not once per sweep.

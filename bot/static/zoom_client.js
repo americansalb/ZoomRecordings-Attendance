@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-30: lookout watcher phase says lookout, not the env switch';
+const PAGE_BUILD = 'capture-31: the bot wears a camera picture';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -318,6 +318,7 @@ window.zoomJoin = async (cfg) => {
   // than borrowing the BOT_SEAT_WATCHER switch and pointing whoever reads
   // diagnostics at an env var that is actually set to on.
   lookoutMode = !!cfg.lookout;
+  cameraFaceWanted = !!cfg.cameraFace;
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -387,6 +388,7 @@ window.zoomJoin = async (cfg) => {
   clearInterval(waitingWatch);
   joined = true;
   startSeatWatcher();
+  startCameraFace();
 
   // Everything past this point is bookkeeping. It used to run unguarded, and
   // one bad call here (getMediaStream, which this SDK does not have) rejected
@@ -492,6 +494,88 @@ window.zoomSelfUserId = async () => selfUserId;
  * participant objects so the disagreement can be read directly, including
  * which field the value came from and whether the media engine ever started.
  */
+/*
+ * The bot's camera picture.
+ *
+ * Zoom shows a profile photo only for a signed-in account, and this bot
+ * joins as a guest, so the picture rides the camera instead: Python points
+ * Chromium's fake webcam at a still image, and the bot switches its own
+ * video on by pressing Zoom's Start Video button. The Component View has
+ * no method for that, so the button is found by its accessible label.
+ * Purely cosmetic: it never throws, it reports what it found through
+ * diagnostics, and Python asks it to stop when memory gets tight.
+ */
+let cameraFaceWanted = false;
+const cameraFace = {
+  wanted: false, buttonFound: false, clicked: false, videoOn: null,
+  phase: 'not started', error: null,
+};
+
+function videoButton(kind) {
+  const root = document.getElementById('zoom-root') || document.body;
+  const re = kind === 'start'
+    ? /start\s*(my\s*)?video|turn\s*on\s*(my\s*)?video|unmute\s*video/i
+    : /stop\s*(my\s*)?video|turn\s*off\s*(my\s*)?video|mute\s*video/i;
+  const label = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${
+    (b.textContent || '').slice(0, 60)}`;
+  return [...root.querySelectorAll('button, [role="button"]')]
+    .find((b) => re.test(label(b)) && b.offsetParent !== null) || null;
+}
+
+function selfVideoOn() {
+  try {
+    const u = client && client.getCurrentUser && client.getCurrentUser();
+    if (!u) return null;
+    return !!(u.bVideoOn ?? u.video);
+  } catch (e) { return null; }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function startCameraFace() {
+  if (!cameraFaceWanted) return;
+  cameraFace.wanted = true;
+  cameraFace.phase = 'waiting for the toolbar';
+  try {
+    let btn = null;
+    for (let i = 0; i < 20 && !btn; i += 1) {
+      if (selfVideoOn() === true) {
+        cameraFace.videoOn = true; cameraFace.phase = 'video already on'; return;
+      }
+      btn = videoButton('start');
+      if (!btn) await sleep(1000);
+    }
+    if (!btn) { cameraFace.phase = 'no Start Video button found in the toolbar'; return; }
+    cameraFace.buttonFound = true;
+    btn.click();
+    cameraFace.clicked = true;
+    cameraFace.phase = 'pressed Start Video';
+    for (let i = 0; i < 12; i += 1) {
+      await sleep(1000);
+      if (selfVideoOn() === true) { cameraFace.videoOn = true; cameraFace.phase = 'video on'; return; }
+    }
+    cameraFace.videoOn = selfVideoOn();
+    cameraFace.phase = cameraFace.videoOn ? 'video on' : 'pressed Start Video, but Zoom never reported video on';
+  } catch (e) {
+    cameraFace.error = String((e && e.message) || e).slice(0, 160);
+    cameraFace.phase = 'failed';
+  }
+}
+
+window.zoomStopVideo = async () => {
+  try {
+    if (selfVideoOn() === false) return { ok: true, phase: 'already off' };
+    const btn = videoButton('stop');
+    if (!btn) return { ok: false, phase: 'no Stop Video button found' };
+    btn.click();
+    cameraFace.phase = 'switched off to make room';
+    cameraFace.videoOn = false;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e).slice(0, 160) };
+  }
+};
+
 window.zoomDiagnostics = async () => {
   const out = {
     joined: joined,
@@ -514,6 +598,7 @@ window.zoomDiagnostics = async () => {
   // reading is Zoom never telling us, or us mishandling what it said.
   out.pageBuild = PAGE_BUILD;
   out.lookout = lookoutMode;
+  out.cameraFace = { ...cameraFace };
   out.videoEvents = videoEvents.slice(-30);
   out.chatLog = chatLog.slice(-20);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }

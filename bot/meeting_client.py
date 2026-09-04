@@ -28,6 +28,7 @@ import os
 import re
 import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
@@ -144,6 +145,10 @@ class MeetingClient(ABC):
 
     async def page_screenshot(self) -> Optional[bytes]:
         """PNG of the whole meeting page, for the console's evidence view."""
+        return None
+
+    async def stop_video(self) -> Optional[dict]:
+        """Switch the bot's own camera picture off, if it has one."""
         return None
 
     @abstractmethod
@@ -275,6 +280,47 @@ class PlaywrightZoomClient(MeetingClient):
         "--mute-audio",
     ]
 
+    # The bot's camera picture: a still image Chromium's fake webcam plays
+    # on a loop (bot/assets/bot-face.y4m, 640x360, 10 frames a second).
+    # Zoom shows a profile photo only for a signed-in account and this bot
+    # is a guest, so the picture rides the camera instead. The flag only
+    # decides what the fake webcam shows; the cost arrives when the page
+    # switches video on, which it does only when memory has room, and the
+    # capture loop switches it off again at the hard limit.
+    # BOT_CAMERA_FACE=off removes it without a build.
+    CAMERA_FACE_FILE = Path(__file__).parent / "assets" / "bot-face.y4m"
+    CAMERA_FACE_MAX_MEM = 0.70
+
+    @classmethod
+    def camera_face_enabled(cls) -> bool:
+        if os.environ.get("BOT_CAMERA_FACE", "on").strip().lower() in ("0", "off", "false", "no"):
+            return False
+        return cls.CAMERA_FACE_FILE.is_file()
+
+    def _launch_args(self, lookout: bool) -> list:
+        args = list(self.BASE_ARGS)
+        if self.camera_face_enabled():
+            args.append(f"--use-file-for-fake-video-capture={self.CAMERA_FACE_FILE}")
+        if lookout:
+            args += self.LOOKOUT_ARGS
+        return args
+
+    def _camera_face_now(self) -> bool:
+        """Whether this join should switch the camera picture on at all.
+
+        Measured right before the join, with the browser and SDK already
+        loaded: a machine already near the line gets no cosmetics.
+        """
+        if not self.camera_face_enabled():
+            return False
+        from .capture import CaptureLoop
+        frac = CaptureLoop.memory_fraction()
+        if frac >= self.CAMERA_FACE_MAX_MEM:
+            logger.info("[BOT] camera picture skipped: memory at %d%% before the join",
+                        int(frac * 100))
+            return False
+        return True
+
     async def _open_page(self, args: list) -> None:
         """Launch Chromium with the given flags and load the client page up
         to the point where the Zoom SDK global exists. Everything before
@@ -399,8 +445,7 @@ class PlaywrightZoomClient(MeetingClient):
         self._diet_active = bool(lookout)
         try:
             try:
-                await self._open_page(
-                    self.BASE_ARGS + (self.LOOKOUT_ARGS if lookout else []))
+                await self._open_page(self._launch_args(lookout))
             except Exception as e:
                 if not lookout:
                     raise
@@ -430,6 +475,9 @@ class PlaywrightZoomClient(MeetingClient):
                 # Lookout: thumbnail view, no detector, no face work. The
                 # page enforces its side of the bargain from this flag.
                 "lookout": bool(lookout),
+                # The camera picture: on only when the machine has room
+                # for it right now. The page presses Zoom's own button.
+                "cameraFace": self._camera_face_now(),
             }
             try:
                 await self._page.evaluate(
@@ -459,7 +507,7 @@ class PlaywrightZoomClient(MeetingClient):
         self._pw = await async_playwright().start()
         self._page_errors.clear()
         self._page_console.clear()
-        await self._open_page(self.BASE_ARGS)
+        await self._open_page(self._launch_args(False))
 
     async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
         result = await self._page.evaluate(
@@ -600,6 +648,16 @@ class PlaywrightZoomClient(MeetingClient):
         except Exception as e:
             logger.debug("gallery advance failed: %s", e)
             return {"ok": False}
+
+    async def stop_video(self) -> Optional[dict]:
+        """Ask the page to press Zoom's Stop Video: the camera picture is
+        the first thing to give back under memory pressure."""
+        if not self._page:
+            return None
+        try:
+            return await self._page.evaluate("async () => await window.zoomStopVideo()")
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:160]}
 
     async def shrink_viewport(self) -> None:
         """Emergency decode shed under memory pressure.

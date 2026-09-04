@@ -932,3 +932,37 @@ def test_browser_death_classifier():
         assert _looks_like_browser_death(RuntimeError(msg)), msg
     for msg in alive:
         assert not _looks_like_browser_death(RuntimeError(msg)), msg
+
+
+def test_camera_picture_launch_args(monkeypatch):
+    """The cat ships with the bot and rides Chromium's fake webcam flag,
+    and BOT_CAMERA_FACE=off removes it without a build."""
+    from bot.meeting_client import PlaywrightZoomClient
+    c = PlaywrightZoomClient(page_url="http://x", headless=True)
+    monkeypatch.delenv("BOT_CAMERA_FACE", raising=False)
+    assert PlaywrightZoomClient.CAMERA_FACE_FILE.is_file()
+    args = c._launch_args(lookout=True)
+    assert any(a.startswith("--use-file-for-fake-video-capture=") for a in args)
+    assert "--single-process" in args
+    assert "--use-fake-device-for-media-stream" in args
+    monkeypatch.setenv("BOT_CAMERA_FACE", "off")
+    assert not any(a.startswith("--use-file-for-fake-video-capture=")
+                   for a in c._launch_args(lookout=False))
+
+
+def test_camera_picture_yields_under_pressure(monkeypatch):
+    """At the memory hard limit the cosmetic camera is the first thing to
+    go, and it is asked to go exactly once."""
+    stops = []
+
+    class StoppingClient(FakeMeetingClient):
+        async def stop_video(self):
+            stops.append(1)
+            return {"ok": True}
+
+    loop = CaptureLoop(StoppingClient(), FakeBackend(), NullStorage(),
+                       interval_seconds=30, store_images=False)
+    monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.95))
+    asyncio.run(loop._pressure_escalate())
+    asyncio.run(loop._pressure_escalate())
+    assert stops == [1]
