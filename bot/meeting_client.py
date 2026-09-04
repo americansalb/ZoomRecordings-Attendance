@@ -69,6 +69,10 @@ def image_bytes_to_y4m(data: bytes, path: str, width: int = 640, height: int = 3
         return False
 
 
+_CAMERA_WORDS = re.compile(
+    r"video|camera|encod|getUserMedia|NotAllowed|NotReadable|permission|mediaDevices", re.I)
+
+
 def _looks_like_browser_death(exc: BaseException) -> bool:
     """Distinguish 'the browser died under us' from 'Zoom said no'.
 
@@ -328,7 +332,14 @@ class PlaywrightZoomClient(MeetingClient):
     # capture loop switches it off again at the hard limit.
     # BOT_CAMERA_FACE=off removes it without a build.
     CAMERA_FACE_FILE = Path(__file__).parent / "assets" / "bot-face.y4m"
-    CAMERA_FACE_MAX_MEM = 0.70
+    # Measured before the join, with the browser and SDK loaded but no
+    # meeting yet. A lookout in a two-person room rests at 69 percent on
+    # the 512 MB machine once it is in, so a limit of 70 sat on the
+    # resting level itself and declined the picture on ordinary days.
+    # The valves in capture.py (throttle at 85, switch the picture off at
+    # 92) are what protect the machine; this only refuses a join that is
+    # already close to them.
+    CAMERA_FACE_MAX_MEM = 0.80
 
     @classmethod
     def camera_face_switched_on(cls) -> bool:
@@ -789,6 +800,18 @@ class PlaywrightZoomClient(MeetingClient):
         data["page_errors"] = errors[-6:]
         data["startup_noise"] = noise[-4:]
         data["console"] = [c for c in self._page_console if not benign(c)][-8:]
+        # The camera picture's report carries Zoom's own complaints about
+        # video and the camera (errors and warnings only), so "video never
+        # came on" arrives next to the reason Zoom gave.
+        cf = data.get("cameraFace")
+        if isinstance(cf, dict):
+            notes = [n for n in (cf.get("notes") or []) if n]
+            for line in self._page_console[-80:]:
+                if not line.startswith(("[error]", "[warning]")) or benign(line):
+                    continue
+                if _CAMERA_WORDS.search(line) and line[:160] not in notes:
+                    notes.append(line[:160])
+            cf["notes"] = notes[-8:]
         return data
 
     async def page_screenshot(self) -> Optional[bytes]:

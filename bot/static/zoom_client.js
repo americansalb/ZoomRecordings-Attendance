@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-32: three ways to switch the camera picture on, all reported';
+const PAGE_BUILD = 'capture-33: waits for Zoom\'s video button to be pressable, reports everything';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -513,19 +513,8 @@ window.zoomSelfUserId = async () => selfUserId;
 let cameraFaceWanted = false;
 const cameraFace = {
   wanted: false, buttonFound: false, clicked: false, videoOn: null,
-  phase: 'not started', error: null,
+  phase: 'not started', error: null, clicks: 0, button: null, camera: null, notes: [],
 };
-
-function videoButton(kind) {
-  const root = document.getElementById('zoom-root') || document.body;
-  const re = kind === 'start'
-    ? /start\s*(my\s*)?video|turn\s*on\s*(my\s*)?video|unmute\s*video/i
-    : /stop\s*(my\s*)?video|turn\s*off\s*(my\s*)?video|mute\s*video/i;
-  const label = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${
-    (b.textContent || '').slice(0, 60)}`;
-  return [...root.querySelectorAll('button, [role="button"]')]
-    .find((b) => re.test(label(b)) && b.offsetParent !== null) || null;
-}
 
 function selfVideoOn() {
   try {
@@ -535,115 +524,23 @@ function selfVideoOn() {
   } catch (e) { return null; }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function visibleButtonLabels(limit) {
-  const root = document.getElementById('zoom-root') || document.body;
-  const out = [];
-  for (const b of root.querySelectorAll('button, [role="button"], [role="menuitem"]')) {
-    if (b.offsetParent === null) continue;
-    const t = (b.getAttribute('aria-label') || b.getAttribute('title') || b.textContent || '').trim().slice(0, 40);
-    if (t && !out.includes(t)) out.push(t);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-// Strategy one: the embedded client's own media stream, when the runtime
-// exposes it (the type definitions do not list it; the bundle carries it).
-async function tryMediaStreamStart() {
-  try {
-    const ms = client && typeof client.getMediaStream === 'function' ? client.getMediaStream() : null;
-    if (!ms || typeof ms.startVideo !== 'function') return { strategy: 'media stream', tried: false };
-    await Promise.race([
-      ms.startVideo(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('startVideo timed out')), 15000)),
-    ]);
-    return { strategy: 'media stream', tried: true, ok: true };
-  } catch (e) {
-    return { strategy: 'media stream', tried: true, ok: false,
-      error: String((e && (e.reason || e.message)) || e).slice(0, 120) };
-  }
-}
-
-// Strategy two: Zoom's own Start Video button, wherever the small window
-// put it: on the toolbar, behind the "More" menu, or hidden until the
-// pointer moves over the window.
-async function tryStartVideoButton() {
-  const root = document.getElementById('zoom-root') || document.body;
-  const label = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${(b.textContent || '').slice(0, 60)}`;
-  let btn = videoButton('start');
-  if (!btn) {
-    try { root.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 20, clientY: 20 })); } catch (e) { /* ignore */ }
-    await sleep(600);
-    btn = videoButton('start');
-  }
-  let where = 'toolbar';
-  if (!btn) {
-    const more = [...root.querySelectorAll('button, [role="button"]')]
-      .find((b) => /\bmore\b/i.test(label(b)) && b.offsetParent !== null);
-    if (more) {
-      more.click();
-      await sleep(700);
-      const re = /start\s*(my\s*)?video|turn\s*on\s*(my\s*)?video/i;
-      btn = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], li, a')]
-        .find((b) => re.test(label(b)) && b.offsetParent !== null) || null;
-      where = 'More menu';
-    }
-  }
-  if (!btn) return { strategy: 'button', tried: true, ok: false, error: 'no Start Video control found' };
-  btn.click();
-  return { strategy: 'button', tried: true, ok: true, where };
-}
-
+// The whole routine lives in camera_face.js (window.CameraFace) so it can
+// be tested on a plain page: it waits for Zoom's Start Video button to be
+// pressable, presses it, and reports the button's label, its greyed-out
+// state, the presses, a camera probe and Zoom's own words.
 async function startCameraFace() {
   if (!cameraFaceWanted) return;
-  cameraFace.wanted = true;
-  cameraFace.strategies = [];
-  cameraFace.phase = 'waiting for the meeting UI';
-  try {
-    // Give the meeting UI a moment to draw, then note what is on offer.
-    for (let i = 0; i < 8; i += 1) {
-      if (selfVideoOn() === true) { cameraFace.videoOn = true; cameraFace.phase = 'video already on'; return; }
-      if (videoButton('start') || (client && typeof client.getMediaStream === 'function')) break;
-      await sleep(1000);
-    }
-    cameraFace.toolbar = visibleButtonLabels(14);
-
-    const first = await tryMediaStreamStart();
-    cameraFace.strategies.push(first);
-    if (!first.ok) {
-      const second = await tryStartVideoButton();
-      cameraFace.strategies.push(second);
-      cameraFace.buttonFound = second.ok === true;
-      cameraFace.clicked = second.ok === true;
-    }
-    cameraFace.phase = 'asked for video, waiting for Zoom to confirm';
-    for (let i = 0; i < 15; i += 1) {
-      await sleep(1000);
-      if (selfVideoOn() === true) { cameraFace.videoOn = true; cameraFace.phase = 'video on'; return; }
-    }
-    cameraFace.videoOn = selfVideoOn();
-    const failed = cameraFace.strategies.map((s) => `${s.strategy}: ${s.tried ? (s.ok ? 'done' : (s.error || 'failed')) : 'not available'}`).join('; ');
-    cameraFace.phase = cameraFace.videoOn ? 'video on' : `Zoom never reported video on (${failed})`;
-  } catch (e) {
-    cameraFace.error = String((e && e.message) || e).slice(0, 160);
-    cameraFace.phase = 'failed';
-  }
+  if (!window.CameraFace) { cameraFace.wanted = true; cameraFace.phase = 'camera script not loaded'; return; }
+  await window.CameraFace.start({
+    client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,
+  });
 }
 
 window.zoomStopVideo = async () => {
-  try {
-    if (selfVideoOn() === false) return { ok: true, phase: 'already off' };
-    const btn = videoButton('stop');
-    if (!btn) return { ok: false, phase: 'no Stop Video button found' };
-    btn.click();
-    cameraFace.phase = 'switched off to make room';
-    cameraFace.videoOn = false;
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: String((e && e.message) || e).slice(0, 160) };
-  }
+  if (!window.CameraFace) return { ok: false, phase: 'camera script not loaded' };
+  return window.CameraFace.stop({
+    client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,
+  });
 };
 
 window.zoomDiagnostics = async () => {

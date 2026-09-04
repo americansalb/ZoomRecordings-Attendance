@@ -996,3 +996,48 @@ def test_pool_picture_becomes_the_camera(tmp_path, monkeypatch):
     assert flag.endswith(".y4m") and "assets/bot-face.y4m" not in flag
     assert c.set_camera_face(b"not an image") is False
     assert c.set_camera_face(None) is False
+
+
+def test_camera_picture_memory_gate(monkeypatch):
+    """The picture is allowed while the machine has room and declined near
+    the line. The limit sits above a lookout's measured resting level in a
+    small room (69 percent on the 512 MB machine): a limit at 70 declined
+    the picture on ordinary days."""
+    from bot.meeting_client import PlaywrightZoomClient
+    from bot.capture import CaptureLoop
+    monkeypatch.delenv("BOT_CAMERA_FACE", raising=False)
+    c = PlaywrightZoomClient(page_url="http://x", headless=True)
+    assert c.CAMERA_FACE_MAX_MEM >= 0.75
+    monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.72))
+    wanted, reason = c._camera_face_decision()
+    assert wanted and "72 percent" in reason
+    monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.83))
+    wanted, reason = c._camera_face_decision()
+    assert not wanted and "83 percent" in reason and "80" in reason
+
+
+def test_camera_report_carries_zooms_own_words():
+    """Diagnostics attach Zoom's errors and warnings about video and the
+    camera to the camera picture's report, and nothing else."""
+    import asyncio
+    from bot.meeting_client import PlaywrightZoomClient
+
+    class FakePage:
+        async def evaluate(self, _js):
+            return {"cameraFace": {"wanted": True, "phase": "Zoom never reported video on", "notes": []}}
+
+    c = PlaywrightZoomClient(page_url="http://x", headless=True)
+    c._page = FakePage()
+    c._page_console = [
+        "[log] video frame rendered",
+        "[error] video encoder init failed: wasm not ready",
+        "[warning] getUserMedia NotAllowedError: permission denied",
+        "[error] chat socket closed",
+        "[error] init tf fail",
+    ]
+    data = asyncio.run(c.diagnostics())
+    notes = data["cameraFace"]["notes"]
+    assert notes == [
+        "[error] video encoder init failed: wasm not ready",
+        "[warning] getUserMedia NotAllowedError: permission denied",
+    ]

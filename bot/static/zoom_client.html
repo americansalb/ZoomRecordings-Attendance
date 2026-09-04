@@ -47,6 +47,12 @@
     -->
     <script src="/static/vendor/mediapipe/face_detection.js"></script>
     <script src="/static/watcher.js"></script>
+    <!--
+      The camera picture routine: waits for Zoom's Start Video button to be
+      pressable, presses it, and reports what it saw. Its own file so the
+      logic runs on a plain page under test.
+    -->
+    <script src="/static/camera_face.js"></script>
     <style>
       html, body { margin: 0; height: 100%; background: #111; }
       /* This box, with viewSizes in the SDK init, IS the video decode
