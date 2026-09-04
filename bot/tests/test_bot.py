@@ -630,12 +630,12 @@ if __name__ == "__main__":
 
 
 async def _room_snapshots():
-    """Room pictures ride the sweep on their own clock, and only when asked.
-
-    A session that never asked for room evidence must produce zero room
-    files, whatever else it stores. One that asked gets a whole-page
-    picture named for the session, at most once per snapshot window, and a
-    page that cannot be photographed must not fail the sweep.
+    """The whole-room grid shot moved off the sweep onto its own loop
+    (_grid_loop, tested in test_grid_*), so it can walk every gallery page
+    fast enough to cover everyone in the window instead of firing at most
+    once per sweep. What this pins is that the move is clean: a sweep emits
+    no room files itself, and a page that cannot be photographed never
+    fails the sweep.
     """
     class RecordingStorage(Storage):
         def __init__(self):
@@ -657,24 +657,16 @@ async def _room_snapshots():
     ctx = CaptureContext(runtime_id="r", session_ref="61", meeting_id="m",
                          session_label="botsession:61", bot_name="AALB Assistant")
 
-    # Off by default: no room files, even with storage that could keep them.
-    store_off = RecordingStorage()
-    loop = CaptureLoop(SnappableClient(participants=parts), FakeBackend(), store_off,
-                       interval_seconds=300, store_images=False)
-    await loop.run_once(ctx)
-    assert store_off.uploads == [], "room snapshots must be opt-in"
-
-    # On: one shot in the window, not one per sweep.
-    store_on = RecordingStorage()
-    loop2 = CaptureLoop(SnappableClient(participants=parts), FakeBackend(), store_on,
-                        interval_seconds=300, store_images=False,
-                        room_snapshot_seconds=3600)
-    await loop2.run_once(ctx)
-    await loop2.run_once(ctx)
-    room_files = [u for u in store_on.uploads if u[0].startswith("room_")]
-    assert len(room_files) == 1, f"expected one room shot in the window, got {room_files}"
-    assert "botsession-61" in room_files[0][0]
-    assert room_files[0][1].endswith("botsession:61")
+    # The sweep never emits room files now, on or off: that is the grid loop's job.
+    for room_secs in (0, 3600):
+        store = RecordingStorage()
+        loop = CaptureLoop(SnappableClient(participants=parts), FakeBackend(), store,
+                           interval_seconds=300, store_images=False,
+                           room_snapshot_seconds=room_secs)
+        await loop.run_once(ctx)
+        await loop.run_once(ctx)
+        assert [u for u in store.uploads if u[0].startswith("room_")] == [], \
+            "the sweep itself emits no room shots; the grid loop owns them"
 
     # A page that cannot be photographed is a skipped shot, not a failed sweep.
     store_broken = RecordingStorage()
@@ -1059,3 +1051,103 @@ def test_memory_meter_is_the_working_set(tmp_path, monkeypatch):
     assert round(CaptureLoop.memory_fraction(), 3) == round(360000000 / 536870912, 3)
     monkeypatch.setattr(CaptureLoop, "MEM_STAT_PATHS", (str(tmp_path / "absent"),))
     assert round(CaptureLoop.memory_fraction(), 3) == round(480000000 / 536870912, 3)
+
+
+# ── The grid proctor: walk every page so nobody goes unseen ──────────────
+def test_grid_interval_covers_everyone_in_the_window():
+    """The tick is window/pages so P pages are all shot within the window,
+    floored at the flip gap because a page cannot be flipped and painted
+    faster. Beyond that floor the achieved coverage honestly slips past
+    the target instead of pretending to hit it."""
+    gi = CaptureLoop._grid_interval
+    assert gi(30, 1, 10) == 30, "one page: a shot every window"
+    assert gi(30, 2, 10) == 15, "two pages: every 15s covers both in 30"
+    assert gi(30, 3, 10) == 10, "three pages: every 10s covers all in 30"
+    assert gi(30, 5, 10) == 10, "five pages: floored at the flip gap"
+    # Five pages at a 10s floor is a real 50s to see everyone, not 30.
+    assert gi(30, 5, 10) * 5 == 50
+
+
+class _RecordingStorage:
+    def __init__(self):
+        self.uploads = 0
+        self.names = []
+
+    @property
+    def stores_images(self):
+        return True
+
+    async def upload(self, *, data, filename, session_folder, subfolder=None):
+        self.uploads += 1
+        self.names.append(filename)
+
+
+def _grid_ctx():
+    return CaptureContext(runtime_id="r", session_ref="7", meeting_id="m",
+                          session_label="Session 142", bot_name="AALB Attendance Bot")
+
+
+async def _grid_walks_every_page():
+    parts = [Participant(str(i), f"Student {i}", video_on=True) for i in range(30)]
+    client = FakeMeetingClient(participants=parts, self_id="99")
+    client.gallery_pages = 3            # 30 people, ~10 a page
+    store = _RecordingStorage()
+    loop = CaptureLoop(client, FakeBackend(), store, interval_seconds=300,
+                       store_images=True, room_snapshot_seconds=30)
+    ticks = {"n": 0}
+
+    async def fast_sleep(_seconds):
+        ticks["n"] += 1
+        if ticks["n"] >= 6:
+            loop._stop.set()
+
+    loop._grid_sleep = fast_sleep
+    await loop._grid_loop(_grid_ctx())
+    assert store.uploads >= 3, "photographs each of the pages, not just the first"
+    assert getattr(client, "gallery_advances", 0) >= 3, "walks the gallery to reach every page"
+    assert loop._grid_pages == 3
+    assert loop._grid_cover_seconds == 30.0, "reports the coverage window it actually achieves"
+
+
+def test_grid_walks_every_page():
+    asyncio.run(_grid_walks_every_page())
+    print("  grid proctor covers every page OK")
+
+
+async def _grid_holds_under_pressure():
+    client = FakeMeetingClient(
+        participants=[Participant("1", "A", video_on=True)], self_id="9")
+    client.gallery_pages = 2
+    store = _RecordingStorage()
+    loop = CaptureLoop(client, FakeBackend(), store, interval_seconds=300,
+                       store_images=True, room_snapshot_seconds=30)
+    loop._throttled = True
+    ticks = {"n": 0}
+
+    async def fast_sleep(_seconds):
+        ticks["n"] += 1
+        if ticks["n"] >= 3:
+            loop._stop.set()
+
+    loop._grid_sleep = fast_sleep
+    await loop._grid_loop(_grid_ctx())
+    assert store.uploads == 0, "no room shots while memory is tight"
+    assert loop._grid_cover_seconds == 0.0
+
+
+def test_grid_holds_under_pressure():
+    asyncio.run(_grid_holds_under_pressure())
+    print("  grid proctor holds under memory pressure OK")
+
+
+async def _grid_off_for_lookout():
+    client = FakeMeetingClient(
+        participants=[Participant("1", "A", video_on=True)], self_id="9")
+    loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                       store_images=True, room_snapshot_seconds=30, lookout=True)
+    assert loop.room_snapshot_seconds == 0, "a lookout renders nothing to photograph"
+
+
+def test_grid_off_for_lookout():
+    asyncio.run(_grid_off_for_lookout())
+    print("  grid proctor off for a lookout OK")

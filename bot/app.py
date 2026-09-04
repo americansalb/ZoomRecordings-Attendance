@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-42"
+BUILD = "capture-43"
 
 
 class MessageIn(BaseModel):
@@ -141,9 +141,18 @@ def build_app(
         # memory is the working set (held memory minus the file cache the
         # kernel reclaims first); memory_with_cache is the raw cgroup
         # number, shown so the two can be compared on a live machine.
+        # drive says whether saved pictures (the whole-class grid and the
+        # per-student photos) can actually land: both a destination folder
+        # and service-account credentials have to be set on this machine.
+        # Without it the pictures are taken and thrown away, so the console
+        # can stop guessing why a Drive folder stays empty.
+        drive_creds = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+                           or os.getenv("GOOGLE_CLIENT_EMAIL"))
         return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD,
                 "memory": round(CaptureLoop.memory_fraction(), 3),
-                "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3)}
+                "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3),
+                "drive": {"folder": bool(config.drive_folder_id), "credentials": drive_creds,
+                          "ready": bool(config.drive_folder_id) and drive_creds}}
 
     @app.get("/bots")
     async def list_bots(x_tutor_bot_secret: Optional[str] = Header(default=None)):

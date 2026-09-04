@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-33: waits for Zoom\'s video button to be pressable, reports everything';
+const PAGE_BUILD = 'capture-34: grid proctor walks every gallery page to cover everyone in the window';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -882,6 +882,23 @@ window.zoomGalleryAdvance = async () => {
     buttons: btns.filter((b) => b.offsetParent !== null)
       .map((b) => label(b).trim().slice(0, 60)).filter(Boolean).slice(0, 12),
   };
+};
+
+window.zoomGalleryInfo = async () => {
+  // How many pages the gallery spans right now, so the grid proctor knows
+  // how fast to walk them to catch everyone inside the coverage window.
+  // tilesPerPage is what the SDK was told to show (BOT_GALLERY_TILES),
+  // which is also the decode budget: the smaller it is, the lighter each
+  // page and the more pages a big class takes.
+  try {
+    const atts = (client && client.getAttendeeslist && client.getAttendeeslist()) || [];
+    const participants = Math.max(1, atts.length);
+    const per = Math.max(1, Math.min(galleryTilesWanted, 25));
+    return { participants, tilesPerPage: per, pages: Math.max(1, Math.ceil(participants / per)) };
+  } catch (e) {
+    return { participants: 1, tilesPerPage: 25, pages: 1,
+      error: String((e && e.message) || e).slice(0, 120) };
+  }
 };
 
 window.zoomCaptureSupported = async () => true;

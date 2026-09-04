@@ -191,6 +191,11 @@ class MeetingClient(ABC):
         """Switch the bot's own camera picture off, if it has one."""
         return None
 
+    async def gallery_info(self) -> dict:
+        """How many gallery pages the room spans right now, for the grid
+        proctor's coverage maths. {} when the client cannot say."""
+        return {}
+
     @abstractmethod
     async def leave(self) -> None: ...
 
@@ -248,6 +253,19 @@ class FakeMeetingClient(MeetingClient):
 
     async def self_user_id(self) -> Optional[str]:
         return self._self_id
+
+    async def gallery_info(self) -> dict:
+        pages = max(1, int(getattr(self, "gallery_pages", 1)))
+        return {"pages": pages, "participants": len(self._participants),
+                "tilesPerPage": 25}
+
+    async def gallery_advance(self) -> dict:
+        self.gallery_advances = getattr(self, "gallery_advances", 0) + 1
+        return {"ok": True, "moved": "next"}
+
+    async def page_screenshot(self) -> Optional[bytes]:
+        self.page_screenshots = getattr(self, "page_screenshots", 0) + 1
+        return b"\x89PNG\r\n\x1a\n fake room grid"
 
     async def diagnostics(self) -> dict:
         return {"joined": self.joined, "selfUserId": self._self_id,
@@ -719,6 +737,15 @@ class PlaywrightZoomClient(MeetingClient):
                 """async () => await window.zoomWatcherArm()""") or None
         except Exception:
             return None
+
+    async def gallery_info(self) -> dict:
+        if not self._page:
+            return {}
+        try:
+            return await self._page.evaluate(
+                """async () => await window.zoomGalleryInfo()""") or {}
+        except Exception:
+            return {}
 
     async def gallery_advance(self) -> dict:
         """Step the SDK's gallery to its next page, wrapping at the end.

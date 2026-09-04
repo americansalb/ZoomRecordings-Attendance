@@ -182,6 +182,12 @@ class CaptureLoop:
         # user id -> monotonic time of their last fallback screenshot.
         self._last_polaroid: dict = {}
         self._last_advance = 0.0
+        # Grid proctoring: walk every gallery page so nobody goes longer
+        # than the coverage window (room_snapshot_seconds) unseen, at a
+        # one-page memory cost. These carry the live state for logs.
+        self._grid_pages = 1
+        self._grid_cover_seconds = 0.0
+        self._grid_last_ok = None
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -279,6 +285,77 @@ class CaptureLoop:
                         "off to make room", int(frac * 100))
                 except Exception as e:
                     logger.warning("camera picture stop failed: %s", e)
+
+    @staticmethod
+    def _grid_interval(window_seconds, pages, min_flip):
+        """Seconds between grid shots so all `pages` pages are photographed
+        within `window_seconds`. One page is shot per tick and the gallery
+        advances one page per tick, so P ticks cover everyone; the tick is
+        window/pages, floored at min_flip because a page cannot be flipped
+        and painted faster than that. With one page there is nothing to
+        walk, so a shot every window seconds is the whole job."""
+        pages = max(1, int(pages))
+        if pages <= 1:
+            return max(1.0, float(window_seconds))
+        return max(float(window_seconds) / pages, float(min_flip))
+
+    async def _grid_sleep(self, seconds) -> None:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=max(0.5, float(seconds)))
+        except asyncio.TimeoutError:
+            pass
+
+    async def _grid_loop(self, ctx) -> None:
+        """Photograph the whole class as a grid, walking every gallery page
+        so nobody goes longer than the coverage window unseen, at a
+        one-page memory cost. Holds under memory pressure and never lets a
+        failed shot crash the process."""
+        folder = f"LiveTutor {ctx.session_label}".strip()
+        # The first shot goes immediately, so evidence starts with the bot.
+        while not self._stop.is_set():
+            window = max(1, int(self.room_snapshot_seconds or 0))
+            if window <= 0:
+                await self._grid_sleep(5)
+                continue
+            # A fresh page spins up fresh decoders, the opposite of what a
+            # tight machine needs. Hold, and let coverage resume when the
+            # pressure lifts; the record is never a reason to push the box
+            # over its line.
+            if self._throttled:
+                self._grid_cover_seconds = 0.0
+                await self._grid_sleep(min(window, 5))
+                continue
+            pages = 1
+            try:
+                info = await self.client.gallery_info() or {}
+                pages = max(1, int(info.get("pages") or 1))
+            except Exception as e:
+                logger.debug("gallery info unavailable: %s", e)
+            self._grid_pages = pages
+            try:
+                shot = await self.client.page_screenshot()
+                if shot:
+                    ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+                    await self.storage.upload(
+                        data=shot,
+                        filename=f"room_{_safe(ctx.session_label)}_{ts}.png",
+                        session_folder=folder)
+                    self._grid_last_ok = time.time()
+                    self._last_room_shot = time.monotonic()
+            except Exception as e:
+                logger.warning("grid room shot failed: %s", e)
+            interval = self._grid_interval(window, pages, self.PAGE_FLIP_MIN_GAP_SECONDS)
+            # The honest coverage window: what we actually achieve, which is
+            # the target when the machine can flip fast enough, and longer
+            # when a big class needs more pages than the flip gap allows.
+            self._grid_cover_seconds = round(interval * pages, 1)
+            if pages > 1:
+                try:
+                    await self.client.gallery_advance()
+                    self._last_advance = time.monotonic()
+                except Exception as e:
+                    logger.debug("grid advance skipped: %s", e)
+            await self._grid_sleep(interval)
 
     async def _memory_watchdog(self) -> None:
         """Check pressure every couple of seconds, not once per sweep.
@@ -546,6 +623,7 @@ class CaptureLoop:
         # faster than the dwell gap, or a fast notebook pace would flip to
         # tiles still loading and photograph nothing forever.
         if ((starved or fallback_needed > cap)
+                and self.room_snapshot_seconds == 0
                 and not self._throttled
                 and time.monotonic() - self._last_advance >= self.PAGE_FLIP_MIN_GAP_SECONDS):
             advance = getattr(self.client, "gallery_advance", None)
@@ -556,27 +634,10 @@ class CaptureLoop:
                 except Exception as e:
                     logger.debug("gallery advance skipped: %s", e)
 
-        # One picture of the whole room, on its own relaxed clock, for later
-        # review. The gallery shows up to nine seats and rotates, so across a
-        # few shots everyone appears. Skipped under memory pressure for the
-        # same reason face work is, and never allowed to fail the sweep. The
-        # shot rides the sweep, so the real floor on its cadence is the
-        # observation interval itself.
-        if (self.room_snapshot_seconds > 0
-                and not self._throttled
-                and (self._last_room_shot is None
-                     or time.monotonic() - self._last_room_shot >= self.room_snapshot_seconds)):
-            self._last_room_shot = time.monotonic()
-            try:
-                shot = await self.client.page_screenshot()
-                if shot:
-                    ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                    await self.storage.upload(
-                        data=shot,
-                        filename=f"room_{_safe(ctx.session_label)}_{ts}.png",
-                        session_folder=folder)
-            except Exception as e:
-                logger.warning("room snapshot failed: %s", e)
+        # The whole-room grid shot used to ride this sweep. It now runs on
+        # its own loop (_grid_loop) so it can walk every gallery page fast
+        # enough that everyone is photographed within the coverage window,
+        # instead of at most once per observation interval.
 
         # One student, photographed on their own clock and filed in a
         # folder of their own. Whoever is longest overdue goes next, so a
@@ -635,6 +696,9 @@ class CaptureLoop:
         except Exception:
             pass
         watchdog = asyncio.create_task(self._memory_watchdog())
+        grid = None
+        if self.room_snapshot_seconds > 0 and not self.lookout:
+            grid = asyncio.create_task(self._grid_loop(ctx))
         try:
             while not self._stop.is_set():
                 elapsed = 0.0
@@ -651,6 +715,8 @@ class CaptureLoop:
                 await self._sleep_until_next(elapsed)
         finally:
             watchdog.cancel()
+            if grid is not None:
+                grid.cancel()
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
 
     async def _sleep_until_next(self, elapsed: float = 0.0) -> None:
