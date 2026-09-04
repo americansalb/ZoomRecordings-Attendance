@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-43"
+BUILD = "capture-44"
 
 
 class MessageIn(BaseModel):
@@ -102,11 +102,13 @@ def build_app(
     async def _snapshot_janitor():
         """Delete room and face pictures older than the retention window.
 
-        Runs once a day. Refuses to run without a configured parent folder:
-        the janitor must never roam beyond the fence of our own snapshot
-        folder. BOT_IMAGE_RETENTION_DAYS=0 switches it off.
+        Off by default (owner's decision, 2026-09-04: the pictures are kept
+        for good). Set BOT_IMAGE_RETENTION_DAYS to a positive number of days
+        to turn automatic deletion back on. Even then it refuses to run
+        without a configured parent folder: the janitor must never roam
+        beyond the fence of our own snapshot folder.
         """
-        days = int(os.getenv("BOT_IMAGE_RETENTION_DAYS", "30") or 30)
+        days = int(os.getenv("BOT_IMAGE_RETENTION_DAYS", "0") or 0)
         if days <= 0 or not config.drive_folder_id:
             return
 
