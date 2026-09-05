@@ -256,6 +256,42 @@ class CaptureLoop:
             cur_b = max(0, cur_b - cls._inactive_file_bytes())
         return cur_b / max_b
 
+    @classmethod
+    def memory_breakdown(cls):
+        """Where the memory actually goes, per process, so a fix targets
+        the real consumer instead of a guess. Reads each process's PSS
+        (proportional set size, shared pages fairly split) from
+        /proc/<pid>/smaps_rollup and groups by program name. Returns a
+        list of {name, pss_mb, procs} biggest first, plus the total. Best
+        effort: a kernel without smaps_rollup, or a process that exits
+        mid-read, is skipped rather than fatal."""
+        import glob
+        groups = {}
+        for path in glob.glob("/proc/[0-9]*"):
+            pid = path.rsplit("/", 1)[1]
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    name = f.read().strip() or "?"
+                pss_kb = 0
+                with open(f"/proc/{pid}/smaps_rollup") as f:
+                    for line in f:
+                        if line.startswith("Pss:"):
+                            pss_kb += int(line.split()[1])
+                            break
+            except (OSError, ValueError):
+                continue
+            if pss_kb <= 0:
+                continue
+            g = groups.setdefault(name, [0, 0])
+            g[0] += pss_kb
+            g[1] += 1
+        rows = sorted(
+            ({"name": n, "pss_mb": round(v[0] / 1024, 1), "procs": v[1]}
+             for n, v in groups.items()),
+            key=lambda r: r["pss_mb"], reverse=True)
+        total = round(sum(r["pss_mb"] for r in rows), 1)
+        return {"total_pss_mb": total, "by_process": rows[:12]}
+
     async def _pressure_escalate(self) -> None:
         """Throttle and, at the edge, shrink. Called by the watchdog and at
         every sweep; recovery lives in the sweep so it hysteresis-gates."""
