@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-46"
+BUILD = "capture-47"
 
 
 class MessageIn(BaseModel):
@@ -157,11 +157,12 @@ def build_app(
                           "ready": bool(config.drive_folder_id) and drive_creds}}
 
     @app.get("/memz")
-    async def memz(x_tutor_bot_secret: Optional[str] = Header(default=None)):
+    async def memz():
         """Where the memory goes, per process. The budgeting view: it names
         the real consumer (the browser, its renderer, the Python service)
-        so a memory fix is aimed, not guessed."""
-        _check_secret(x_tutor_bot_secret)
+        so a memory fix is aimed, not guessed. Public like /healthz: it
+        carries process names and sizes, never user data, and being able to
+        read it from anywhere is the point."""
         try:
             data = CaptureLoop.memory_breakdown()
         except Exception as e:
