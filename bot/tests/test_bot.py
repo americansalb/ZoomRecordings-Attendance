@@ -999,13 +999,13 @@ def test_camera_picture_memory_gate(monkeypatch):
     from bot.capture import CaptureLoop
     monkeypatch.delenv("BOT_CAMERA_FACE", raising=False)
     c = PlaywrightZoomClient(page_url="http://x", headless=True)
-    assert c.CAMERA_FACE_MAX_MEM >= 0.75
+    assert c.CAMERA_FACE_MAX_MEM <= 0.65
+    monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.50))
+    wanted, reason = c._camera_face_decision()
+    assert wanted and "50 percent" in reason
     monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.72))
     wanted, reason = c._camera_face_decision()
-    assert wanted and "72 percent" in reason
-    monkeypatch.setattr(CaptureLoop, "memory_fraction", classmethod(lambda cls: 0.83))
-    wanted, reason = c._camera_face_decision()
-    assert not wanted and "83 percent" in reason and "80" in reason
+    assert not wanted and "72 percent" in reason and "60" in reason
 
 
 def test_camera_report_carries_zooms_own_words():

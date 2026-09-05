@@ -350,14 +350,15 @@ class PlaywrightZoomClient(MeetingClient):
     # capture loop switches it off again at the hard limit.
     # BOT_CAMERA_FACE=off removes it without a build.
     CAMERA_FACE_FILE = Path(__file__).parent / "assets" / "bot-face.y4m"
-    # Measured before the join, with the browser and SDK loaded but no
-    # meeting yet. A lookout in a two-person room rests at 69 percent on
-    # the 512 MB machine once it is in, so a limit of 70 sat on the
-    # resting level itself and declined the picture on ordinary days.
-    # The valves in capture.py (throttle at 85, switch the picture off at
-    # 92) are what protect the machine; this only refuses a join that is
-    # already close to them.
-    CAMERA_FACE_MAX_MEM = 0.80
+    # The camera picture turns the bot's OWN video on, which runs a video
+    # encoder for the whole session. On the 512 MB machine that is memory
+    # the box does not always have to spare: a real class wedged the
+    # container at its ceiling with the cat running (2026-09-05). Measured
+    # against the working-set meter, an idle two-person room sits near 50
+    # percent, so a limit of 60 lets the cat show in a quiet room while
+    # keeping it off once a real class has filled the box. The valves in
+    # capture.py still shed it if memory climbs after the join.
+    CAMERA_FACE_MAX_MEM = 0.60
 
     @classmethod
     def camera_face_switched_on(cls) -> bool:
