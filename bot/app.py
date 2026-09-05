@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-47"
+BUILD = "capture-48"
 
 
 class MessageIn(BaseModel):
@@ -169,6 +169,27 @@ def build_app(
             data = {"error": str(e)}
         data["fraction_working_set"] = round(CaptureLoop.memory_fraction(), 3)
         data["fraction_with_cache"] = round(CaptureLoop.memory_fraction(with_cache=True), 3)
+        # Per live session: is Zoom's camera signal still arriving? With the
+        # lookout's video rendering cut to one tile, a rising count is the
+        # proof the cut cost nothing the record depends on.
+        sessions = []
+        for info in manager.list_sessions():
+            rid = info.get("runtime_id") if isinstance(info, dict) else None
+            if not rid:
+                continue
+            try:
+                diag = await manager._require(rid).client.diagnostics()
+                sessions.append({
+                    "runtime_id": rid,
+                    "lookout": diag.get("lookout"),
+                    "participants": len(diag.get("raw") or []),
+                    "camera_signal_total": diag.get("cameraSignalTotal"),
+                    "last_camera_signal_at": diag.get("lastCameraSignalAt"),
+                    "page_build": diag.get("pageBuild"),
+                })
+            except Exception as e:
+                sessions.append({"runtime_id": rid, "error": str(e)[:120]})
+        data["sessions"] = sessions
         return data
 
     @app.get("/bots")

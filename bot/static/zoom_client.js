@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-34: grid proctor walks every gallery page to cover everyone in the window';
+const PAGE_BUILD = 'capture-35: lookout renders one tiny tile, cameras read from the signal';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -121,7 +121,13 @@ function participantVideoOn(u) {
  * diagnostics read settles that in one look instead of a redeploy.
  */
 const videoEvents = [];
+// Running totals, never capped: with the video rendering cut to one tile,
+// these are the proof that Zoom's camera signal still arrives.
+let cameraSignalTotal = 0;
+let lastCameraSignalAt = null;
 function recordVideoEvent(source, userId, name, value) {
+  cameraSignalTotal += 1;
+  lastCameraSignalAt = new Date().toISOString();
   videoEvents.push({
     at: new Date().toISOString(),
     source: source,               // 'user-added' | 'user-updated' | 'roster'
@@ -190,9 +196,16 @@ async function ensureClient() {
           // A lookout shrinks further still: it never captures a frame,
           // so the view exists only to keep the SDK in a normal state,
           // and thumbnail-sized tiles are the cheapest normal there is.
+          // A lookout reads cameras from Zoom's own signal (user-updated,
+          // bVideoOn), which needs no decoded video at all. It renders ONE
+          // thumbnail, as small as the SDK allows, in the normal gallery
+          // view and never the minimized view: minimizing is what froze
+          // the camera signal before, not the tile count. Measured live
+          // 2026-09-05: four tiles at 320x180 cost Chrome 427 MB in a
+          // 23-person class. This is the cut.
           viewSizes: lookoutMode ? {
-            default: { width: 320, height: 180 },
-            ribbon: { width: 320, height: 180 },
+            default: { width: 160, height: 90 },
+            ribbon: { width: 160, height: 90 },
           } : {
             default: { width: 640, height: 360 },
             ribbon: { width: 640, height: 360 },
@@ -206,7 +219,7 @@ async function ensureClient() {
       // (BOT_GALLERY_TILES) so it can be stepped down without a rebuild
       // if the memory meter on /healthz ever disagrees. A lookout pins
       // it at the floor: four thumbnails, a constant cost in any room.
-      maximumVideosInGalleryView: lookoutMode ? 4 : galleryTilesWanted,
+      maximumVideosInGalleryView: lookoutMode ? 1 : galleryTilesWanted,
     });
   } catch (e) {
     client = null;               // let a retry re-init rather than reusing a dead client
@@ -565,6 +578,8 @@ window.zoomDiagnostics = async () => {
   // reading is Zoom never telling us, or us mishandling what it said.
   out.pageBuild = PAGE_BUILD;
   out.lookout = lookoutMode;
+  out.cameraSignalTotal = cameraSignalTotal;
+  out.lastCameraSignalAt = lastCameraSignalAt;
   out.cameraFace = { ...cameraFace };
   out.videoEvents = videoEvents.slice(-30);
   out.chatLog = chatLog.slice(-20);
