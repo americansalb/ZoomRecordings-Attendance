@@ -39,34 +39,32 @@ def image_bytes_to_y4m(data: bytes, path: str, width: int = 640, height: int = 3
     file Chromium's fake webcam can play, letterboxed onto 16:9 so the
     whole picture shows in a Zoom tile. False when the image cannot be
     decoded; the caller keeps the built-in picture then.
+
+    The work happens in a child process (y4m_convert.py) so this process
+    never imports OpenCV and NumPy: measured live, they added about 38 MB
+    to the bot for the whole session, paid even when the picture was then
+    declined by the memory gate.
     """
+    import subprocess
+    import sys
+    import tempfile
+    script = str(Path(__file__).parent / "y4m_convert.py")
+    fd, in_path = tempfile.mkstemp(prefix="bot-face-in-")
+    os.close(fd)
     try:
-        import numpy as np
-        import cv2
+        with open(in_path, "wb") as f:
+            f.write(data)
+        r = subprocess.run(
+            [sys.executable, script, in_path, path, str(width), str(height), str(fps)],
+            capture_output=True, timeout=60)
+        return r.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0
     except Exception:
         return False
-    try:
-        arr = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            return False
-        h, w = img.shape[:2]
-        scale = min(width / w, height / h)
-        nw, nh = max(2, int(round(w * scale))), max(2, int(round(h * scale)))
-        resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
-        canvas = np.zeros((height, width, 3), dtype=np.uint8)
-        canvas[:] = (20, 20, 12)
-        y0, x0 = (height - nh) // 2, (width - nw) // 2
-        canvas[y0:y0 + nh, x0:x0 + nw] = resized
-        # I420 is exactly the planar Y, U, V layout a C420 Y4M frame wants.
-        frame = cv2.cvtColor(canvas, cv2.COLOR_BGR2YUV_I420).tobytes()
-        with open(path, "wb") as f:
-            f.write(f"YUV4MPEG2 W{width} H{height} F{fps}:1 Ip A1:1 C420jpeg\n".encode())
-            for _ in range(2):
-                f.write(b"FRAME\n" + frame)
-        return True
-    except Exception:
-        return False
+    finally:
+        try:
+            os.unlink(in_path)
+        except OSError:
+            pass
 
 
 _CAMERA_WORDS = re.compile(
