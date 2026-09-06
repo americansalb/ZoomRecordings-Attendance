@@ -116,14 +116,12 @@ def test_real_chromium_roundtrip():
             with pytest.raises(RuntimeError):
                 await page.locator("#nothing").screenshot()
 
-            # A request that fails is reported with its address.
+            # The Network domain stays off: a failed request is not
+            # reported, and no network frame ever reaches this process.
             await page.evaluate(
                 "async () => { try { await fetch('http://127.0.0.1:9/nothing'); } catch (e) {} }")
-            for _ in range(60):
-                if failed:
-                    break
-                await asyncio.sleep(0.05)
-            assert failed and "127.0.0.1:9" in failed[0][0]
+            await asyncio.sleep(0.3)
+            assert failed == []
 
             profile = browser._profile_dir
             proc = browser._proc

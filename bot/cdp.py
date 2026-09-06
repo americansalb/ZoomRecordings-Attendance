@@ -13,7 +13,7 @@ It deliberately speaks the tiny surface meeting_client.py uses, in the
 same shape: a browser with new_page() and close(), a page with
 evaluate(), goto(), wait_for_function(), expose_function(), screenshot(),
 locator(selector).screenshot(), and on('console' | 'pageerror' |
-'requestfailed' | 'crash'). Nothing else, on purpose: the meeting client
+'crash'); 'requestfailed' is accepted and never fires (see _init). Nothing else, on purpose: the meeting client
 does not care which driver it holds, and the Playwright driver stays
 available behind BOT_BROWSER_DRIVER=playwright as the way back.
 """
@@ -351,6 +351,10 @@ class CdpBrowser:
             logger.warning("[BOT] devtools pipe read failed: %s", e)
 
     def _dispatch(self, frame: bytes) -> None:
+        # Events from domains this client never enabled are dropped before
+        # they are parsed; a flood of them must cost nothing.
+        if frame[:1] == b"{" and b'"method":"Network.' in frame[:64]:
+            return
         try:
             msg = json.loads(frame)
         except ValueError:
@@ -437,7 +441,6 @@ class CdpPage:
         self.context_id = context_id
         self._exposed: Dict[str, Callable[[Any], Awaitable[None]]] = {}
         self._handlers: Dict[str, List[Callable[..., None]]] = {}
-        self._requests: Dict[str, str] = {}
         self._dom_loaded: List[asyncio.Future] = []
         self._loaded: List[asyncio.Future] = []
 
@@ -450,14 +453,19 @@ class CdpPage:
         b.listen("Runtime.bindingCalled", self._on_binding, self.session_id)
         b.listen("Runtime.exceptionThrown", self._on_exception, self.session_id)
         b.listen("Runtime.consoleAPICalled", self._on_console, self.session_id)
-        b.listen("Network.requestWillBeSent", self._on_request, self.session_id)
-        b.listen("Network.loadingFailed", self._on_request_failed, self.session_id)
         b.listen("Inspector.targetCrashed", lambda _p: self._emit("crash", self), self.session_id)
         b.listen("Page.domContentEventFired", lambda _p: self._settle(self._dom_loaded), self.session_id)
         b.listen("Page.loadEventFired", lambda _p: self._settle(self._loaded), self.session_id)
         await self._send("Page.enable")
         await self._send("Runtime.enable")
-        await self._send("Network.enable")
+        # Never the Network domain. With it on, Chromium reports every
+        # network frame to this process, and in a Zoom meeting that is
+        # the whole audio and video stream, base64-encoded, one JSON
+        # message per frame: enough to bury a small Python process. The
+        # first class on this driver (2026-09-06, 22 people) stopped
+        # answering eight minutes in with it on. The only thing it bought
+        # was the "request failed" line in the diagnostics, which the
+        # console never needed.
         await self._send("Emulation.setDeviceMetricsOverride", {
             "width": viewport[0], "height": viewport[1], "deviceScaleFactor": 1, "mobile": False})
         await self._send("Runtime.addBinding", {"name": self.BRIDGE})
@@ -510,19 +518,6 @@ class CdpPage:
             else:
                 parts.append(str(a.get("description") or a.get("type") or ""))
         self._emit("console", ConsoleMessage(str(params.get("type") or "log"), " ".join(parts)))
-
-    def _on_request(self, params: dict) -> None:
-        req = params.get("request") or {}
-        rid = params.get("requestId")
-        if rid and req.get("url"):
-            self._requests[rid] = req["url"]
-            if len(self._requests) > 400:
-                for key in list(self._requests)[:100]:
-                    self._requests.pop(key, None)
-
-    def _on_request_failed(self, params: dict) -> None:
-        url = self._requests.pop(params.get("requestId"), "") or "(unknown url)"
-        self._emit("requestfailed", FailedRequest(url, str(params.get("errorText") or "failed")))
 
     # ── the surface ──────────────────────────────────────────────────
 
