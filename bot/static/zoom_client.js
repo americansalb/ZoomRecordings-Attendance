@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-36: the camera picture stays off in a big room';
+const PAGE_BUILD = 'capture-37: the page reports its own memory';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -409,6 +409,7 @@ window.zoomJoin = async (cfg) => {
   joined = true;
   startSeatWatcher();
   startCameraFace();
+  startPageMemorySampler();
 
   // Everything past this point is bookkeeping. It used to run unguarded, and
   // one bad call here (getMediaStream, which this SDK does not have) rejected
@@ -582,6 +583,36 @@ window.zoomStopVideo = async () => {
   });
 };
 
+// The page's own memory, measured by the browser about once a minute
+// (measureUserAgentSpecificMemory needs the cross-origin isolation this
+// page already has). Read by /memz so growth can be placed: in the
+// page's JavaScript and wasm, or outside it in the browser's decoders.
+let pageMemory = null;
+async function samplePageMemory() {
+  try {
+    if (performance.measureUserAgentSpecificMemory) {
+      const m = await performance.measureUserAgentSpecificMemory();
+      const byType = {};
+      for (const b of m.breakdown || []) {
+        const k = (b.types && b.types.join('+')) || 'other';
+        byType[k] = (byType[k] || 0) + b.bytes;
+      }
+      pageMemory = {
+        at: Date.now(), totalMB: +(m.bytes / 1048576).toFixed(1),
+        byTypeMB: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, +(v / 1048576).toFixed(1)])),
+      };
+    } else if (performance.memory) {
+      pageMemory = { at: Date.now(), jsHeapMB: +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) };
+    }
+  } catch (e) { pageMemory = { at: Date.now(), error: String(e).slice(0, 80) }; }
+}
+let pageMemoryTimer = null;
+function startPageMemorySampler() {
+  if (pageMemoryTimer) return;
+  samplePageMemory();
+  pageMemoryTimer = setInterval(samplePageMemory, 60000);
+}
+
 window.zoomDiagnostics = async () => {
   const out = {
     joined: joined,
@@ -603,6 +634,8 @@ window.zoomDiagnostics = async () => {
   // actually attached right now. Together these say whether a wrong camera
   // reading is Zoom never telling us, or us mishandling what it said.
   out.pageBuild = PAGE_BUILD;
+  out.pageMemory = pageMemory;
+  out.mediaElements = document.querySelectorAll('video, canvas').length;
   out.lookout = lookoutMode;
   out.cameraSignalTotal = cameraSignalTotal;
   out.lastCameraSignalAt = lastCameraSignalAt;

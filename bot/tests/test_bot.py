@@ -1168,3 +1168,40 @@ def test_camera_picture_room_limit(monkeypatch):
     assert _camera_face_max_people() == 10
     page = open("bot/static/zoom_client.js", encoding="utf-8").read()
     assert "cameraFaceMaxPeople" in page and "the picture stays off above" in page
+
+
+def test_memory_leave_valve():
+    """At 95 percent on two readings in a row the bot says goodbye the way
+    a meeting ending does (so a replacement follows) and leaves. One
+    reading is not enough."""
+    async def run():
+        said = []
+
+        class Client(FakeMeetingClient):
+            pass
+
+        client = Client()
+
+        async def on_lifecycle(kind, detail):
+            said.append((kind, detail))
+
+        client.on_lifecycle = on_lifecycle
+        loop = CaptureLoop(client, FakeBackend(), NullStorage(), interval_seconds=300,
+                           store_images=False, face_detector=lambda d: True)
+        loop.memory_fraction = lambda: 0.96
+        await loop._pressure_escalate()
+        assert said == [] and not loop._stop.is_set()
+        await loop._pressure_escalate()
+        await asyncio.sleep(0.05)
+        assert said and said[0][0] == "left" and "memory at 96 percent" in said[0][1]
+        assert loop._stop.is_set()
+        assert client.joined is False
+        # Recovering below the line resets the count.
+        loop2 = CaptureLoop(Client(), FakeBackend(), NullStorage(), interval_seconds=300,
+                            store_images=False, face_detector=lambda d: True)
+        loop2.memory_fraction = lambda: 0.96
+        await loop2._pressure_escalate()
+        loop2.memory_fraction = lambda: 0.80
+        await loop2._pressure_escalate()
+        assert loop2._leave_strikes == 0 and not loop2._leaving
+    asyncio.run(run())

@@ -91,6 +91,16 @@ class CaptureLoop:
     MEM_SOFT_LIMIT = 0.85
     MEM_HARD_LIMIT = 0.92
     MEM_RESUME_BELOW = 0.70
+    # The last valve: above this, on two readings in a row, the bot
+    # leaves the meeting on its own. Measured 2026-09-06: a room of 23
+    # climbs about 8 MB a minute whatever the bot renders, and a browser
+    # allowed to reach the ceiling freezes the whole machine for an hour
+    # (health page dead, no replacement possible). A bot that leaves at
+    # 95 percent keeps the machine answering, and the control plane sends
+    # a replacement within a few minutes: two minutes of gap against an
+    # hour of nothing. A bot failure is never an attendance failure.
+    MEM_LEAVE_LIMIT = 0.95
+    MEM_LEAVE_STRIKES = 2
     WATCHDOG_SECONDS = 2
 
     # A watcher reading older than this is not evidence about right now.
@@ -179,6 +189,8 @@ class CaptureLoop:
         # The bot's own camera picture is cosmetic, so at the memory hard
         # limit it is the first thing switched off, once.
         self._camera_stopped = False
+        self._leave_strikes = 0
+        self._leaving = False
         # user id -> monotonic time of their last fallback screenshot.
         self._last_polaroid: dict = {}
         self._last_advance = 0.0
@@ -321,6 +333,32 @@ class CaptureLoop:
                         "off to make room", int(frac * 100))
                 except Exception as e:
                     logger.warning("camera picture stop failed: %s", e)
+        # The last valve: leave before the machine freezes.
+        if frac >= self.MEM_LEAVE_LIMIT:
+            self._leave_strikes += 1
+            if self._leave_strikes >= self.MEM_LEAVE_STRIKES and not self._leaving:
+                self._leaving = True
+                detail = (f"left the meeting to keep its computer from freezing "
+                          f"(memory at {int(frac * 100)} percent); a replacement follows")
+                logger.error("[CAPTURE] %s", detail)
+                asyncio.create_task(self._leave_for_memory(detail))
+        else:
+            self._leave_strikes = 0
+
+    async def _leave_for_memory(self, detail: str) -> None:
+        """Say goodbye the way a meeting ending does, so the control plane
+        treats it as an interruption and sends a replacement, then go."""
+        try:
+            handler = getattr(self.client, "on_lifecycle", None)
+            if handler is not None:
+                await handler("left", detail)
+        except Exception as e:
+            logger.warning("[CAPTURE] leave notice failed: %s", e)
+        self.stop()
+        try:
+            await self.client.leave()
+        except Exception as e:
+            logger.warning("[CAPTURE] leave failed: %s", e)
 
     @staticmethod
     def _grid_interval(window_seconds, pages, min_flip):

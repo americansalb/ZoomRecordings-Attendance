@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-53"
+BUILD = "capture-54"
 
 
 class MessageIn(BaseModel):
@@ -174,6 +174,12 @@ def build_app(
             data = {"error": str(e)}
         data["fraction_working_set"] = round(CaptureLoop.memory_fraction(), 3)
         data["fraction_with_cache"] = round(CaptureLoop.memory_fraction(with_cache=True), 3)
+        # Shared memory the browser keeps decoded frames in.
+        try:
+            st = os.statvfs("/dev/shm")
+            data["shm_used_mb"] = round((st.f_blocks - st.f_bfree) * st.f_frsize / 1048576, 1)
+        except OSError:
+            data["shm_used_mb"] = None
         # Per live session: is Zoom's camera signal still arriving? With the
         # lookout's video rendering cut to one tile, a rising count is the
         # proof the cut cost nothing the record depends on.
@@ -191,6 +197,10 @@ def build_app(
                     "camera_signal_total": diag.get("cameraSignalTotal"),
                     "last_camera_signal_at": diag.get("lastCameraSignalAt"),
                     "page_build": diag.get("pageBuild"),
+                    # Where the page's own memory sits (the browser's
+                    # per-page measurement), so growth can be placed.
+                    "page_memory": diag.get("pageMemory"),
+                    "media_elements": diag.get("mediaElements"),
                 })
             except Exception as e:
                 sessions.append({"runtime_id": rid, "error": str(e)[:120]})
