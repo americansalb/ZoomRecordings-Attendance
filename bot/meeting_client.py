@@ -965,9 +965,15 @@ class CdpZoomClient(ChromiumZoomClient):
 
 
 def browser_driver_name() -> str:
-    """Which driver a new client gets: BOT_BROWSER_DRIVER, default cdp."""
-    raw = os.environ.get("BOT_BROWSER_DRIVER", "cdp").strip().lower()
-    return "playwright" if raw == "playwright" else "cdp"
+    """Which driver a new client gets: BOT_BROWSER_DRIVER, default playwright.
+
+    The direct driver went into its first class on 2026-09-06 and ran the
+    browser heavier than the relay did (Chrome 455 MB for 24 people, the
+    box at 98 percent, frozen twice in a morning). Until it is measured at
+    or under the relay's numbers in a class, the relay stays the default
+    and the direct driver is opt-in: BOT_BROWSER_DRIVER=cdp."""
+    raw = os.environ.get("BOT_BROWSER_DRIVER", "playwright").strip().lower()
+    return "cdp" if raw == "cdp" else "playwright"
 
 
 def build_meeting_client(page_url: str, headless: bool) -> MeetingClient:

@@ -32,9 +32,9 @@ def test_find_chromium_prefers_the_headless_shell_and_the_newest(tmp_path):
     assert find_chromium({"BOT_CHROMIUM_PATH": str(tmp_path / "missing")}) is None
 
 
-def test_headless_flag_matches_the_binary():
+def test_headless_flag_is_the_lean_one_everywhere():
     assert headless_flag("/x/chromium_headless_shell-1140/chrome-linux/headless_shell") == "--headless"
-    assert headless_flag("/x/chromium-1140/chrome-linux/chrome") == "--headless=new"
+    assert headless_flag("/x/chromium-1140/chrome-linux/chrome") == "--headless"
 
 
 def test_pipe_framing():
@@ -207,15 +207,15 @@ def test_cdp_client_opens_the_zoom_page(monkeypatch):
     assert not _looks_like_browser_death(PageError("Joining meeting timeout"))
 
 
-def test_the_default_driver_is_direct(monkeypatch):
+def test_the_default_driver_is_the_relay_until_the_direct_one_is_proven(monkeypatch):
     from bot.meeting_client import (CdpZoomClient, PlaywrightZoomClient, browser_driver_name,
                                     build_meeting_client)
     monkeypatch.delenv("BOT_BROWSER_DRIVER", raising=False)
-    assert browser_driver_name() == "cdp"
-    assert isinstance(build_meeting_client("http://x", True), CdpZoomClient)
-    monkeypatch.setenv("BOT_BROWSER_DRIVER", "playwright")
     assert browser_driver_name() == "playwright"
     assert isinstance(build_meeting_client("http://x", True), PlaywrightZoomClient)
+    monkeypatch.setenv("BOT_BROWSER_DRIVER", "cdp")
+    assert browser_driver_name() == "cdp"
+    assert isinstance(build_meeting_client("http://x", True), CdpZoomClient)
 
 
 def _manager_app(client_factory):

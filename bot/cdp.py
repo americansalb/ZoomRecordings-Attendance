@@ -129,9 +129,13 @@ def find_chromium(env: Optional[Dict[str, str]] = None) -> Optional[str]:
 
 
 def headless_flag(executable: str) -> str:
-    """The headless shell is headless by construction and takes the plain
-    flag; the full browser needs the new headless mode named."""
-    return "--headless" if os.path.basename(executable) == "headless_shell" else "--headless=new"
+    """Always the plain flag, the one Playwright 1.48 passes to this same
+    binary. On the full browser that is the lean old headless mode (on
+    Chromium 130, the build the bot's image ships); "--headless=new" is a
+    whole Chrome with its GPU, network and utility processes, which is
+    what the first class on this driver ran (2026-09-06) at about 40 MB
+    more than the relay ever used. The headless shell takes the same flag."""
+    return "--headless"
 
 
 def split_frames(buffer: bytes) -> Tuple[List[bytes], bytes]:
