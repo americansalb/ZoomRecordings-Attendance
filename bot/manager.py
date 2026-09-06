@@ -10,6 +10,7 @@ fakes.
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import time
 import uuid
@@ -37,6 +38,22 @@ class BotSession:
     # (recipient, text) -> monotonic time of the last DELIVERED send.
     # Delivery idempotence lives here, see BotManager.send.
     recent_sends: Dict[Tuple[Optional[str], str], float] = field(default_factory=dict)
+
+
+def _driver_fallback_for(client, exc: BaseException):
+    """The class to retry a dead join on, or None.
+
+    Only for the direct (cdp) driver, only when the browser actually
+    died or stopped answering, and only unless BOT_DRIVER_FALLBACK=off.
+    """
+    from .meeting_client import PlaywrightZoomClient, _looks_like_browser_death
+    if os.environ.get("BOT_DRIVER_FALLBACK", "on").strip().lower() in ("0", "off", "false", "no"):
+        return None
+    if getattr(client, "DRIVER", "") != "cdp":
+        return None
+    if not _looks_like_browser_death(exc):
+        return None
+    return PlaywrightZoomClient
 
 
 def _parse_lookout(capture: Dict[str, Any]) -> bool:
@@ -139,6 +156,7 @@ class BotManager:
         # The camera picture for this join, picked by the control plane
         # from the pool the console manages. Best effort: no photo, or a
         # photo that will not decode, means the built-in picture.
+        photo = None
         fetch_photo = getattr(self.backend, "fetch_camera_photo", None)
         wear = getattr(client, "set_camera_face", None)
         if fetch_photo is not None and wear is not None:
@@ -176,19 +194,39 @@ class BotManager:
             role=role,
         )
 
+        join_kwargs = dict(
+            meeting_number=meeting_id,
+            passcode=(
+                payload.get("passcode")
+                or _passcode_from_join_url(payload.get("join_url"))
+            ),
+            display_name=display_name,
+            signature=signature,
+            sdk_key=self.config.sdk_key,
+            zak=zak,
+            lookout=lookout,
+        )
         try:
-            await client.join(
-                meeting_number=meeting_id,
-                passcode=(
-                    payload.get("passcode")
-                    or _passcode_from_join_url(payload.get("join_url"))
-                ),
-                display_name=display_name,
-                signature=signature,
-                sdk_key=self.config.sdk_key,
-                zak=zak,
-                lookout=lookout,
-            )
+            try:
+                await client.join(**join_kwargs)
+            except Exception as e:
+                # The direct browser driver is new. If the browser died
+                # under it during the join (never a Zoom refusal, which
+                # would fail the same way on any driver), the join gets
+                # one more try on the Playwright driver before the class
+                # is given up on.
+                fallback = _driver_fallback_for(client, e)
+                if fallback is None:
+                    raise
+                logger.warning("[BOT] the direct browser driver failed during the join (%s); "
+                               "retrying once on the Playwright driver", str(e)[:200])
+                await self._force_close(client)
+                client = fallback(page_url=self._page_url(), headless=self.config.headless)
+                client.on_chat = _on_chat
+                client.on_lifecycle = _on_lifecycle
+                if photo and getattr(client, "set_camera_face", None):
+                    client.set_camera_face(photo)
+                await client.join(**join_kwargs)
         except Exception as e:
             # A join that raises partway can still have left a browser in the
             # meeting -- the SDK connects before the bookkeeping that follows.

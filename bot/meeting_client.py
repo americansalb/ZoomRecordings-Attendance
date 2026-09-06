@@ -6,8 +6,12 @@ orchestration is testable without a real meeting:
 
   - MeetingClient: the interface.
   - FakeMeetingClient: in-memory, for tests.
-  - PlaywrightZoomClient: drives a headless Chromium running the Zoom Web SDK
-    (see static/zoom_client.html + zoom_client.js).
+  - ChromiumZoomClient: drives a headless Chromium running the Zoom Web SDK
+    (see static/zoom_client.html + zoom_client.js), through one of two
+    drivers: CdpZoomClient talks to the browser directly over its
+    DevTools pipe (bot/cdp.py, no helper program, the default), and
+    PlaywrightZoomClient goes through Playwright's Node.js relay, kept
+    behind BOT_BROWSER_DRIVER=playwright as the way back.
 
 Identity note: attendance is attributed by Zoom user id, never by tile position.
 `presence()` returns the per-user ledger the browser page maintains from Zoom's
@@ -84,7 +88,9 @@ def _looks_like_browser_death(exc: BaseException) -> bool:
         r"|browser has been closed"
         r"|[Pp]age crashed"
         r"|[Bb]rowser.*disconnected"
-        r"|Connection closed while reading from the driver",
+        r"|Connection closed while reading from the driver"
+        r"|BrowserGone|browser process died|has been closed"
+        r"|no answer from the browser",
         text))
 
 logger = logging.getLogger(__name__)
@@ -279,8 +285,28 @@ class FakeMeetingClient(MeetingClient):
             await self.on_lifecycle(event_type, detail)
 
 
-class PlaywrightZoomClient(MeetingClient):
-    """Drives the Zoom Web SDK inside a headless Chromium via Playwright."""
+class ChromiumZoomClient(MeetingClient):
+    """Drives the Zoom Web SDK inside a headless Chromium.
+
+    Everything about the meeting lives here; the three _driver_* hooks
+    are the only place a subclass says how the browser is started,
+    handed out and closed. Both drivers give back a page with the same
+    small surface (evaluate, goto, wait_for_function, expose_function,
+    screenshot, locator().screenshot, on), so nothing below the hooks
+    knows which one is running.
+    """
+
+    DRIVER = "abstract"
+
+    async def _driver_start(self) -> None:
+        """Whatever must exist before a browser can be launched."""
+
+    async def _driver_launch(self, args: list):
+        """Launch Chromium with these flags; return (browser, context, page)."""
+        raise NotImplementedError
+
+    async def _driver_close(self) -> None:
+        """Close what _driver_launch opened; safe on a half-built client."""
 
     def __init__(self, page_url: str, headless: bool = True):
         self.page_url = page_url
@@ -430,18 +456,14 @@ class PlaywrightZoomClient(MeetingClient):
         this far can be retried with a different one."""
         self._closing = False
         self._gone_reported = False
-        self._browser = await self._pw.chromium.launch(
-            headless=self.headless, args=args)
         # The window must simply be big enough to hold the gallery, which
         # is sized by CSS and the SDK's viewSizes (640x360), not by this.
         # Believing otherwise cost a night: shrinking the window saved no
         # memory at all, because the SDK kept rendering at its configured
         # size, and it pushed the tiles outside the window where element
         # screenshots could not reach them, which silently ended every
-        # face check. Keep this comfortably larger than the gallery.
-        self._context = await self._browser.new_context(
-            viewport={"width": 800, "height": 600})
-        self._page = await self._context.new_page()
+        # face check. Both drivers open the page at 800x600.
+        self._browser, self._context, self._page = await self._driver_launch(args)
 
         # A collapsed browser dies as one piece, and nothing else would
         # notice: a dead page cannot report its own end, and the capture
@@ -540,9 +562,7 @@ class PlaywrightZoomClient(MeetingClient):
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
                    signature: str, sdk_key: str, zak: Optional[str] = None,
                    lookout: bool = False) -> None:
-        from playwright.async_api import async_playwright
-
-        self._pw = await async_playwright().start()
+        await self._driver_start()
         self._joining = True
         self._diet_active = bool(lookout)
         try:
@@ -605,10 +625,9 @@ class PlaywrightZoomClient(MeetingClient):
 
     async def _relaunch_normal(self) -> None:
         """Tear the diet browser down and reopen the page on normal flags."""
-        from playwright.async_api import async_playwright
         self._diet_active = False
         await self.close()
-        self._pw = await async_playwright().start()
+        await self._driver_start()
         self._page_errors.clear()
         self._page_console.clear()
         await self._open_page(self._launch_args(False))
@@ -866,21 +885,13 @@ class PlaywrightZoomClient(MeetingClient):
         half-built client -- which matters, because a join that fails partway
         must not leave a Chromium (and a ghost participant) behind."""
         self._closing = True
-        for closer in (self._context, self._browser):
-            try:
-                if closer:
-                    await closer.close()
-            except Exception:
-                pass
+        try:
+            await self._driver_close()
+        except Exception:
+            pass
         self._context = None
         self._browser = None
         self._page = None
-        try:
-            if self._pw:
-                await self._pw.stop()
-        except Exception:
-            pass
-        self._pw = None
         if self._camera_face_path:
             try:
                 os.unlink(self._camera_face_path)
@@ -889,5 +900,76 @@ class PlaywrightZoomClient(MeetingClient):
             self._camera_face_path = None
 
 
+class PlaywrightZoomClient(ChromiumZoomClient):
+    """The Playwright driver: Chromium behind Playwright's Node.js relay.
+    About 60 MB of relay on the small machine, measured live, which is
+    why it is no longer the default; kept as the way back."""
+
+    DRIVER = "playwright"
+
+    async def _driver_start(self) -> None:
+        from playwright.async_api import async_playwright
+        self._pw = await async_playwright().start()
+
+    async def _driver_launch(self, args: list):
+        browser = await self._pw.chromium.launch(headless=self.headless, args=args)
+        context = await browser.new_context(viewport={"width": 800, "height": 600})
+        page = await context.new_page()
+        return browser, context, page
+
+    async def _driver_close(self) -> None:
+        for closer in (self._context, self._browser):
+            try:
+                if closer:
+                    await closer.close()
+            except Exception:
+                pass
+        try:
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
+        self._pw = None
+
+
+class CdpZoomClient(ChromiumZoomClient):
+    """The direct driver: Chromium over its own DevTools pipe (bot/cdp.py).
+    No relay program, so the browser gets the memory the relay used."""
+
+    DRIVER = "cdp"
+
+    def __init__(self, page_url: str, headless: bool = True):
+        super().__init__(page_url=page_url, headless=headless)
+        self._executable: Optional[str] = None
+
+    async def _driver_start(self) -> None:
+        from .cdp import find_chromium
+        self._executable = find_chromium()
+        if not self._executable:
+            raise RuntimeError(
+                "no Chromium found on this machine (set BOT_CHROMIUM_PATH, or "
+                "BOT_BROWSER_DRIVER=playwright to use the relay driver)")
+
+    async def _driver_launch(self, args: list):
+        from .cdp import CdpBrowser
+        browser = await CdpBrowser(self._executable, args, headless=self.headless).launch()
+        page = await browser.new_page(viewport=(800, 600))
+        return browser, None, page
+
+    async def _driver_close(self) -> None:
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+
+
+def browser_driver_name() -> str:
+    """Which driver a new client gets: BOT_BROWSER_DRIVER, default cdp."""
+    raw = os.environ.get("BOT_BROWSER_DRIVER", "cdp").strip().lower()
+    return "playwright" if raw == "playwright" else "cdp"
+
+
 def build_meeting_client(page_url: str, headless: bool) -> MeetingClient:
-    return PlaywrightZoomClient(page_url=page_url, headless=headless)
+    cls = PlaywrightZoomClient if browser_driver_name() == "playwright" else CdpZoomClient
+    return cls(page_url=page_url, headless=headless)

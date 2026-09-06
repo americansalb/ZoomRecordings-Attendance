@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-49"
+BUILD = "capture-50"
 
 
 class MessageIn(BaseModel):
@@ -150,7 +150,12 @@ def build_app(
         # can stop guessing why a Drive folder stays empty.
         drive_creds = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
                            or os.getenv("GOOGLE_CLIENT_EMAIL"))
+        # driver says how the browser is driven: cdp is Chromium over its
+        # own DevTools pipe with no helper program; playwright is the
+        # older relay, kept behind BOT_BROWSER_DRIVER as the way back.
+        from .meeting_client import browser_driver_name
         return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD,
+                "driver": browser_driver_name(),
                 "memory": round(CaptureLoop.memory_fraction(), 3),
                 "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3),
                 "drive": {"folder": bool(config.drive_folder_id), "credentials": drive_creds,
