@@ -208,6 +208,8 @@ class CdpBrowser:
         self._stderr_tail: List[str] = []
         self.closed = False
         self._gone_reason: Optional[str] = None
+        self._retried_headless = False
+        self._force_headless_flag: Optional[str] = None
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -215,7 +217,7 @@ class CdpBrowser:
         self._profile_dir = tempfile.mkdtemp(prefix="bot-chromium-")
         cmd = [self.executable, *CHROMIUM_FLAGS]
         if self.headless:
-            cmd.append(headless_flag(self.executable))
+            cmd.append(self._force_headless_flag or headless_flag(self.executable))
         cmd += [f"--user-data-dir={self._profile_dir}", "--remote-debugging-pipe",
                 *self.args, "about:blank"]
 
@@ -262,7 +264,23 @@ class CdpBrowser:
         self._tasks.append(asyncio.create_task(self._stderr_loop()))
         self._tasks.append(asyncio.create_task(self._exit_watch()))
         # Prove the channel works before handing the browser out.
-        await self.send("Browser.getVersion", timeout=30)
+        try:
+            await self.send("Browser.getVersion", timeout=30)
+        except BrowserGone:
+            # A full Chrome newer than its old headless mode says so on
+            # stderr and exits; the build number in the path was wrong
+            # about it. Once, with the mode it does have.
+            if (not self._retried_headless and self.headless
+                    and any("Old Headless mode has been removed" in line for line in self._stderr_tail)):
+                self._retried_headless = True
+                logger.warning("[BOT] this Chrome has no old headless mode; relaunching in the new one")
+                self.closed = False
+                self._gone_reason = None
+                self._stderr_tail.clear()
+                self.args = [a for a in self.args if not a.startswith("--headless")]
+                self._force_headless_flag = "--headless=new"
+                return await self.launch()
+            raise
         return self
 
     async def close(self) -> None:

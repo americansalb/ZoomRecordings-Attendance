@@ -301,3 +301,28 @@ def test_a_join_that_dies_on_the_direct_driver_is_retried_on_playwright(monkeypa
                                 "display_name": "AALB Assistant"})
     assert r3.status_code >= 400
     assert not fallback_joins
+
+
+FULL_CHROME = "/opt/pw-browsers/chromium-1140/chrome-linux/chrome"
+
+
+@pytest.mark.skipif(not os.path.isfile(FULL_CHROME), reason="no full Chrome here")
+def test_a_chrome_without_the_old_headless_mode_is_relaunched_in_the_new_one():
+    """The bot's image ships Chromium 130, which still has the old mode;
+    a newer full Chrome refuses "--headless=old" on stderr and exits. The
+    launch notices and relaunches once with the mode the binary has."""
+    import bot.cdp as cdp
+    assert cdp.headless_flag(FULL_CHROME) == "--headless=old"
+
+    async def run():
+        b = CdpBrowser(FULL_CHROME, ["--no-sandbox"])
+        try:
+            await b.launch()
+            page = await b.new_page()
+            assert await page.evaluate("6 * 7") == 42
+            # Either the binary took the old mode, or it was relaunched.
+            assert b._retried_headless in (True, False)
+        finally:
+            await b.close()
+
+    asyncio.run(run())
