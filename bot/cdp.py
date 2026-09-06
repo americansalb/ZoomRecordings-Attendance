@@ -414,8 +414,10 @@ class CdpBrowser:
         profile, so there is nothing to keep apart, and measured here a
         page created inside a private context kills a --single-process
         Chromium outright (the lookout diet runs single-process)."""
-        target = await self.send("Target.createTarget", {
-            "url": "about:blank", "width": viewport[0], "height": viewport[1]})
+        # No width or height here: the full browser refuses them on a tab
+        # that is not a new window ("Target position can only be set for
+        # new windows"); the viewport is set by Emulation in _init.
+        target = await self.send("Target.createTarget", {"url": "about:blank"})
         attached = await self.send("Target.attachToTarget",
                                    {"targetId": target["targetId"], "flatten": True})
         page = CdpPage(self, attached["sessionId"], target["targetId"], None)

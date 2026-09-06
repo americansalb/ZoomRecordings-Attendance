@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-35: lookout renders one tiny tile, cameras read from the signal';
+const PAGE_BUILD = 'capture-36: the camera picture stays off in a big room';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -337,6 +337,8 @@ window.zoomJoin = async (cfg) => {
   lookoutMode = !!cfg.lookout;
   cameraFaceWanted = !!cfg.cameraFace;
   cameraFace.reason = cfg.cameraFaceReason || null;
+  cameraFaceMaxPeople = Number.isFinite(Number(cfg.cameraFaceMaxPeople))
+    ? Math.max(0, Number(cfg.cameraFaceMaxPeople)) : 10;
   await ensureClient();
   const joinArgs = {
     sdkKey: cfg.sdkKey,
@@ -524,6 +526,11 @@ window.zoomSelfUserId = async () => selfUserId;
  * diagnostics, and Python asks it to stop when memory gets tight.
  */
 let cameraFaceWanted = false;
+// Sending the picture into Zoom is a video encoder inside the browser:
+// measured 2026-09-06, about 100 MB in a room of 23 (the box at 99
+// percent wearing it, 79 without). The picture is a nicety for small
+// rooms and never worth a freeze, so it stays off above this many people.
+let cameraFaceMaxPeople = 10;
 const cameraFace = {
   wanted: false, buttonFound: false, clicked: false, videoOn: null,
   phase: 'not started', error: null, clicks: 0, button: null, camera: null, notes: [],
@@ -541,9 +548,28 @@ function selfVideoOn() {
 // be tested on a plain page: it waits for Zoom's Start Video button to be
 // pressable, presses it, and reports the button's label, its greyed-out
 // state, the presses, a camera probe and Zoom's own words.
+function roomSize() {
+  try {
+    const list = (client && client.getAttendeeslist && client.getAttendeeslist()) || [];
+    return list.filter((u) => !u.isHold).length;
+  } catch (e) { return 0; }
+}
+
 async function startCameraFace() {
   if (!cameraFaceWanted) return;
   if (!window.CameraFace) { cameraFace.wanted = true; cameraFace.phase = 'camera script not loaded'; return; }
+  // Let the roster arrive, then size the room. A room already bigger
+  // than the limit never gets the picture, whatever the memory meter
+  // said before the join (it is always low then).
+  await new Promise((r) => setTimeout(r, 4000));
+  const people = roomSize();
+  if (cameraFaceMaxPeople > 0 && people > cameraFaceMaxPeople) {
+    cameraFace.wanted = false;
+    cameraFace.videoOn = false;
+    cameraFace.phase = `off: ${people} people in the room, the picture stays off above ${cameraFaceMaxPeople}`;
+    cameraFace.reason = cameraFace.phase;
+    return;
+  }
   await window.CameraFace.start({
     client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,
   });

@@ -96,6 +96,15 @@ def _looks_like_browser_death(exc: BaseException) -> bool:
 logger = logging.getLogger(__name__)
 
 
+def _camera_face_max_people() -> int:
+    """Rooms bigger than this never get the camera picture. From
+    BOT_CAMERA_FACE_MAX_PEOPLE, default 10, 0 means no limit."""
+    try:
+        return max(0, int(os.environ.get("BOT_CAMERA_FACE_MAX_PEOPLE", "10") or 10))
+    except ValueError:
+        return 10
+
+
 def _gallery_tiles() -> int:
     """Tiles per gallery page, from BOT_GALLERY_TILES, clamped 4 to 25.
 
@@ -602,6 +611,11 @@ class ChromiumZoomClient(MeetingClient):
                 # for it right now. The page presses Zoom's own button.
                 "cameraFace": camera_face[0],
                 "cameraFaceReason": camera_face[1],
+                # Above this many people the page keeps the picture off:
+                # sending video into Zoom costs the browser about 100 MB
+                # in a full class (measured 2026-09-06), a nicety that is
+                # never worth a frozen box.
+                "cameraFaceMaxPeople": _camera_face_max_people(),
             }
             try:
                 await self._page.evaluate(

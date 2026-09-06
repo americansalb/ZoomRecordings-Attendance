@@ -1151,3 +1151,20 @@ async def _grid_off_for_lookout():
 def test_grid_off_for_lookout():
     asyncio.run(_grid_off_for_lookout())
     print("  grid proctor off for a lookout OK")
+
+
+def test_camera_picture_room_limit(monkeypatch):
+    """The picture costs the browser about 100 MB in a full class, so the
+    page is told the room size above which it stays off: 10 by default,
+    tunable without a rebuild, 0 for no limit."""
+    from bot.meeting_client import _camera_face_max_people
+    monkeypatch.delenv("BOT_CAMERA_FACE_MAX_PEOPLE", raising=False)
+    assert _camera_face_max_people() == 10
+    monkeypatch.setenv("BOT_CAMERA_FACE_MAX_PEOPLE", "25")
+    assert _camera_face_max_people() == 25
+    monkeypatch.setenv("BOT_CAMERA_FACE_MAX_PEOPLE", "0")
+    assert _camera_face_max_people() == 0
+    monkeypatch.setenv("BOT_CAMERA_FACE_MAX_PEOPLE", "nonsense")
+    assert _camera_face_max_people() == 10
+    page = open("bot/static/zoom_client.js", encoding="utf-8").read()
+    assert "cameraFaceMaxPeople" in page and "the picture stays off above" in page
