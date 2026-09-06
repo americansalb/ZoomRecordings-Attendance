@@ -128,14 +128,31 @@ def find_chromium(env: Optional[Dict[str, str]] = None) -> Optional[str]:
     return None
 
 
+# Chromium builds up to this Playwright revision still carry the old, lean
+# headless mode inside the full binary (Chromium 130 is build 1140; Chrome
+# 132 removed it, pointing at the separate headless shell instead).
+LAST_BUILD_WITH_OLD_HEADLESS = 1150
+
+
 def headless_flag(executable: str) -> str:
-    """Always the plain flag, the one Playwright 1.48 passes to this same
-    binary. On the full browser that is the lean old headless mode (on
-    Chromium 130, the build the bot's image ships); "--headless=new" is a
-    whole Chrome with its GPU, network and utility processes, which is
-    what the first class on this driver ran (2026-09-06) at about 40 MB
-    more than the relay ever used. The headless shell takes the same flag."""
-    return "--headless"
+    """The lean headless mode, named the way Playwright 1.48 names it.
+
+    Read from Playwright's own launcher (chromium.js): it passes
+    "--headless=old" to the full Chrome binary, never the plain flag,
+    because on Chromium 130 the plain flag already means the NEW mode, a
+    whole Chrome with its GPU, network and utility processes. Measured on a
+    blank page with the bot's flags: new mode about 265 MB across 8
+    processes, old mode about 144 MB across 6; under the lookout diet 206
+    against 117. That gap is what the first class on the direct driver
+    paid (2026-09-06). A headless shell binary is the old mode by
+    construction and takes the plain flag; a full Chrome newer than the
+    old mode gets the new one, the only one it has."""
+    if os.path.basename(executable) == "headless_shell":
+        return "--headless"
+    rev = _revision(executable)
+    if rev and rev <= LAST_BUILD_WITH_OLD_HEADLESS:
+        return "--headless=old"
+    return "--headless=new"
 
 
 def split_frames(buffer: bytes) -> Tuple[List[bytes], bytes]:

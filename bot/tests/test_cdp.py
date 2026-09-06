@@ -32,9 +32,14 @@ def test_find_chromium_prefers_the_headless_shell_and_the_newest(tmp_path):
     assert find_chromium({"BOT_CHROMIUM_PATH": str(tmp_path / "missing")}) is None
 
 
-def test_headless_flag_is_the_lean_one_everywhere():
+def test_headless_flag_is_the_lean_mode_for_each_binary():
+    # The shell is lean by construction; the bot's full Chromium 130 still
+    # has the old lean mode and must be told to use it; a newer full
+    # Chrome only has the new one.
     assert headless_flag("/x/chromium_headless_shell-1140/chrome-linux/headless_shell") == "--headless"
-    assert headless_flag("/x/chromium-1140/chrome-linux/chrome") == "--headless"
+    assert headless_flag("/ms-playwright/chromium-1140/chrome-linux/chrome") == "--headless=old"
+    assert headless_flag("/x/chromium-1194/chrome-linux/chrome") == "--headless=new"
+    assert headless_flag("/usr/bin/chromium") == "--headless=new"
 
 
 def test_pipe_framing():
