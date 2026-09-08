@@ -40,6 +40,18 @@ class SchedulerService:
             replace_existing=True
         )
 
+        # CIA auto-upload sweep, hourly while this process is awake. The
+        # free tier naps, so the dependable trigger is the attendance bot
+        # pinging /api/cia/sweep; this job simply covers the hours the API
+        # is up anyway, and the sweep's own lock makes overlap harmless.
+        self.scheduler.add_job(
+            self._run_cia_sweep,
+            trigger=IntervalTrigger(minutes=60),
+            id='cia_sweep',
+            name='Deliver CIA recordings to the grading wizard folder',
+            replace_existing=True
+        )
+
         self.scheduler.start()
         self._is_running = True
         logger.info(f"[SCHEDULER] Started with {self._check_interval_seconds}s interval")
@@ -50,6 +62,14 @@ class SchedulerService:
             self.scheduler.shutdown(wait=False)
             self._is_running = False
             logger.info("[SCHEDULER] Stopped")
+
+    async def _run_cia_sweep(self):
+        """Hourly CIA recording delivery while the process is awake."""
+        try:
+            from services.cia_sweep import run_cia_sweep
+            await run_cia_sweep()
+        except Exception as e:
+            logger.error(f"[SCHEDULER] CIA sweep failed: {e}")
 
     async def _check_trainer_absence(self):
         """

@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions, live_tutor, publish
+from routes import recordings, attendance, students, sheets, mappings, accounts, proctoring, video_upload, live_sessions, live_tutor, publish, cia
 from services.job_store import get_job_store
 from services.scheduler_service import scheduler_service
 
@@ -90,6 +90,14 @@ async def startup_event():
     except Exception as e:
         print(f"[JOBSTORE] Stale-check error: {e}", flush=True)
 
+    # CIA auto-upload configuration, stated plainly in the startup log so a
+    # missing secret or an overridden folder is visible without digging.
+    from services.cia_sweep import cia_folder_id, lookback_days
+    cia_secret = os.getenv("TUTOR_BOT_SHARED_SECRET") or os.getenv("CIA_SWEEP_SECRET")
+    print(f"CIA sweep: folder {cia_folder_id()}, last {lookback_days()} days, "
+          f"trigger secret {'SET' if cia_secret else 'MISSING (sweep endpoints disabled)'}"
+          f"{', DISABLED by env' if os.getenv('CIA_SWEEP_DISABLED') else ''}", flush=True)
+
     # Start background scheduler for trainer absence checks
     scheduler_service.start()
     print("[SCHEDULER] Background trainer absence checker started", flush=True)
@@ -122,6 +130,7 @@ app.include_router(video_upload.router, prefix="/api", tags=["Video Upload"])
 app.include_router(publish.router, prefix="/api", tags=["Publish"])
 app.include_router(live_sessions.router, prefix="/api", tags=["Live Sessions"])
 app.include_router(live_tutor.router, prefix="/api", tags=["Live Tutor"])
+app.include_router(cia.router, prefix="/api", tags=["CIA"])
 
 
 @app.get("/api/health")

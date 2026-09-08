@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-55"
+BUILD = "capture-56"
 
 
 class MessageIn(BaseModel):
@@ -123,6 +123,40 @@ def build_app(
                 except Exception as e:
                     logger.warning("[JANITOR] retention purge failed: %s", e)
                 await asyncio.sleep(24 * 3600)
+
+        asyncio.create_task(run())
+
+    @app.on_event("startup")
+    async def _cia_sweep_pinger():
+        """Poke the backend's CIA sweep on a timer.
+
+        The backend API naps on the free tier, so its own scheduler cannot
+        be trusted to run; this box is always awake. The poke both wakes
+        the API and triggers one sweep (exam recordings titled CIA get
+        delivered to the grading wizard's Drive folder). One tiny HTTP
+        POST every BOT_CIA_SWEEP_PING_MINUTES (default 45; 0 turns it
+        off), with the shared secret the bot already holds. Failures are
+        logged and waited out; nothing here can touch a meeting.
+        """
+        minutes = int(os.getenv("BOT_CIA_SWEEP_PING_MINUTES", "45") or 0)
+        if minutes <= 0 or not config.backend_url or not config.bot_shared_secret:
+            return
+
+        async def run():
+            import httpx
+            url = f"{config.backend_url.rstrip('/')}/api/cia/sweep"
+            await asyncio.sleep(300)  # let boot settle before the first poke
+            while True:
+                try:
+                    # Generous timeout: the poke may be what wakes a napping
+                    # free-tier service, and cold starts take up to a minute.
+                    async with httpx.AsyncClient(timeout=90.0) as client:
+                        r = await client.post(
+                            url, headers={"X-Tutor-Bot-Secret": config.bot_shared_secret})
+                    logger.info("[CIA-PING] Swept: %s %s", r.status_code, r.text[:120])
+                except Exception as e:
+                    logger.warning("[CIA-PING] Poke failed (retrying next tick): %s", e)
+                await asyncio.sleep(minutes * 60)
 
         asyncio.create_task(run())
 

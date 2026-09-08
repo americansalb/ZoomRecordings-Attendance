@@ -62,6 +62,13 @@ services:
         sync: false
       - key: UPLOAD_JOBS_DB
         value: data/upload_jobs.db
+      # --- CIA auto-upload (docs/cia-auto-upload.md) ---
+      # All optional: the intake folder defaults to the grading wizard's own
+      # default folder, and the bot's shared secret already gates the trigger.
+      - key: CIA_DRIVE_FOLDER_ID
+        sync: false
+      - key: CIA_SWEEP_LOOKBACK_DAYS
+        sync: false
     healthCheckPath: /health
     # Optional: persist SQLite job history across deploys. Render Disks
     # only attach to one service, so this is safe to keep on the API.
