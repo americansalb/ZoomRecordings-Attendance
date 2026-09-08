@@ -38,12 +38,18 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-57"
+BUILD = "capture-58"
 
 # What the CIA sweep poke last did, shown on /healthz. This box is the one
 # machine always awake, so its health page is where a person reads whether
 # exam recordings are being delivered, with no secret and no log to open.
 CIA_STATE: Dict[str, Any] = {"pinger": "not started"}
+
+# The uploader API, where the CIA sweep lives. NOT the backend this bot
+# reports attendance to: BACKEND_URL is the attendance console (learn), and
+# the first two builds of the poke knocked there, where every poke was
+# answered 401 "Please log in" while the exams sat on Zoom.
+DEFAULT_UPLOADER_URL = "https://zoomrecordings-attendance.onrender.com"
 
 
 class MessageIn(BaseModel):
@@ -134,34 +140,33 @@ def build_app(
 
     @app.on_event("startup")
     async def _cia_sweep_pinger():
-        """Poke the backend's CIA sweep on a timer.
+        """Poke the uploader's CIA sweep on a timer.
 
-        The backend API naps on the free tier, so its own scheduler cannot
+        The uploader API naps on the free tier, so its own scheduler cannot
         be trusted to run; this box is always awake. The poke both wakes
         the API and triggers one sweep (exam recordings titled CIA get
         delivered to the grading wizard's Drive folder). One tiny HTTP
         POST every BOT_CIA_SWEEP_PING_MINUTES (default 45; 0 turns it
-        off), with the shared secret when this box holds one and without
-        it otherwise: the API accepts the poke as it is when no secret is
-        configured there, the same rule as its other bot endpoints. The
-        first build did not poke at all without a secret and the API
-        refused the poke without one, so nothing was delivered for a day
-        (owner, 2026-09-08). Failures are logged, kept on /healthz, and
-        waited out; nothing here can touch a meeting.
+        off) to BOT_CIA_SWEEP_URL (default: the uploader's public
+        address), with the shared secret when this box holds one and
+        without it otherwise: the uploader accepts the poke as it is when
+        no secret is configured there, the same rule as its other bot
+        endpoints. Two faults kept this from working through 2026-09-08:
+        the poke was aimed at BACKEND_URL, which is the attendance console
+        and answered 401, and the uploader refused a poke without a
+        secret. Failures are logged, kept on /healthz, and waited out;
+        nothing here can touch a meeting.
         """
         minutes = int(os.getenv("BOT_CIA_SWEEP_PING_MINUTES", "45") or 0)
         if minutes <= 0:
             CIA_STATE["pinger"] = "off (BOT_CIA_SWEEP_PING_MINUTES is 0)"
             return
-        if not config.backend_url:
-            CIA_STATE["pinger"] = "off (BACKEND_URL is not set)"
-            return
-        CIA_STATE.update({"pinger": f"every {minutes} minutes",
+        base = (os.getenv("BOT_CIA_SWEEP_URL") or DEFAULT_UPLOADER_URL).rstrip("/")
+        CIA_STATE.update({"pinger": f"every {minutes} minutes", "target": base,
                           "with_secret": bool(config.bot_shared_secret)})
 
         async def run():
             import httpx
-            base = config.backend_url.rstrip('/')
             headers = ({"X-Tutor-Bot-Secret": config.bot_shared_secret}
                        if config.bot_shared_secret else {})
             await asyncio.sleep(300)  # let boot settle before the first poke

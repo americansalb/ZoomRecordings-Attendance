@@ -35,9 +35,15 @@ can see them.
 
 This API sleeps when idle on the free tier, so it cannot be its own alarm
 clock. The attendance bot's computer, which is always awake, pokes
-`POST /api/cia/sweep` every 45 minutes; the poke wakes the API and runs
-one sweep. While the API happens to be awake it also sweeps hourly on its
-own. Overlapping triggers are harmless: one sweep runs at a time.
+`POST /api/cia/sweep` on this API every 45 minutes; the poke wakes the API
+and runs one sweep. While the API happens to be awake it also sweeps
+hourly on its own. Overlapping triggers are harmless: one sweep runs at a
+time.
+
+The bot pokes the address in `BOT_CIA_SWEEP_URL`, which defaults to this
+API's public address. It must never use the bot's `BACKEND_URL`: that is
+the attendance console (learn), a different computer, and the first two
+builds of the poke knocked there and were answered 401 "Please log in".
 
 The secret rule is the one every other bot endpoint follows: when
 `TUTOR_BOT_SHARED_SECRET` (or `CIA_SWEEP_SECRET`) is set on the API the
@@ -64,6 +70,7 @@ poke. That is where to look first when an exam has not turned up.
 | `CIA_SWEEP_SECRET` | A second trigger secret besides the bot's | unset |
 | `CIA_SWEEP_DISABLED` | Set to anything to turn the whole feature off | unset |
 | `BOT_CIA_SWEEP_PING_MINUTES` | On the bot: poke interval, 0 turns the poke off | 45 |
+| `BOT_CIA_SWEEP_URL` | On the bot: the uploader API's address to poke | `https://zoomrecordings-attendance.onrender.com` |
 
 ## If a sweep reports a permission error
 
