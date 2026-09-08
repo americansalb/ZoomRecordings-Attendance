@@ -8,10 +8,17 @@ POST /api/cia/sweep     — run one sweep (returns 202 and works in the
                           when the free tier has put it to sleep.
 GET  /api/cia/status    — what the last sweep did, for a human checking.
 
-Both are gated by a secret. The bot uses the shared secret it already
-holds (X-Tutor-Bot-Secret); anything else can use CIA_SWEEP_SECRET via
-X-CIA-Sweep-Secret. With neither secret configured on the server, the
-endpoints refuse to run rather than stand open.
+THE SECRET RULE IS THE SAME AS EVERY OTHER BOT ENDPOINT (see
+routes/live_tutor.py): when TUTOR_BOT_SHARED_SECRET (or CIA_SWEEP_SECRET)
+is configured on this server the caller must send it; when neither is
+configured the call is accepted. The first version refused with 503
+instead, and the live deployment runs with no shared secret, so every
+poke the bot made was refused and nothing was delivered while three exams
+sat on Zoom (owner, 2026-09-08: "why are all these unmatched"). Triggering
+a sweep is idempotent and delivers only into the wizard's own folder, so
+an open trigger costs nothing. The status view is the one thing that
+carries recording titles (candidate names): with no secret configured it
+shows counts and error messages only.
 """
 
 from __future__ import annotations
@@ -29,15 +36,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cia", tags=["CIA"])
 
 
+def secret_configured() -> bool:
+    return bool(os.getenv("TUTOR_BOT_SHARED_SECRET") or os.getenv("CIA_SWEEP_SECRET"))
+
+
 def _check_secret(bot_secret: Optional[str], sweep_secret: Optional[str]) -> None:
     expected_bot = os.getenv("TUTOR_BOT_SHARED_SECRET")
     expected_sweep = os.getenv("CIA_SWEEP_SECRET")
     if not expected_bot and not expected_sweep:
-        raise HTTPException(
-            status_code=503,
-            detail="No sweep secret is configured on the server "
-                   "(TUTOR_BOT_SHARED_SECRET or CIA_SWEEP_SECRET).",
-        )
+        return
     if expected_bot and bot_secret == expected_bot:
         return
     if expected_sweep and sweep_secret == expected_sweep:
@@ -68,9 +75,4 @@ async def sweep_status(
     x_cia_sweep_secret: Optional[str] = Header(default=None),
 ):
     _check_secret(x_tutor_bot_secret, x_cia_sweep_secret)
-    return {
-        "running": cia_sweep._lock.locked(),
-        "intake_folder": cia_sweep.cia_folder_id(),
-        "lookback_days": cia_sweep.lookback_days(),
-        "last_sweep": cia_sweep.last_sweep or None,
-    }
+    return cia_sweep.status_view(full=secret_configured())

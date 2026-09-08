@@ -35,12 +35,25 @@ can see them.
 
 This API sleeps when idle on the free tier, so it cannot be its own alarm
 clock. The attendance bot's computer, which is always awake, pokes
-`POST /api/cia/sweep` every 45 minutes with the shared secret it already
-holds; the poke wakes the API and runs one sweep. While the API happens
-to be awake it also sweeps hourly on its own. Overlapping triggers are
-harmless: one sweep runs at a time.
+`POST /api/cia/sweep` every 45 minutes; the poke wakes the API and runs
+one sweep. While the API happens to be awake it also sweeps hourly on its
+own. Overlapping triggers are harmless: one sweep runs at a time.
 
-`GET /api/cia/status` (same secret) shows what the last sweep did.
+The secret rule is the one every other bot endpoint follows: when
+`TUTOR_BOT_SHARED_SECRET` (or `CIA_SWEEP_SECRET`) is set on the API the
+poke must carry it; when neither is set the poke is accepted as it is.
+(The first build refused every poke when no secret was set, and the live
+API has none, so nothing was delivered until build capture-57.)
+
+`GET /api/cia/status` shows what the last sweep did. With a secret
+configured it shows everything, recording titles included; with none it
+shows the counts and the error messages only, because titles name
+candidates.
+
+The bot's health page (`/healthz` on the bot's computer) carries a `cia`
+block: whether the poke is running, when it last poked, what the API
+answered, and the last sweep's summary as read three minutes after the
+poke. That is where to look first when an exam has not turned up.
 
 ## Settings (all optional)
 
@@ -55,6 +68,6 @@ harmless: one sweep runs at a time.
 ## If a sweep reports a permission error
 
 The uploader's Google account needs access to the wizard's intake folder.
-The error message in the logs and in `/api/cia/status` names the exact
-account; share the intake folder with it as Editor and the next sweep
-delivers everything it skipped.
+The error message in the logs, in `/api/cia/status`, and in the bot's
+`/healthz` `cia` block names the exact account; share the intake folder
+with it as Editor and the next sweep delivers everything it skipped.

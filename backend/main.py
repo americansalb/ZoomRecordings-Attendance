@@ -95,7 +95,7 @@ async def startup_event():
     from services.cia_sweep import cia_folder_id, lookback_days
     cia_secret = os.getenv("TUTOR_BOT_SHARED_SECRET") or os.getenv("CIA_SWEEP_SECRET")
     print(f"CIA sweep: folder {cia_folder_id()}, last {lookback_days()} days, "
-          f"trigger secret {'SET' if cia_secret else 'MISSING (sweep endpoints disabled)'}"
+          f"trigger secret {'SET' if cia_secret else 'not set (the poke is accepted without one; status shows counts only)'}"
           f"{', DISABLED by env' if os.getenv('CIA_SWEEP_DISABLED') else ''}", flush=True)
 
     # Start background scheduler for trainer absence checks

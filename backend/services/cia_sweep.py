@@ -197,6 +197,46 @@ _lock = asyncio.Lock()
 last_sweep: Dict[str, Any] = {}
 
 
+def status_view(full: bool) -> Dict[str, Any]:
+    """
+    What the status endpoint shows. The full view carries the recording
+    titles, which name candidates, so it is for a caller holding the
+    secret; the redacted view keeps every count and every error message
+    with the title stripped, which is enough to see that the sweep ran,
+    what it delivered, and what to fix (a permission error still names the
+    Google account to share the folder with).
+    """
+    view: Dict[str, Any] = {
+        "running": _lock.locked(),
+        "intake_folder": cia_folder_id(),
+        "lookback_days": lookback_days(),
+        "redacted": not full,
+    }
+    if not last_sweep:
+        view["last_sweep"] = None
+        return view
+    if full:
+        view["last_sweep"] = dict(last_sweep)
+        return view
+    s = last_sweep
+    errors = []
+    for p in s.get("problems") or []:
+        text = str(p.get("error") or "")
+        hint = str(p.get("hint") or "").strip()
+        head = "one recording: " if p.get("topic") else ""
+        errors.append(f"{head}{text}{(' ' + hint) if hint else ''}")
+    view["last_sweep"] = {
+        "started_at": s.get("started_at"), "finished_at": s.get("finished_at"),
+        "window": s.get("window"),
+        "scanned": s.get("scanned", 0), "matched": s.get("matched", 0),
+        "delivered": len(s.get("delivered") or []),
+        "already_there": s.get("already_there", 0),
+        "waiting_on_zoom": s.get("waiting_on_zoom", 0),
+        "errors": errors,
+    }
+    return view
+
+
 async def run_cia_sweep(deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     One pass over recent Zoom recordings on every configured account.
@@ -234,6 +274,9 @@ async def run_cia_sweep(deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
             "intake_folder": folder,
             "scanned": 0, "matched": 0, "delivered": [], "already_there": 0,
             "waiting_on_zoom": 0, "errors": [],
+            # The same problems, structured, so the status view can print
+            # them without the recording title.
+            "problems": [],
         }
 
         accounts = [a["id"] for a in zoom.get_accounts()] or []
@@ -242,6 +285,7 @@ async def run_cia_sweep(deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
                 recordings = await zoom.list_all_recordings(from_date, to_date, account_id)
             except Exception as e:                          # noqa: BLE001
                 summary["errors"].append(f"Zoom listing failed on {account_id}: {e}")
+                summary["problems"].append({"topic": None, "error": f"Zoom listing failed on {account_id}: {e}", "hint": ""})
                 continue
             summary["scanned"] += len(recordings)
 
@@ -319,6 +363,7 @@ async def run_cia_sweep(deps: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
                         hint = (f" If this repeats, share the CIA intake folder "
                                 f"({folder}) with {sa} as Editor.")
                     summary["errors"].append(f"{topic!r}: {e}.{hint}")
+                    summary["problems"].append({"topic": topic, "error": f"{e}.", "hint": hint.strip()})
                     logger.error(f"[CIA] {topic!r} failed: {e}", exc_info=True)
 
         summary["finished_at"] = datetime.now().isoformat(timespec="seconds")

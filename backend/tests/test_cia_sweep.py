@@ -20,12 +20,14 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from services import cia_sweep  # noqa: E402
 from services.cia_sweep import (  # noqa: E402
     exam_label,
     is_cia_topic,
     pick_audio,
     pick_video,
     run_cia_sweep,
+    status_view,
     still_processing,
 )
 
@@ -200,6 +202,72 @@ class TestSweep(unittest.TestCase):
         drive.get_or_create_folder = forbidden
         summary = self._run(zoom, drive)
         self.assertIn("uploader@example.iam.gserviceaccount.com", summary["errors"][0])
+
+    def test_the_redacted_status_keeps_the_counts_and_the_fix_but_never_a_title(self):
+        # The status without a secret is readable by anyone, so it must not
+        # carry recording titles (they name candidates); the counts and the
+        # error, with the account to share the folder with, still get through.
+        zoom = FakeZoom([_recording("CIA - Maria Lopez", "uuid-cia")])
+        drive = FakeDrive()
+
+        def forbidden(*a, **k):
+            raise RuntimeError("HttpError 403: insufficient permission")
+
+        drive.get_or_create_folder = forbidden
+        self._run(zoom, drive)
+        redacted = status_view(full=False)
+        self.assertTrue(redacted["redacted"])
+        self.assertEqual(redacted["last_sweep"]["matched"], 1)
+        self.assertEqual(redacted["last_sweep"]["delivered"], 0)
+        self.assertNotIn("Maria Lopez", str(redacted))
+        self.assertIn("uploader@example.iam.gserviceaccount.com", redacted["last_sweep"]["errors"][0])
+        self.assertTrue(redacted["last_sweep"]["errors"][0].startswith("one recording: "))
+        full = status_view(full=True)
+        self.assertFalse(full["redacted"])
+        self.assertIn("Maria Lopez", full["last_sweep"]["errors"][0])
+
+    def test_status_before_any_sweep_says_so(self):
+        cia_sweep.last_sweep.clear()
+        view = status_view(full=False)
+        self.assertIsNone(view["last_sweep"])
+        self.assertFalse(view["running"])
+
+
+class TestTriggerSecret(unittest.TestCase):
+    """The poke follows the rule every other bot endpoint follows: a
+    configured secret must match; no configured secret means the poke is
+    accepted. Refusing with 503 when none was configured is what kept three
+    exams on Zoom for a day (owner, 2026-09-08)."""
+
+    def setUp(self):
+        self._env = {k: os.environ.pop(k, None) for k in ("TUTOR_BOT_SHARED_SECRET", "CIA_SWEEP_SECRET")}
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_no_secret_configured_accepts_the_poke_and_redacts_the_status(self):
+        from routes.cia import _check_secret, secret_configured
+        _check_secret(None, None)          # no exception: accepted
+        _check_secret("anything", None)    # a bot that holds a secret the API does not is fine too
+        self.assertFalse(secret_configured())
+
+    def test_a_configured_secret_must_match(self):
+        from fastapi import HTTPException
+        from routes.cia import _check_secret, secret_configured
+        os.environ["TUTOR_BOT_SHARED_SECRET"] = "s3cret"
+        self.assertTrue(secret_configured())
+        _check_secret("s3cret", None)
+        with self.assertRaises(HTTPException) as caught:
+            _check_secret("wrong", None)
+        self.assertEqual(caught.exception.status_code, 403)
+        with self.assertRaises(HTTPException):
+            _check_secret(None, None)
+        os.environ["CIA_SWEEP_SECRET"] = "other"
+        _check_secret(None, "other")
 
 
 if __name__ == "__main__":
