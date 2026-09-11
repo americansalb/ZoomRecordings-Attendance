@@ -96,13 +96,29 @@ def _looks_like_browser_death(exc: BaseException) -> bool:
 logger = logging.getLogger(__name__)
 
 
+# A box with at least this much memory has room for the bot's own video
+# encoder in a full class. The encoder measured about 100 MB (2026-09-06,
+# a class of 23), which is a fifth of the 512 MB box and a twentieth of a
+# 2 GB one, so the headcount cap belongs to the small box only.
+CAMERA_FACE_BIG_BOX_MB = 1536
+
+
 def _camera_face_max_people() -> int:
-    """Rooms bigger than this never get the camera picture. From
-    BOT_CAMERA_FACE_MAX_PEOPLE, default 10, 0 means no limit."""
-    try:
-        return max(0, int(os.environ.get("BOT_CAMERA_FACE_MAX_PEOPLE", "10") or 10))
-    except ValueError:
-        return 10
+    """Rooms bigger than this never get the camera picture.
+
+    BOT_CAMERA_FACE_MAX_PEOPLE sets it; 0 means no limit. Unset, the
+    answer comes from the box: a machine big enough to hold the encoder
+    beside a full class has no headcount cap, a small one caps at 10.
+    """
+    raw = os.environ.get("BOT_CAMERA_FACE_MAX_PEOPLE", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    from .capture import CaptureLoop
+    limit_mb = CaptureLoop.memory_limit_mb()
+    return 0 if limit_mb >= CAMERA_FACE_BIG_BOX_MB else 10
 
 
 def _gallery_tiles() -> int:

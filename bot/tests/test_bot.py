@@ -1153,12 +1153,34 @@ def test_grid_off_for_lookout():
     print("  grid proctor off for a lookout OK")
 
 
+def test_camera_picture_cap_follows_the_box(monkeypatch):
+    """The headcount cap exists because 100 MB of video encoder does not
+    fit beside a full class on a 512 MB box. On a bigger box it does, and
+    the cap lifts by itself with nothing to set."""
+    from bot.capture import CaptureLoop
+    from bot.meeting_client import _camera_face_max_people
+    monkeypatch.delenv("BOT_CAMERA_FACE_MAX_PEOPLE", raising=False)
+    monkeypatch.setattr(CaptureLoop, "memory_limit_mb", classmethod(lambda cls: 512))
+    assert _camera_face_max_people() == 10
+    monkeypatch.setattr(CaptureLoop, "memory_limit_mb", classmethod(lambda cls: 2048))
+    assert _camera_face_max_people() == 0
+    # A box that does not say falls back to the careful answer.
+    monkeypatch.setattr(CaptureLoop, "memory_limit_mb", classmethod(lambda cls: 0))
+    assert _camera_face_max_people() == 10
+    # A number set by hand still wins, on any box.
+    monkeypatch.setenv("BOT_CAMERA_FACE_MAX_PEOPLE", "25")
+    monkeypatch.setattr(CaptureLoop, "memory_limit_mb", classmethod(lambda cls: 2048))
+    assert _camera_face_max_people() == 25
+
+
 def test_camera_picture_room_limit(monkeypatch):
     """The picture costs the browser about 100 MB in a full class, so the
     page is told the room size above which it stays off: 10 by default,
     tunable without a rebuild, 0 for no limit."""
+    from bot.capture import CaptureLoop
     from bot.meeting_client import _camera_face_max_people
     monkeypatch.delenv("BOT_CAMERA_FACE_MAX_PEOPLE", raising=False)
+    monkeypatch.setattr(CaptureLoop, "memory_limit_mb", classmethod(lambda cls: 512))
     assert _camera_face_max_people() == 10
     monkeypatch.setenv("BOT_CAMERA_FACE_MAX_PEOPLE", "25")
     assert _camera_face_max_people() == 25

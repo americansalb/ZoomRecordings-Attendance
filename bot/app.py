@@ -37,7 +37,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-55"
+BUILD = "capture-56"
 
 
 class MessageIn(BaseModel):
@@ -157,6 +157,9 @@ def build_app(
         return {"ok": True, "sdk_configured": bool(config.sdk_key), "build": BUILD,
                 "driver": browser_driver_name(),
                 "memory": round(CaptureLoop.memory_fraction(), 3),
+                # What this box is allowed, so a plan change is visible
+                # here rather than inferred from a percentage.
+                "memory_limit_mb": CaptureLoop.memory_limit_mb(),
                 "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3),
                 "drive": {"folder": bool(config.drive_folder_id), "credentials": drive_creds,
                           "ready": bool(config.drive_folder_id) and drive_creds}}

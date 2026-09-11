@@ -247,6 +247,22 @@ class CaptureLoop:
         return 0
 
     @classmethod
+    def memory_limit_mb(cls) -> int:
+        """How much memory this container is allowed, in MB; 0 when the
+        cgroup does not say. What the box costs is read from the box, so
+        a bigger instance needs no setting changed anywhere."""
+        mx = cls._read_first(cls.MEM_MAX_PATHS)
+        if not mx or mx == "max":
+            return 0
+        try:
+            max_b = int(mx)
+        except ValueError:
+            return 0
+        if max_b <= 0 or max_b > (1 << 50):
+            return 0
+        return max_b // (1024 * 1024)
+
+    @classmethod
     def memory_fraction(cls, *, with_cache: bool = False) -> float:
         """How full the container's memory cgroup is, 0.0 when unknowable.
 
