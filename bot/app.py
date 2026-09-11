@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -37,7 +38,18 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-56"
+BUILD = "capture-59"
+
+# What the CIA sweep poke last did, shown on /healthz. This box is the one
+# machine always awake, so its health page is where a person reads whether
+# exam recordings are being delivered, with no secret and no log to open.
+CIA_STATE: Dict[str, Any] = {"pinger": "not started"}
+
+# The uploader API, where the CIA sweep lives. NOT the backend this bot
+# reports attendance to: BACKEND_URL is the attendance console (learn), and
+# the first two builds of the poke knocked there, where every poke was
+# answered 401 "Please log in" while the exams sat on Zoom.
+DEFAULT_UPLOADER_URL = "https://zoomrecordings-attendance.onrender.com"
 
 
 class MessageIn(BaseModel):
@@ -126,6 +138,66 @@ def build_app(
 
         asyncio.create_task(run())
 
+    @app.on_event("startup")
+    async def _cia_sweep_pinger():
+        """Poke the uploader's CIA sweep on a timer.
+
+        The uploader API naps on the free tier, so its own scheduler cannot
+        be trusted to run; this box is always awake. The poke both wakes
+        the API and triggers one sweep (exam recordings titled CIA get
+        delivered to the grading wizard's Drive folder). One tiny HTTP
+        POST every BOT_CIA_SWEEP_PING_MINUTES (default 45; 0 turns it
+        off) to BOT_CIA_SWEEP_URL (default: the uploader's public
+        address), with the shared secret when this box holds one and
+        without it otherwise: the uploader accepts the poke as it is when
+        no secret is configured there, the same rule as its other bot
+        endpoints. Two faults kept this from working through 2026-09-08:
+        the poke was aimed at BACKEND_URL, which is the attendance console
+        and answered 401, and the uploader refused a poke without a
+        secret. Failures are logged, kept on /healthz, and waited out;
+        nothing here can touch a meeting.
+        """
+        minutes = int(os.getenv("BOT_CIA_SWEEP_PING_MINUTES", "45") or 0)
+        if minutes <= 0:
+            CIA_STATE["pinger"] = "off (BOT_CIA_SWEEP_PING_MINUTES is 0)"
+            return
+        base = (os.getenv("BOT_CIA_SWEEP_URL") or DEFAULT_UPLOADER_URL).rstrip("/")
+        CIA_STATE.update({"pinger": f"every {minutes} minutes", "target": base,
+                          "with_secret": bool(config.bot_shared_secret)})
+
+        async def run():
+            import httpx
+            headers = ({"X-Tutor-Bot-Secret": config.bot_shared_secret}
+                       if config.bot_shared_secret else {})
+            await asyncio.sleep(300)  # let boot settle before the first poke
+            while True:
+                stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                try:
+                    # Generous timeout: the poke may be what wakes a napping
+                    # free-tier service, and cold starts take up to a minute.
+                    async with httpx.AsyncClient(timeout=90.0) as client:
+                        r = await client.post(f"{base}/api/cia/sweep", headers=headers)
+                    CIA_STATE.update({"last_poke_at": stamp,
+                                      "last_poke": {"status": r.status_code, "body": r.text[:200]}})
+                    logger.info("[CIA-PING] Swept: %s %s", r.status_code, r.text[:120])
+                except Exception as e:
+                    CIA_STATE.update({"last_poke_at": stamp, "last_poke": {"error": str(e)[:200]}})
+                    logger.warning("[CIA-PING] Poke failed (retrying next tick): %s", e)
+                # A sweep can spend minutes on one recording; the status is
+                # read once it has had time to finish, so the health page
+                # shows what the sweep did rather than "running".
+                await asyncio.sleep(180)
+                try:
+                    async with httpx.AsyncClient(timeout=90.0) as client:
+                        s = await client.get(f"{base}/api/cia/status", headers=headers)
+                    CIA_STATE["last_status"] = (s.json() if s.status_code == 200
+                                                else {"status": s.status_code, "body": s.text[:200]})
+                except Exception as e:
+                    CIA_STATE["last_status"] = {"error": str(e)[:200]}
+                await asyncio.sleep(max(60, minutes * 60 - 180))
+
+        asyncio.create_task(run())
+
     @app.on_event("shutdown")
     async def _shutdown():
         await manager.shutdown()
@@ -148,6 +220,8 @@ def build_app(
         # and service-account credentials have to be set on this machine.
         # Without it the pictures are taken and thrown away, so the console
         # can stop guessing why a Drive folder stays empty.
+        # cia is the exam-delivery poke: whether it runs, what the API
+        # answered last, and the last sweep's summary (CIA_STATE).
         drive_creds = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
                            or os.getenv("GOOGLE_CLIENT_EMAIL"))
         # driver says how the browser is driven: cdp is Chromium over its
@@ -162,7 +236,8 @@ def build_app(
                 "memory_limit_mb": CaptureLoop.memory_limit_mb(),
                 "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3),
                 "drive": {"folder": bool(config.drive_folder_id), "credentials": drive_creds,
-                          "ready": bool(config.drive_folder_id) and drive_creds}}
+                          "ready": bool(config.drive_folder_id) and drive_creds},
+                "cia": dict(CIA_STATE)}
 
     @app.get("/memz")
     async def memz():

@@ -770,6 +770,128 @@ class DriveService:
                 f"{file_name} ({e}). Sending again resumes from scratch."
             ) from e
 
+    def service_account_email(self) -> str:
+        """The Google account uploads run as, for share-this-folder messages."""
+        email = os.getenv("GOOGLE_CLIENT_EMAIL")
+        if email:
+            return email
+        try:
+            creds = self._get_credentials()
+            return getattr(creds, "service_account_email", "") or "the uploader's Google service account"
+        except Exception:                                   # noqa: BLE001
+            return "the uploader's Google service account"
+
+    def find_by_app_property(self, key: str, value: str) -> Optional[Dict[str, Any]]:
+        """
+        The one item stamped with this app property, wherever it now lives.
+
+        Used as the CIA sweep's delivered-check: the stamp rides on the item
+        in Drive itself, so it survives the wizard re-filing the folder, a
+        redeploy, and the free tier's disk wipe. Returns None on lookup
+        errors as well as on no match, because the caller treats "cannot
+        tell" the same as "not delivered" and the upload replaces in place.
+        """
+        safe_key = str(key).replace("'", "\\'")
+        safe_value = str(value).replace("'", "\\'")
+        try:
+            found = self.drive.files().list(
+                q=(f"appProperties has {{ key='{safe_key}' and value='{safe_value}' }} "
+                   f"and trashed=false"),
+                spaces='drive',
+                fields='files(id, name, parents)',
+                pageSize=1,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute().get('files', [])
+            return found[0] if found else None
+        except HttpError as e:
+            logger.warning(f"[DRIVE] appProperties lookup failed for {key}: {e}")
+            return None
+
+    def set_app_properties(self, file_id: str, props: Dict[str, str]) -> None:
+        """Stamp an item with app properties (merged into whatever it has)."""
+        try:
+            self.drive.files().update(
+                fileId=file_id,
+                body={'appProperties': {str(k): str(v) for k, v in props.items()}},
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+        except HttpError as e:
+            logger.error(f"[DRIVE] Could not stamp {file_id}: {e}")
+            raise DriveUploadError(_explain_drive_error(e, "the delivery stamp")) from e
+
+    def upload_file_to_folder(
+        self,
+        file_path: str,
+        parent_id: str,
+        file_name: str,
+        mimetype: str = 'video/mp4',
+        progress_callback=None,
+    ) -> Dict[str, Any]:
+        """
+        Upload one file directly into a folder named by ID.
+
+        Same chunked, replace-in-place behavior as upload_to_path, with two
+        deliberate differences for the exam pipeline that uses it: the
+        destination is an exact folder ID (the grading wizard's intake
+        folder is configured by ID, not by a name path under the class
+        shared folder), and NO sharing is applied — an exam recording must
+        never get the anyone-with-the-link permission the class recordings
+        get.
+        """
+        if not os.path.exists(file_path):
+            raise DriveUploadError(f"The file for {file_name} is missing.")
+        size = os.path.getsize(file_path)
+        if size == 0:
+            raise DriveUploadError(f"The file for {file_name} is empty.")
+
+        try:
+            existing = self._find_file(file_name, parent_id)
+            media = MediaFileUpload(
+                file_path,
+                mimetype=mimetype,
+                resumable=True,
+                chunksize=1024 * 1024 * 5,
+            )
+            if existing:
+                logger.info(f"[DRIVE] Replacing contents of existing file: {file_name} ({existing['id']})")
+                request = self.drive.files().update(
+                    fileId=existing['id'],
+                    media_body=media,
+                    fields='id, name, webViewLink',
+                    supportsAllDrives=True
+                )
+            else:
+                request = self.drive.files().create(
+                    body={'name': file_name, 'parents': [parent_id]},
+                    media_body=media,
+                    fields='id, name, webViewLink',
+                    supportsAllDrives=True
+                )
+            response = None
+            while response is None:
+                status, response = request.next_chunk(num_retries=5)
+                if status and progress_callback:
+                    progress_callback(status.resumable_progress, status.total_size)
+
+            file_id = response.get('id')
+            logger.info(f"[DRIVE] Uploaded {file_name} ({file_id}, {size} bytes, not link-shared)")
+            return {
+                'file_id': file_id,
+                'name': response.get('name', file_name),
+                'web_view_link': response.get('webViewLink'),
+                'replaced': bool(existing),
+            }
+        except HttpError as e:
+            logger.error(f"[DRIVE] Error uploading {file_name}: {e}")
+            raise DriveUploadError(_explain_drive_error(e, file_name)) from e
+        except OSError as e:
+            logger.error(f"[DRIVE] Transport error uploading {file_name}: {e}")
+            raise DriveUploadError(
+                f"The connection to Google Drive failed while uploading {file_name} ({e})."
+            ) from e
+
     def grant_access(self, file_id: str, email: str, role: str = "writer") -> bool:
         """
         Give a person direct access to a file we own.

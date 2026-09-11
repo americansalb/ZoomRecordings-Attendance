@@ -144,6 +144,14 @@ class ZoomService:
 
         return list(self.accounts.values())[0]
 
+    async def get_download_token(self, account_id: Optional[str] = None) -> str:
+        """
+        The account's current OAuth token, for authenticating recording
+        downloads (Zoom accepts it as an access_token query parameter on
+        download URLs). Reuses the cached token machinery.
+        """
+        return await self._get_access_token(self._get_account(account_id))
+
     async def _get_access_token(self, account: ZoomAccount) -> str:
         """Get or refresh the OAuth access token using Server-to-Server OAuth"""
         if account._access_token and account._token_expiry and datetime.now() < account._token_expiry:
