@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-37: the page reports its own memory';
+const PAGE_BUILD = 'capture-60: the bot knows about breakout rooms';
 
 // How many tiles the gallery renders per page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
@@ -410,6 +410,7 @@ window.zoomJoin = async (cfg) => {
   startSeatWatcher();
   startCameraFace();
   startPageMemorySampler();
+  startBreakoutWatch();
 
   // Everything past this point is bookkeeping. It used to run unguarded, and
   // one bad call here (getMediaStream, which this SDK does not have) rejected
@@ -456,9 +457,23 @@ window.zoomSendChat = async (text, toUserId) => {
     recordChat('sdk-accepted', { toId: toId || 'everyone' });
     return result;
   } catch (e) {
-    recordChat('sdk-rejected', { toId: toId || 'everyone',
-      error: String((e && (e.reason || e.message)) || e).slice(0, 200) });
-    throw e;
+    const why = String((e && (e.reason || e.message)) || e).slice(0, 200);
+    recordChat('sdk-rejected', { toId: toId || 'everyone', error: why });
+    // This SDK rejects with a bare object, which reached the console as
+    // "send failed: Page.evaluate: Object" and told nobody anything. The
+    // usual cause is a connection Zoom has retired, so say which it is:
+    // the roster is right here and settles it.
+    if (toId) {
+      let onRoster = false;
+      try {
+        onRoster = (client.getAttendeeslist() || [])
+          .some((u) => String(u.userId) === toId);
+      } catch (e2) { onRoster = true; }   // unreadable: do not claim they left
+      if (!onRoster) {
+        throw new Error('that person is no longer in the meeting under that id');
+      }
+    }
+    throw new Error(`Zoom refused the message: ${why === '[object Object]' ? 'no reason given' : why}`);
   }
 };
 
@@ -640,6 +655,10 @@ window.zoomDiagnostics = async () => {
   out.cameraSignalTotal = cameraSignalTotal;
   out.lastCameraSignalAt = lastCameraSignalAt;
   out.cameraFace = { ...cameraFace };
+  // Where the bot is sitting: the main room, or a breakout room it is
+  // trying to walk out of. The console shows this when a headcount
+  // suddenly drops, so nobody has to guess whether a class left.
+  out.breakout = { ...readBreakout(), events: breakout.events.slice(-10) };
   out.videoEvents = videoEvents.slice(-30);
   out.chatLog = chatLog.slice(-20);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }
@@ -678,6 +697,142 @@ window.zoomDiagnostics = async () => {
  * with camera time settled up to the moment of the call so the caller does
  * not have to know about transitions.
  */
+/*
+ * Breakout rooms.
+ *
+ * The bot's place is the main room, because that is the only seat that
+ * sees the whole class. A host can move any participant into a room with
+ * one click, and until this existed the bot had no way back: on 2026-09-11
+ * it sat in a room counting four people while the class carried on
+ * without it, and nobody could get it out.
+ *
+ * Two jobs, and deliberately only two.
+ *
+ *   1. If the bot ends up in a room, walk out. leaveBreakoutRoom() is on
+ *      the same connection every other call here uses; it was verified
+ *      present on the 6.2.0 build this image vendors before this was
+ *      written. If the host has the bot assigned to a room with automatic
+ *      joining on, walking out is a fight that cannot be won, so it stops
+ *      after a few tries and says so rather than bouncing all class.
+ *
+ *   2. Say whether rooms are OPEN at all. When they are, the main room
+ *      empties, and that is not a class leaving: presence has to be held,
+ *      nothing counted against anybody, nobody messaged.
+ *
+ * What this does NOT try to answer is who is in which room.
+ * getBreakoutRoomList gives a HOST every room and a participant only its
+ * own, and the bot is never the host. That belongs to Zoom's own
+ * announcements, not to a guess made from this seat.
+ */
+const BO_WATCH_MS = 5000;
+// Enough tries to beat a host who moved the bot by hand, few enough that
+// automatic assignment does not become an all-class tug of war.
+const BO_LEAVE_ATTEMPTS = 5;
+// Once the bot has been back in the main session this long, a later
+// crossing is a fresh event and gets its own tries.
+const BO_ATTEMPT_RESET_MS = 120000;
+
+const breakout = {
+  roomsOpen: false,      // Zoom says rooms are open
+  botInRoom: false,      // and the bot is inside one
+  status: null,          // Zoom's own room status, unchanged
+  userStatus: null,      // Zoom's own word for where this participant is
+  roomName: null,
+  attempts: 0,
+  lastAttemptAt: null,
+  lastMainSessionAt: null,
+  gaveUp: false,
+  supported: null,       // whether this SDK offers the calls at all
+  events: []
+};
+
+function boRecord(kind, detail) {
+  breakout.events.push({ at: new Date().toISOString(), kind: kind, detail: detail || null });
+  if (breakout.events.length > 40) breakout.events.splice(0, breakout.events.length - 40);
+}
+
+// Zoom's own statuses, read as words rather than numbers where it offers
+// words: 2 is "in progress" for a room, and a participant reports "in room"
+// or "joining" while they are in one.
+const BO_OPEN_STATUSES = [2, 3];
+const BO_INSIDE = ['in room', 'joining'];
+
+function readBreakout() {
+  if (!client || typeof client.getBreakoutRoomStatus !== 'function') {
+    breakout.supported = false;
+    return breakout;
+  }
+  breakout.supported = true;
+  try {
+    const status = client.getBreakoutRoomStatus();
+    const userStatus = typeof client.getUserStatus === 'function' ? client.getUserStatus() : null;
+    breakout.status = status === undefined ? null : status;
+    breakout.userStatus = userStatus === undefined ? null : userStatus;
+    breakout.roomsOpen = BO_OPEN_STATUSES.includes(Number(status));
+    breakout.botInRoom = BO_INSIDE.includes(String(userStatus || '').toLowerCase());
+    if (!breakout.botInRoom) breakout.lastMainSessionAt = nowMs();
+    if (breakout.botInRoom && typeof client.getCurrentBreakoutRoom === 'function') {
+      const room = client.getCurrentBreakoutRoom() || {};
+      breakout.roomName = room.name || room.roomName || null;
+    } else {
+      breakout.roomName = null;
+    }
+  } catch (e) {
+    // A room state we cannot read is not a room we are in. Guessing the
+    // other way would retire a whole class from the record.
+    boRecord('read-failed', String((e && e.message) || e).slice(0, 200));
+  }
+  return breakout;
+}
+
+async function boTick() {
+  const state = readBreakout();
+  if (!state.supported) return;
+  if (!state.botInRoom) {
+    if (state.lastMainSessionAt && state.attempts > 0
+        && nowMs() - state.lastAttemptAt > BO_ATTEMPT_RESET_MS) {
+      state.attempts = 0;
+      state.gaveUp = false;
+    }
+    return;
+  }
+  if (state.attempts >= BO_LEAVE_ATTEMPTS) {
+    if (!state.gaveUp) {
+      state.gaveUp = true;
+      boRecord('gave-up', 'the host has this bot assigned to a room');
+    }
+    return;
+  }
+  state.attempts += 1;
+  state.lastAttemptAt = nowMs();
+  boRecord('leaving', { attempt: state.attempts, room: state.roomName });
+  try {
+    await client.leaveBreakoutRoom();
+    boRecord('left', { attempt: state.attempts });
+  } catch (e) {
+    boRecord('leave-failed', String((e && (e.reason || e.message)) || e).slice(0, 200));
+  }
+}
+
+let boTimer = null;
+function startBreakoutWatch() {
+  if (boTimer) return;
+  readBreakout();
+  boTimer = setInterval(() => { boTick().catch(() => {}); }, BO_WATCH_MS);
+}
+
+window.zoomBreakout = async () => (readBreakout(), {
+  supported: breakout.supported,
+  roomsOpen: breakout.roomsOpen,
+  botInRoom: breakout.botInRoom,
+  room: breakout.roomName,
+  status: breakout.status,
+  userStatus: breakout.userStatus,
+  attempts: breakout.attempts,
+  gaveUp: breakout.gaveUp,
+  events: breakout.events.slice(-10)
+});
+
 window.zoomPresence = async () => {
   const t = nowMs();
   const rows = [];
@@ -685,17 +840,63 @@ window.zoomPresence = async () => {
   // they can be missed (a dropped websocket frame, a handler that threw), and
   // a roster read is cheap insurance against a participant who is present but
   // absent from our ledger.
+  // Our own id changes with everybody else's on a breakout crossing, so
+  // it is re-read here rather than trusted from the join. Left stale it
+  // silently disabled the cleanup below, which reads the roster for the
+  // bot itself before believing it.
   try {
-    for (const u of client.getAttendeeslist() || []) {
+    const me = client.getCurrentUser && client.getCurrentUser();
+    if (me && me.userId !== undefined && me.userId !== null) {
+      selfUserId = String(me.userId);
+    }
+  } catch (e) { /* keep the last id we knew */ }
+
+  const seen = new Set();
+  let rosterTrusted = false;
+  try {
+    const list = client.getAttendeeslist() || [];
+    for (const u of list) {
+      seen.add(String(u.userId));
       const row = ledgerFor(u.userId, participantName(u));
       if (row.leftAt !== null) row.leftAt = null;   // rejoined
+      row.missed = 0;
       const live = participantVideoOn(u);
       if (live !== null && live !== row.videoOn) {
         recordVideoEvent('roster', u.userId, row.name, live);
         settleVideo(row, live, t);
       }
     }
+    // A roster without us in it is an SDK mid-reconnect, not an empty
+    // room. Trusting it would retire the entire class from the record.
+    rosterTrusted = list.length > 0
+      && (selfUserId === null || seen.has(String(selfUserId)));
   } catch (e) { console.warn('presence roster read failed', e); }
+
+  // Close the connections Zoom has stopped listing.
+  //
+  // user-removed fires when somebody leaves, but it does NOT fire when
+  // the ROOM changes underneath us: crossing into a breakout room and
+  // back re-keys everybody, and their old connections simply stop
+  // appearing. Nothing retired them, so they stayed open, frozen, and a
+  // class of 18 reached the console as 53 people (2026-09-11).
+  //
+  // Held, never retired, while rooms are open or while the bot is in one:
+  // then an empty main room means the class is in the rooms, and marking
+  // them gone would be the worse mistake by far.
+  const bo = readBreakout();
+  const holdEveryone = bo.botInRoom || bo.roomsOpen;
+  for (const row of presence.values()) {
+    if (row.leftAt !== null) continue;
+    if (seen.has(row.userId)) continue;
+    if (!rosterTrusted || holdEveryone) { row.missed = 0; continue; }
+    row.missed = (row.missed || 0) + 1;
+    // Two reads running, so one missed frame never retires anybody.
+    if (row.missed >= 2) {
+      settleVideo(row, false, t);
+      row.leftAt = t;
+      recordVideoEvent('roster-gone', row.userId, row.name, false);
+    }
+  }
 
   for (const row of presence.values()) {
     // Settle without changing state, so repeated reads are not double counted.
@@ -712,7 +913,16 @@ window.zoomPresence = async () => {
       observedSeconds: Math.round(((row.leftAt || t) - row.joinedAt) / 1000),
     });
   }
-  return { at: t / 1000, selfUserId: selfUserId, joined: joined, rows: rows };
+  return {
+    at: t / 1000, selfUserId: selfUserId, joined: joined, rows: rows,
+    // Rooms open means the main room is not the class. Whoever reads this
+    // holds the stretch rather than counting it against anybody.
+    breakout: {
+      supported: breakout.supported, roomsOpen: breakout.roomsOpen,
+      botInRoom: breakout.botInRoom, room: breakout.roomName,
+      gaveUp: breakout.gaveUp
+    }
+  };
 };
 
 /*
