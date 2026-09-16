@@ -77,6 +77,8 @@ const BLOCKER_TEXT: Record<string, string> = {
   class_not_configured: 'This session has no settings yet — add the class to tell it where recordings go.',
   no_day_number: "This date isn't a scheduled class day, so we don't know which day number to use.",
   no_video_files: 'Zoom has no video files for this recording yet. It may still be processing.',
+  extra_segments_skipped:
+    'Recording was stopped and restarted, so Zoom made more than one file. This sends the longest one — check the others in Zoom before you publish.',
 }
 
 export default function PublishPage() {
@@ -399,6 +401,10 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
           file_size: v.size_bytes,
           download_url: v.download_url,
           recording_type: v.zoom_type,
+          // Must survive the round trip: without them the replan measures the
+          // cut from the meeting start again and lands mid-class.
+          recording_start: v.recording_start,
+          recording_end: v.recording_end,
         })),
       },
       patch.sessionCode !== undefined ? patch.sessionCode : draft.session_code,
@@ -425,6 +431,7 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
         download_url: v.download_url,
         filename: v.filename,
         drive_folders: v.drive_folders,
+        timeline_offset_seconds: v.timeline_offset_seconds || 0,
       }))
     try {
       const res = await publishApi.start({

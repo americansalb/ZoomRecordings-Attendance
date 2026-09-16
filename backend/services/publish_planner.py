@@ -40,6 +40,29 @@ def _parse_iso(value: str) -> Optional[datetime]:
         return None
 
 
+def _file_window(f: Dict[str, Any]) -> tuple:
+    """
+    When this particular file started and stopped recording.
+
+    Zoom gives these per file, and they are NOT the meeting's start_time: the
+    meeting begins when the host opens the room, the file begins when recording
+    actually starts. Frame zero of the video is recording_start.
+    """
+    return (
+        _parse_iso(f.get("recording_start", "") or ""),
+        _parse_iso(f.get("recording_end", "") or ""),
+    )
+
+
+def _file_seconds(f: Dict[str, Any]) -> Optional[float]:
+    """How long this file runs, from Zoom's own timestamps. None if unknown."""
+    start, end = _file_window(f)
+    if not start or not end:
+        return None
+    seconds = (end - start).total_seconds()
+    return seconds if seconds > 0 else None
+
+
 def _zone(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
@@ -82,16 +105,21 @@ def _fill(pattern: str, values: Dict[str, Any], fallback: str) -> str:
 
 def compute_trim(
     settings: ClassSettings,
-    recording_start_utc: datetime,
+    media_start_utc: datetime,
     video_duration_seconds: float,
 ) -> Dict[str, Any]:
     """
     Where to cut, based on when the class was actually scheduled.
 
-    Zoom starts recording when the host opens the room, which is usually before
-    class and long after it ends. The scheduled window plus each class's own
-    padding gives the cut. Returns full-length bounds when the class has no
-    schedule configured, so a missing setting never produces a silly cut.
+    Zoom starts recording before class and stops long after it ends. The
+    scheduled window plus each class's own padding gives the cut. Returns
+    full-length bounds when the class has no schedule configured, so a missing
+    setting never produces a silly cut.
+
+    media_start_utc must be when THIS VIDEO starts — the file's recording_start,
+    not the meeting's start_time. The two differ by however long the room sat
+    open before anyone hit record, and every second of that difference comes
+    straight off the front of the class if you measure from the wrong one.
     """
     duration_minutes = settings.scheduled_duration_minutes()
     if not settings.scheduled_start or duration_minutes is None:
@@ -103,7 +131,7 @@ def compute_trim(
         }
 
     tz = _zone(settings.timezone)
-    local_start = recording_start_utc.astimezone(tz)
+    local_start = media_start_utc.astimezone(tz)
 
     try:
         hour, minute = (int(x) for x in settings.scheduled_start.split(":"))
@@ -125,10 +153,13 @@ def compute_trim(
 
     offset = (scheduled - local_start).total_seconds()
 
-    # Sanity: the room shouldn't open more than 4h early or start more than
-    # 30 min late. Outside that, the schedule probably doesn't match this
-    # recording, so don't pretend to know better than the full video.
-    if offset < -1800 or offset > 14400:
+    # Sanity: recording shouldn't start more than 4h before the class or more
+    # than an hour into it. Outside that, the schedule probably doesn't match
+    # this recording, so don't pretend to know better than the full video.
+    # (An hour of slack, not half of one, because this is now measured from
+    # when recording started: a host who opens the room on time but forgets to
+    # press record for twenty minutes still has a perfectly trimmable end.)
+    if offset < -3600 or offset > 14400:
         return {
             "start_seconds": 0.0,
             "end_seconds": video_duration_seconds,
@@ -252,24 +283,36 @@ def plan_recording(
     tz = _zone(settings.timezone if settings else config.default_timezone)
     local = start_utc.astimezone(tz)
 
-    # Zoom reports duration in whole minutes; the worker re-clamps against the
-    # real duration once ffprobe has seen the file.
-    duration_seconds = float(recording.get("duration") or 0) * 60
-
     files = recording.get("recording_files") or []
     available: Dict[str, Dict[str, Any]] = {}
+    skipped_segments = 0
     for key, spec in VIEW_TYPES.items():
-        match = next((f for f in files if f.get("recording_type") == spec["zoom_type"]), None)
-        if match:
-            available[key] = {
-                "key": key,
-                "name": spec["name"],
-                "description": spec.get("description", ""),
-                "zoom_type": spec["zoom_type"],
-                "file_id": match.get("id"),
-                "download_url": match.get("download_url"),
-                "size_bytes": match.get("file_size") or 0,
-            }
+        matches = [f for f in files if f.get("recording_type") == spec["zoom_type"]]
+        if not matches:
+            continue
+        # Stopping and restarting the recording mid-class leaves several files
+        # per view. The class is the long one; the rest are a false start or the
+        # couple of minutes after everyone left. Taking whichever Zoom happened
+        # to list first published the false start about as often as the class.
+        match = max(
+            matches,
+            key=lambda f: (_file_seconds(f) or 0.0, float(f.get("file_size") or 0)),
+        )
+        skipped_segments += len(matches) - 1
+        available[key] = {
+            "key": key,
+            "name": spec["name"],
+            "description": spec.get("description", ""),
+            "zoom_type": spec["zoom_type"],
+            "file_id": match.get("id"),
+            "download_url": match.get("download_url"),
+            "size_bytes": match.get("file_size") or 0,
+            # Frame zero of this file, and its true length. Carried through so a
+            # replan from the UI keeps measuring the cut from the right place.
+            "recording_start": match.get("recording_start") or "",
+            "recording_end": match.get("recording_end") or "",
+            "segment_count": len(matches),
+        }
 
     # Screen + speaker is what nearly every class sends, so it's the default
     # when the class hasn't said otherwise, and the fallback when what the class
@@ -282,6 +325,42 @@ def plan_recording(
             wanted = [PRIMARY_VIEW]
         elif available:
             wanted = [next(iter(available))]
+
+    # Where the timeline everyone is talking about begins.
+    #
+    # THE bug this exists to stop: the offset used to be measured from the
+    # meeting's start_time, but ffmpeg's -ss is applied to a video whose first
+    # frame is the file's recording_start. A host who opens the room at 6:40 and
+    # starts recording at 6:58 makes those eighteen minutes apart, and the cut
+    # landed eighteen minutes into the class every time.
+    #
+    # Views are normally written together, so the first one we'd publish sets
+    # the timeline and the rest are expressed as an offset from it. Zoom
+    # omitting the field (older payloads, hand-built replans) falls back to the
+    # meeting start, which is the old behaviour and no worse than it was.
+    primary_view = available.get(wanted[0]) if wanted else None
+    media_start_utc = None
+    for view in ([primary_view] if primary_view else []) + list(available.values()):
+        media_start_utc = _parse_iso(view.get("recording_start") or "")
+        if media_start_utc:
+            break
+    media_start_utc = media_start_utc or start_utc
+    room_lead_seconds = round((media_start_utc - start_utc).total_seconds(), 2)
+
+    for view in available.values():
+        view_start = _parse_iso(view.get("recording_start") or "")
+        # How far this file's zero sits from the plan's zero, so the worker can
+        # shift the cut per video instead of assuming they all start together.
+        view["timeline_offset_seconds"] = (
+            round((view_start - media_start_utc).total_seconds(), 2) if view_start else 0.0
+        )
+
+    # The file's own length beats Zoom's meeting duration, which is measured
+    # from the meeting start, rounded to whole minutes, and therefore overstates
+    # a recording that began late. Nothing downstream re-clamps this against
+    # ffprobe, so it needs to be right here.
+    media_seconds = _file_seconds(primary_view) if primary_view else None
+    duration_seconds = media_seconds or float(recording.get("duration") or 0) * 60
 
     day_number = day_override
     if day_number is None and settings:
@@ -298,7 +377,7 @@ def plan_recording(
             manual_duration_minutes or DEFAULT_CLASS_MINUTES,
             settings.timezone if settings else config.default_timezone,
         )
-        trim = compute_trim(manual, start_utc, duration_seconds)
+        trim = compute_trim(manual, media_start_utc, duration_seconds)
         trim["source"] = "manual"
         trim["note"] = (
             f"Class started {manual_start} and ran "
@@ -308,7 +387,7 @@ def plan_recording(
             f"{DEFAULT_PAD_AFTER_MINUTES} min after."
         )
     elif settings and duration_seconds > 0:
-        trim = compute_trim(settings, start_utc, duration_seconds)
+        trim = compute_trim(settings, media_start_utc, duration_seconds)
     else:
         trim = {
             "start_seconds": 0.0,
@@ -316,6 +395,14 @@ def plan_recording(
             "source": "full",
             "note": "Whole recording — tell us when the class started to trim it.",
         }
+
+    # Say it out loud when the two clocks disagree: this gap is exactly what
+    # used to be silently cut off the front of the class.
+    if room_lead_seconds >= 60 and trim["source"] in ("schedule", "manual"):
+        trim["note"] += (
+            f" The room was open {room_lead_seconds / 60:.0f} min before recording"
+            " started; the cut is measured from the recording, not the meeting."
+        )
 
     tokens = {
         "session": session_code or "___",
@@ -366,6 +453,10 @@ def plan_recording(
         blockers.append("no_day_number")
     if not available:
         blockers.append("no_video_files")
+    if skipped_segments:
+        # Recording was stopped and restarted. We publish the longest piece;
+        # somebody should look at the rest rather than find out later.
+        blockers.append("extra_segments_skipped")
 
     return {
         "recording_id": recording.get("id"),
@@ -373,6 +464,11 @@ def plan_recording(
         "topic": topic,
         "host_name": recording.get("host_name", ""),
         "start_time": recording.get("start_time"),
+        # When the video itself starts, and how long the room sat open first.
+        # Every trim offset on this plan is measured from media_start_time.
+        "media_start_time": media_start_utc.isoformat(),
+        "room_lead_seconds": room_lead_seconds,
+        "skipped_segments": skipped_segments,
         "date_key": date_key,
         "started_local": local.strftime("%H:%M"),
         "date_label": date_label,

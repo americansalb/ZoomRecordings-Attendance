@@ -38,6 +38,10 @@ class OutputSpec(BaseModel):
     download_url: str
     filename: Optional[str] = None
     drive_folders: List[str] = []
+    # Seconds between this file's first frame and the plan's timeline zero.
+    # Normally 0 — Zoom writes every view together — but a view that started
+    # late needs the cut shifted by this much or it lands somewhere else.
+    timeline_offset_seconds: float = 0
 
 
 class PublishRequest(BaseModel):
@@ -140,6 +144,10 @@ async def publish_queue(
                     "file_size": f.get("file_size"),
                     "download_url": f.get("download_url"),
                     "recording_type": f.get("recording_type"),
+                    # The video's own clock. Dropping these made every trim
+                    # measure from the meeting start instead of the recording.
+                    "recording_start": f.get("recording_start"),
+                    "recording_end": f.get("recording_end"),
                 }
                 for f in recording.get("recording_files", [])
             ],

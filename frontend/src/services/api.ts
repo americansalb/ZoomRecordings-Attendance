@@ -576,6 +576,13 @@ export interface PublishOutput {
   folder: string
   filename: string
   drive_folders: string[]
+  // This file's own clock. recording_start is frame zero of the video — not
+  // the meeting's start_time — and timeline_offset_seconds is how far it sits
+  // from the plan's zero.
+  recording_start: string
+  recording_end: string
+  timeline_offset_seconds: number
+  segment_count: number
 }
 
 export interface PublishTrim {
@@ -605,6 +612,11 @@ export interface PublishPlan {
   topic: string
   host_name: string
   start_time: string
+  // When the video starts, versus when the room opened. Every trim offset on
+  // this plan is measured from media_start_time.
+  media_start_time: string
+  room_lead_seconds: number
+  skipped_segments: number
   date_key: string
   date_label: string
   started_local: string
@@ -702,7 +714,14 @@ export const publishApi = {
     date_key: string
     title: string
     description?: string
-    outputs: { key: string; folder: string; download_url: string; filename?: string; drive_folders?: string[] }[]
+    outputs: {
+      key: string
+      folder: string
+      download_url: string
+      filename?: string
+      drive_folders?: string[]
+      timeline_offset_seconds?: number
+    }[]
     start_seconds: number
     end_seconds?: number | null
     course_id?: string

@@ -103,9 +103,11 @@ def run_publish_job(job_id: str) -> None:
         temp_dir = tempfile.mkdtemp(prefix=f"publish_{job_id}_")
         trimmer = VideoTrimmerService(output_dir=temp_dir)
 
-        start = float(req.get("start_seconds") or 0)
-        end = req.get("end_seconds")
-        end = float(end) if end is not None else None
+        # The plan's cut, expressed on the plan's timeline: zero is the first
+        # frame of the video that set that timeline (see plan_recording).
+        plan_start = float(req.get("start_seconds") or 0)
+        plan_end = req.get("end_seconds")
+        plan_end = float(plan_end) if plan_end is not None else None
 
         per_video = 1.0 / len(outputs)
 
@@ -136,6 +138,24 @@ def run_publish_job(job_id: str) -> None:
 
             def on_trim(pct: float, _base=base, _share=per_video) -> None:
                 store.update_job(job_id, progress=_base + (pct / 100) * _share * _TRIM_SHARE)
+
+            # A view Zoom started later than the reference one is that many
+            # seconds behind on its own clock, so the same moment of class sits
+            # earlier in its file. Zero for every view in the normal case.
+            shift = float(output.get("timeline_offset_seconds") or 0)
+            start = max(0.0, plan_start - shift)
+            end = (plan_end - shift) if plan_end is not None else None
+            if end is not None and end <= start:
+                raise RuntimeError(
+                    f"{label} — the trim ends before it starts on this file. "
+                    "Check the start and end times and try again."
+                )
+            if shift:
+                logger.info(
+                    f"[PUBLISH] {job_id}: {label} starts {shift:+.0f}s from the "
+                    f"plan's timeline; cutting {start:.0f}s-"
+                    f"{end if end is None else round(end)}s"
+                )
 
             local_path = trimmer.trim_from_source(
                 source=output["download_url"],

@@ -74,7 +74,11 @@ async def list_recordings(
                         "file_size": f.get("file_size"),
                         "download_url": f.get("download_url"),
                         "play_url": f.get("play_url"),
-                        "recording_type": f.get("recording_type")
+                        "recording_type": f.get("recording_type"),
+                        # When this file starts and stops, which is not the
+                        # meeting's start_time — the trim is measured from it.
+                        "recording_start": f.get("recording_start"),
+                        "recording_end": f.get("recording_end"),
                     }
                     for f in recording.get("recording_files", [])
                 ]

@@ -398,6 +398,141 @@ class TestTitleAlwaysHasTheDate(unittest.TestCase):
             self.assertIn(p["date_key"], p["title"])
 
 
+class TestTrimMeasuresFromTheRecording(unittest.TestCase):
+    """
+    The bug this guards: Zoom's meeting start_time is when the room opened, but
+    frame zero of the file is recording_start. Measuring the cut from the
+    meeting start threw away however long the room sat open before anyone hit
+    record — every single class.
+    """
+
+    def _files(self, rec_start, rec_end, extra=()):
+        base = [{
+            "id": "f1", "file_type": "MP4", "file_size": 1_800_000_000,
+            "download_url": "https://zoom.example/a",
+            "recording_type": "shared_screen_with_speaker_view",
+            "recording_start": rec_start, "recording_end": rec_end,
+        }]
+        base.extend(extra)
+        return base
+
+    def test_room_open_early_does_not_eat_the_start_of_class(self):
+        # Room opened 22:40 ET (03:40 UTC); recording started 22:58 ET (03:58).
+        # Class is 23:00 with 1 min of padding, so the cut belongs 1 min in.
+        rec = recording(
+            start_time="2025-11-20T03:40:00Z",
+            duration=200,
+            recording_files=self._files("2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z"),
+        )
+        plan = plan_recording(rec, config_with(night_class()))
+        # Measured from the meeting start this was 19 min in: 18 minutes of
+        # class, gone.
+        self.assertAlmostEqual(plan["trim"]["start_seconds"], 60, delta=1)
+        self.assertEqual(plan["media_start_time"], "2025-11-20T03:58:00+00:00")
+        self.assertAlmostEqual(plan["room_lead_seconds"], 18 * 60, delta=1)
+
+    def test_note_says_the_room_was_open_first(self):
+        rec = recording(
+            start_time="2025-11-20T03:40:00Z",
+            recording_files=self._files("2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z"),
+        )
+        note = plan_recording(rec, config_with(night_class()))["trim"]["note"]
+        self.assertIn("18 min before recording started", note)
+
+    def test_duration_is_the_file_not_the_meeting(self):
+        # Zoom says the meeting ran 200 min; the file is 192.
+        rec = recording(
+            start_time="2025-11-20T03:40:00Z",
+            duration=200,
+            recording_files=self._files("2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z"),
+        )
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["duration_seconds"], 192 * 60)
+
+    def test_falls_back_to_meeting_start_when_zoom_omits_it(self):
+        plan = plan_recording(recording(), config_with(night_class()))
+        self.assertEqual(plan["media_start_time"], "2025-11-20T03:55:00+00:00")
+        self.assertEqual(plan["room_lead_seconds"], 0.0)
+        self.assertAlmostEqual(plan["trim"]["start_seconds"], 240, delta=1)
+
+    def test_a_view_that_started_late_carries_its_own_offset(self):
+        gallery = {
+            "id": "f2", "file_type": "MP4", "file_size": 1_100_000_000,
+            "download_url": "https://zoom.example/b",
+            "recording_type": "shared_screen_with_gallery_view",
+            "recording_start": "2025-11-20T04:03:00Z",
+            "recording_end": "2025-11-20T07:10:00Z",
+        }
+        rec = recording(recording_files=self._files(
+            "2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z", extra=[gallery]))
+        plan = plan_recording(rec, config_with(night_class(views=["speaker", "gallery"])))
+        by_key = {o["key"]: o for o in plan["outputs"]}
+        self.assertEqual(by_key["speaker"]["timeline_offset_seconds"], 0.0)
+        self.assertEqual(by_key["gallery"]["timeline_offset_seconds"], 5 * 60)
+
+    def test_manual_trim_also_measures_from_the_recording(self):
+        rec = recording(
+            topic="Committee meeting",
+            start_time="2025-07-24T17:40:00Z",
+            duration=250,
+            recording_files=self._files("2025-07-24T17:50:00Z", "2025-07-24T21:30:00Z"),
+        )
+        # Recording starts 13:50 local, class at 14:00: 10 min in, 5 of padding.
+        t = plan_recording(rec, PublishConfig(), manual_start="14:00")["trim"]
+        self.assertAlmostEqual(t["start_seconds"], 5 * 60, delta=1)
+
+    def test_recording_started_an_hour_late_still_trims_the_end(self):
+        # Host forgot to press record until 23:50. There is no "before" left to
+        # keep, but the end of the class is still knowable.
+        rec = recording(
+            start_time="2025-11-20T03:40:00Z",
+            recording_files=self._files("2025-11-20T04:50:00Z", "2025-11-20T08:30:00Z"),
+        )
+        t = plan_recording(rec, config_with(night_class()))["trim"]
+        self.assertEqual(t["source"], "schedule")
+        self.assertEqual(t["start_seconds"], 0.0)
+        # 50 min of class already gone, +180 class +5 pad = 135 min left.
+        self.assertAlmostEqual(t["end_seconds"], 135 * 60, delta=1)
+
+
+class TestRestartedRecordings(unittest.TestCase):
+    """Stopping and restarting recording leaves several files per view."""
+
+    def _segment(self, fid, start, end, size):
+        return {
+            "id": fid, "file_type": "MP4", "file_size": size,
+            "download_url": f"https://zoom.example/{fid}",
+            "recording_type": "shared_screen_with_speaker_view",
+            "recording_start": start, "recording_end": end,
+        }
+
+    def test_publishes_the_long_segment_not_the_first_one(self):
+        rec = recording(recording_files=[
+            # A 2-minute false start, listed first...
+            self._segment("f0", "2025-11-20T03:55:00Z", "2025-11-20T03:57:00Z", 20_000_000),
+            # ...then the actual class.
+            self._segment("f1", "2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z", 1_800_000_000),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["outputs"][0]["file_id"], "f1")
+        self.assertAlmostEqual(plan["trim"]["start_seconds"], 60, delta=1)
+
+    def test_dropped_segments_are_flagged_for_a_human(self):
+        rec = recording(recording_files=[
+            self._segment("f0", "2025-11-20T03:55:00Z", "2025-11-20T03:57:00Z", 20_000_000),
+            self._segment("f1", "2025-11-20T03:58:00Z", "2025-11-20T07:10:00Z", 1_800_000_000),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["skipped_segments"], 1)
+        self.assertIn("extra_segments_skipped", plan["blockers"])
+        self.assertFalse(plan["ready"])
+
+    def test_single_segment_is_not_flagged(self):
+        plan = plan_recording(recording(), config_with(night_class()))
+        self.assertEqual(plan["skipped_segments"], 0)
+        self.assertNotIn("extra_segments_skipped", plan["blockers"])
+
+
 class TestManualStartTime(unittest.TestCase):
     """Unmatched recordings get trimmed by asking when class started."""
 
