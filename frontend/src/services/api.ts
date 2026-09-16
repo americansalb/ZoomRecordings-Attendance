@@ -641,6 +641,8 @@ export interface PublishPlan {
 
   drive_root: string
   blockers: string[]
+  // Things worth saying that do NOT mean the recording is unmatched.
+  warnings: string[]
   ready: boolean
   can_send: boolean
   state: 'ready' | 'needs_attention' | 'published'

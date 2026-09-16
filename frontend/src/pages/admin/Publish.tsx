@@ -77,8 +77,12 @@ const BLOCKER_TEXT: Record<string, string> = {
   class_not_configured: 'This session has no settings yet — add the class to tell it where recordings go.',
   no_day_number: "This date isn't a scheduled class day, so we don't know which day number to use.",
   no_video_files: 'Zoom has no video files for this recording yet. It may still be processing.',
+}
+
+// Worth saying, but never a reason to call a recording unmatched.
+const WARNING_TEXT: Record<string, string> = {
   extra_segments_skipped:
-    'Recording was stopped and restarted, so Zoom made more than one file. This sends the longest one — check the others in Zoom before you publish.',
+    'Zoom split this into more than one file. This sends the longest one — check the others in Zoom if the class looks short.',
 }
 
 export default function PublishPage() {
@@ -293,6 +297,12 @@ function Row({ plan, onOpen }: { plan: PublishPlan; onOpen: (p: PublishPlan) => 
             {BLOCKER_TEXT[plan.blockers[0]] || 'Not matched to a class.'}
           </p>
         )}
+
+        {(plan.warnings || []).map((w) => (
+          <p key={w} className="text-sm mt-0.5 text-gray-600">
+            {WARNING_TEXT[w]}
+          </p>
+        ))}
       </div>
 
       <div className="flex items-center gap-3">
@@ -646,6 +656,11 @@ function Review({ plan, onBack }: { plan: PublishPlan; onBack: () => void }) {
 
       <Card title="Trim" tone="teal">
         <p className="text-sm text-gray-600 mb-4">{draft.trim.note}</p>
+        {(draft.warnings || []).map((w) => (
+          <p key={w} className="text-sm mb-4" style={{ color: COLORS.amber.ink }}>
+            {WARNING_TEXT[w]}
+          </p>
+        ))}
         <Timeline
           duration={draft.duration_seconds}
           start={start}

@@ -32,12 +32,21 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 
 
 def _parse_iso(value: str) -> Optional[datetime]:
+    """
+    Parse a Zoom timestamp, always as an aware UTC datetime.
+
+    Zoom sends "...Z", but a payload that omits the zone used to come back naive
+    and blow up the moment it was subtracted from an aware one — which would
+    take out the whole queue, not just that row. Zoom deals in UTC, so that is
+    what a bare timestamp means.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo("UTC"))
 
 
 def _file_window(f: Dict[str, Any]) -> tuple:
@@ -453,10 +462,15 @@ def plan_recording(
         blockers.append("no_day_number")
     if not available:
         blockers.append("no_video_files")
+
+    # Advisories: worth saying, never a reason to call a recording unmatched.
+    # A blocker means "we could not work out what this is"; the UI files those
+    # under "Not matched to a class". Zoom splitting a long class across files
+    # is not that — the class is known, we just publish the longest piece and
+    # want somebody to know the others exist.
+    warnings: List[str] = []
     if skipped_segments:
-        # Recording was stopped and restarted. We publish the longest piece;
-        # somebody should look at the rest rather than find out later.
-        blockers.append("extra_segments_skipped")
+        warnings.append("extra_segments_skipped")
 
     return {
         "recording_id": recording.get("id"),
@@ -493,6 +507,7 @@ def plan_recording(
 
         "drive_root": root_folder,
         "blockers": blockers,
+        "warnings": warnings,
         # Fully resolved: class known, day known, files present.
         "ready": not blockers,
         # Anything with a video can be uploaded to Drive right now, class or no class.

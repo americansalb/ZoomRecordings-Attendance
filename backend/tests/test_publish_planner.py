@@ -495,6 +495,24 @@ class TestTrimMeasuresFromTheRecording(unittest.TestCase):
         self.assertAlmostEqual(t["end_seconds"], 135 * 60, delta=1)
 
 
+class TestOddTimestamps(unittest.TestCase):
+    def test_a_timestamp_without_a_zone_does_not_take_out_the_queue(self):
+        # One bad row used to raise straight out of the queue endpoint, so a
+        # single odd recording hid every other one.
+        rec = recording(
+            start_time="2025-11-20T03:40:00",
+            recording_files=[{
+                "id": "f1", "file_type": "MP4", "file_size": 1, "download_url": "u",
+                "recording_type": "shared_screen_with_speaker_view",
+                "recording_start": "2025-11-20T03:58:00Z",
+                "recording_end": "2025-11-20T07:10:00Z",
+            }],
+        )
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["session_code"], "127")
+        self.assertAlmostEqual(plan["room_lead_seconds"], 18 * 60, delta=1)
+
+
 class TestRestartedRecordings(unittest.TestCase):
     """Stopping and restarting recording leaves several files per view."""
 
@@ -524,13 +542,29 @@ class TestRestartedRecordings(unittest.TestCase):
         ])
         plan = plan_recording(rec, config_with(night_class()))
         self.assertEqual(plan["skipped_segments"], 1)
-        self.assertIn("extra_segments_skipped", plan["blockers"])
-        self.assertFalse(plan["ready"])
+        self.assertIn("extra_segments_skipped", plan["warnings"])
+
+    def test_a_split_recording_is_still_matched_and_ready(self):
+        """
+        Zoom splits long classes across files all the time. Treating that as a
+        blocker put every one of them in the "Not matched to a class" pile
+        despite the class being perfectly well known.
+        """
+        rec = recording(recording_files=[
+            self._segment("f0", "2025-11-20T03:58:00Z", "2025-11-20T05:00:00Z", 900_000_000),
+            self._segment("f1", "2025-11-20T05:02:00Z", "2025-11-20T07:10:00Z", 1_800_000_000),
+        ])
+        plan = plan_recording(rec, config_with(night_class()))
+        self.assertEqual(plan["session_code"], "127")
+        self.assertEqual(plan["day_number"], 5)
+        self.assertEqual(plan["blockers"], [])
+        self.assertTrue(plan["ready"])
+        self.assertEqual(plan["warnings"], ["extra_segments_skipped"])
 
     def test_single_segment_is_not_flagged(self):
         plan = plan_recording(recording(), config_with(night_class()))
         self.assertEqual(plan["skipped_segments"], 0)
-        self.assertNotIn("extra_segments_skipped", plan["blockers"])
+        self.assertEqual(plan["warnings"], [])
 
 
 class TestManualStartTime(unittest.TestCase):
