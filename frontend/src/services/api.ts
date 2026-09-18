@@ -810,4 +810,62 @@ export const publishApi = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// Academy (putting an old recording onto a class)
+// ---------------------------------------------------------------------------
+
+export type AcademyMatchState =
+  | 'ready' | 'posted' | 'taken' | 'no_session'
+  | 'no_class' | 'no_night' | 'too_short' | 'not_archived'
+
+export interface AcademyMatch {
+  zoom_file_id: string
+  meeting_id: string | null
+  topic: string
+  recording_start: string | null
+  recording_end: string | null
+  size_bytes: number | null
+  archived: boolean
+  session_number: string | null
+  state: AcademyMatchState
+  why?: string
+
+  cohort_id?: number
+  cohort_name?: string
+  cohort_day_id?: number
+  day_number?: number | null
+  day_date?: string | null
+  night_starts_at?: string | null
+  night_ends_at?: string | null
+  overlap_minutes?: number
+  would_be_titled?: string
+
+  cut?: { start_seconds: number; end_seconds: number; length_seconds: number; length: string }
+  posted_at?: string | null
+  drive_url?: string | null
+  existing_url?: string | null
+}
+
+export const academyApi = {
+  review: async (params: { limit?: number; session?: string } = {}) => {
+    const { data } = await api.get('/academy/review', { params })
+    return data as {
+      rows: AcademyMatch[]
+      counts: Record<string, number>
+      academy_url: string
+    }
+  },
+
+  publish: async (body: { zoom_file_id: string; cohort_day_id: number }) => {
+    // A cut plus an upload of a three hour class, so this is a long wait.
+    const { data } = await api.post('/academy/publish', body, { timeout: 1800_000 })
+    return data as { outcome: string; row: AcademyMatch }
+  },
+
+  status: async () => {
+    const { data } = await api.get('/academy/status')
+    return data as { academy_url: string; secret_configured: boolean }
+  },
+}
+
 export default api
