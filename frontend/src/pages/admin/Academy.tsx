@@ -16,7 +16,7 @@
  */
 import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { academyApi, AcademyMatch, AcademyMatchState } from '../../services/api'
+import { academyApi, AcademyMatch, AcademyMatchState, NotSignedIntoAcademy } from '../../services/api'
 
 const STATE_WORDS: Record<AcademyMatchState, { label: string; tone: string; blurb: string }> = {
   ready: {
@@ -78,12 +78,12 @@ export default function AcademyPage() {
   const [sending, setSending] = useState<string | null>(null)
   const [note, setNote] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
 
-  const status = useQuery({ queryKey: ['academy-status'], queryFn: academyApi.status })
   const review = useQuery({
     queryKey: ['academy-review', session],
     queryFn: () => academyApi.review({ limit: 300, session: session || undefined }),
-    enabled: status.data?.secret_configured !== false
+    retry: false
   })
+  const signedOut = review.error instanceof NotSignedIntoAcademy
 
   const send = useMutation({
     mutationFn: academyApi.publish,
@@ -97,7 +97,12 @@ export default function AcademyPage() {
     },
     onError: (err: any) => {
       setSending(null)
-      setNote({ kind: 'bad', text: err?.response?.data?.detail || err?.message || 'It did not go.' })
+      setNote({
+        kind: 'bad',
+        text: err instanceof NotSignedIntoAcademy
+          ? 'Your academy login has expired. Sign in again and retry.'
+          : err?.response?.data?.error || err?.message || 'It did not go.'
+      })
     }
   })
 
@@ -113,15 +118,21 @@ export default function AcademyPage() {
     })
   }, [rows, onlyMatches])
 
-  if (status.data && !status.data.secret_configured) {
+  if (signedOut) {
     return (
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-6">
-        <h1 className="text-xl font-semibold text-amber-900 mb-2">Not connected to the academy</h1>
-        <p className="text-amber-800">
-          This server has no academy secret, so it cannot add recordings to classes.
-          Set <code className="font-mono text-sm">CLASS_BOT_SHARED_SECRET</code> here to the
-          same value the academy uses, and this page will work.
+        <h1 className="text-xl font-semibold text-amber-900 mb-2">Sign in to the academy first</h1>
+        <p className="text-amber-800 mb-4">
+          This page reads and writes the academy with your own admin login. Open it
+          in another tab, sign in, then come back and press Refresh.
         </p>
+        <a href={`${academyApi.url}/login`} target="_blank" rel="noopener noreferrer"
+          className="inline-block px-4 py-2 rounded-md bg-amber-600 text-white text-sm font-medium
+                     hover:bg-amber-700">
+          Open the academy
+        </a>
+        <button onClick={() => review.refetch()}
+          className="ml-3 text-sm text-amber-800 underline">I have signed in</button>
       </div>
     )
   }
@@ -167,9 +178,9 @@ export default function AcademyPage() {
       </div>
 
       {review.isLoading && <p className="text-gray-500">Reading the archive...</p>}
-      {review.isError && (
+      {review.isError && !signedOut && (
         <div className="bg-red-50 text-red-800 rounded-md p-4">
-          Could not read the academy: {(review.error as any)?.response?.data?.detail
+          Could not read the academy: {(review.error as any)?.response?.data?.error
             || (review.error as any)?.message}
         </div>
       )}

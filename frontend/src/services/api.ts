@@ -846,25 +846,49 @@ export interface AcademyMatch {
   existing_url?: string | null
 }
 
+// The academy answers these itself, and the browser carries the academy login
+// that is already in it. No secret travels, and nothing has to be configured on
+// this server: whoever opens the page is signed in to the academy as an admin,
+// which is a real identity rather than a static token.
+const ACADEMY_URL = (
+  (import.meta as any).env?.VITE_ACADEMY_URL || 'https://academy.aalb.org'
+).replace(/\/$/, '')
+
+const academy = axios.create({
+  baseURL: `${ACADEMY_URL}/api/class-recordings`,
+  withCredentials: true,
+  timeout: 120_000
+})
+
+export class NotSignedIntoAcademy extends Error {
+  constructor() {
+    super('Not signed in to the academy')
+    this.name = 'NotSignedIntoAcademy'
+  }
+}
+
+function asAcademyError(err: any): never {
+  const status = err?.response?.status
+  if (status === 401 || status === 403) throw new NotSignedIntoAcademy()
+  throw err
+}
+
 export const academyApi = {
+  url: ACADEMY_URL,
+
   review: async (params: { limit?: number; session?: string } = {}) => {
-    const { data } = await api.get('/academy/review', { params })
-    return data as {
-      rows: AcademyMatch[]
-      counts: Record<string, number>
-      academy_url: string
-    }
+    try {
+      const { data } = await academy.get('/review', { params })
+      return data as { rows: AcademyMatch[]; counts: Record<string, number> }
+    } catch (err) { return asAcademyError(err) }
   },
 
   publish: async (body: { zoom_file_id: string; cohort_day_id: number }) => {
-    // A cut plus an upload of a three hour class, so this is a long wait.
-    const { data } = await api.post('/academy/publish', body, { timeout: 1800_000 })
-    return data as { outcome: string; row: AcademyMatch }
-  },
-
-  status: async () => {
-    const { data } = await api.get('/academy/status')
-    return data as { academy_url: string; secret_configured: boolean }
+    try {
+      // A cut plus an upload of a three hour class, so this is a long wait.
+      const { data } = await academy.post('/publish', body, { timeout: 1800_000 })
+      return data as { outcome: string; row: AcademyMatch }
+    } catch (err) { return asAcademyError(err) }
   },
 }
 
