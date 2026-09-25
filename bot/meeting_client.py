@@ -221,9 +221,22 @@ class MeetingClient(ABC):
         return None
 
     async def gallery_info(self) -> dict:
-        """How many gallery pages the room spans right now, for the grid
-        proctor's coverage maths. {} when the client cannot say."""
+        """Where the gallery stands: whether it has pages, which one is on
+        screen, how many the walk has found. {} when the client cannot say."""
         return {}
+
+    async def gallery_turn(self, direction: str = "next") -> dict:
+        """Turn the gallery one page on ('next', back to the first from the
+        last) or back to the first ('first'). The answer always says what
+        happened: {"ok", "moved": next|first|none, "page", "pages"} or
+        {"ok": False, "why"}. The default is a gallery with nothing to turn."""
+        return {"ok": True, "moved": "none", "page": 0, "pages": 1}
+
+    async def rendered_users(self) -> Optional[List[str]]:
+        """User ids whose video tile is on screen right now: the only
+        people whose face can be checked this moment. None when the client
+        cannot say, which the capture loop reads as everyone."""
+        return None
 
     @abstractmethod
     async def leave(self) -> None: ...
@@ -233,18 +246,124 @@ class MeetingClient(ABC):
 
 
 class FakeMeetingClient(MeetingClient):
-    """In-memory meeting for tests."""
+    """In-memory meeting for tests.
+
+    With page_size set it behaves like Zoom's gallery, reduced to the rules
+    that decide who is on screen (read out of the 6.2.0 kit): raised hands
+    first, then cameras on, the bot's own tile at index 1 (0 when a hand is
+    up), pages of page_size, the last page back-filled from the page before,
+    and only a tile whose camera is on carries a user id. Only those tiles
+    can be captured, and with watch=True the seat watcher reads exactly
+    them, all the time. turn_works=False reproduces what the real bot did
+    until 2026-09-25: every page turn refused. Without page_size every tile
+    is on screen, which is what the older tests want."""
 
     def __init__(self, participants: Optional[List[Participant]] = None,
                  frames: Optional[dict] = None,
                  presence_rows: Optional[List[PresenceRow]] = None,
-                 self_id: Optional[str] = None):
+                 self_id: Optional[str] = None,
+                 page_size: Optional[int] = None,
+                 turn_works: bool = True,
+                 watch: bool = False,
+                 faces: Optional[dict] = None):
         self._participants = participants or []
         self._frames = frames or {}   # user_id -> bytes
         self._presence_rows = presence_rows
         self._self_id = self_id
         self.sent_chats: list[dict] = []
         self.joined = False
+        self.page_size = page_size
+        self.turn_works = turn_works
+        self.watch = watch
+        self.faces = faces or {}      # user_id -> face visible (default True)
+        self.page = 0
+        self.raised: set = set()
+        self.turn_log: list = []
+        self._watched: dict = {}
+        # When the page on screen came up. A freshly shown tile needs a
+        # moment before it shows real video, so the watcher has no reading
+        # of a page until RENDER_SECONDS after it came up.
+        self._page_since = time.time()
+
+    RENDER_SECONDS = 1.0
+
+    # ── the gallery, as Zoom lays it out ──
+    def _ordered(self) -> list:
+        me = Participant(self._self_id or "self", "the bot", video_on=True)
+        others = [p for p in self._participants if p.user_id != me.user_id]
+        hands = [p for p in others if p.user_id in self.raised]
+        rest = sorted((p for p in others if p.user_id not in self.raised),
+                      key=lambda p: not p.video_on)          # stable: cameras on first
+        rest.insert(0 if hands else 1, me)
+        return hands + rest
+
+    def gallery_pages(self) -> int:
+        total = len(self._ordered())
+        if not self.page_size or total <= self.page_size:
+            return 1
+        return -(-total // self.page_size)
+
+    def _on_page(self) -> list:
+        allp = self._ordered()
+        size, pages = self.page_size, self.gallery_pages()
+        page = min(self.page, pages - 1)
+        shown = [p for i, p in enumerate(allp) if i // size == page]
+        if len(shown) < size and pages > 1:
+            short = size - len(shown)
+            shown = [p for i, p in enumerate(allp)
+                     if size * (pages - 1) - short <= i < size * (pages - 1)] + shown
+        return shown
+
+    def on_screen(self) -> Optional[List[str]]:
+        if not self.page_size:
+            return None
+        return [p.user_id for p in self._on_page() if p.video_on]
+
+    def _watch_tick(self) -> None:
+        """The watcher reads every tile on screen about once a second, so at
+        any moment everyone on screen has a reading from just now."""
+        if not self.watch:
+            return
+        if time.time() - self._page_since < self.RENDER_SECONDS:
+            return
+        ids = self.on_screen()
+        if ids is None:
+            ids = [p.user_id for p in self._participants if p.video_on]
+        now = time.time() * 1000
+        for uid in ids:
+            if uid == self._self_id:
+                continue
+            self._watched[uid] = {"readable": True, "readAt": now, "lastCheckedAt": now,
+                                  "facePresent": bool(self.faces.get(uid, True))}
+
+    async def watcher_state(self) -> Optional[dict]:
+        if not self.watch:
+            return None
+        self._watch_tick()
+        return {"running": True, "users": dict(self._watched)}
+
+    async def rendered_users(self) -> Optional[List[str]]:
+        return self.on_screen()
+
+    async def gallery_turn(self, direction: str = "next") -> dict:
+        self._watch_tick()            # the page being left was watched until now
+        self.turn_log.append(direction)
+        if not self.page_size or self.gallery_pages() <= 1:
+            self.page = 0
+            return {"ok": True, "moved": "none", "page": 0, "pages": 1}
+        if not self.turn_works:
+            return {"ok": False, "why": "the gallery has more than one page but no page buttons were found",
+                    "buttons": ["Decrease page", "Increase page"]}
+        before = self.page
+        if direction != "first" and self.page < self.gallery_pages() - 1:
+            self.page += 1
+            moved = {"ok": True, "moved": "next", "page": self.page}
+        else:
+            self.page = 0
+            moved = {"ok": True, "moved": "first", "page": 0, "pages": self.gallery_pages()}
+        if self.page != before:
+            self._page_since = time.time()
+        return moved
 
     async def join(self, **kwargs) -> None:
         self.joined = True
@@ -272,6 +391,9 @@ class FakeMeetingClient(MeetingClient):
         return PresenceSnapshot(at=0.0, self_user_id=self._self_id, joined=self.joined, rows=rows)
 
     async def capture_user(self, user_id: str) -> Optional[bytes]:
+        shown = self.on_screen()
+        if shown is not None and user_id not in shown:
+            return None               # no tile on screen: nothing to photograph
         return self._frames.get(user_id)
 
     async def capture_supported(self) -> bool:
@@ -284,16 +406,16 @@ class FakeMeetingClient(MeetingClient):
         return self._self_id
 
     async def gallery_info(self) -> dict:
-        pages = max(1, int(getattr(self, "gallery_pages", 1)))
-        return {"pages": pages, "participants": len(self._participants),
-                "tilesPerPage": 25}
+        pages = self.gallery_pages()
+        return {"paged": pages > 1, "page": self.page, "pages": pages,
+                "participants": len(self._participants)}
 
     async def gallery_advance(self) -> dict:
-        self.gallery_advances = getattr(self, "gallery_advances", 0) + 1
-        return {"ok": True, "moved": "next"}
+        return await self.gallery_turn("next")
 
     async def page_screenshot(self) -> Optional[bytes]:
         self.page_screenshots = getattr(self, "page_screenshots", 0) + 1
+        self.page_screenshot_pages = getattr(self, "page_screenshot_pages", []) + [self.page]
         return b"\x89PNG\r\n\x1a\n fake room grid"
 
     async def diagnostics(self) -> dict:
@@ -795,21 +917,39 @@ class ChromiumZoomClient(MeetingClient):
         except Exception:
             return {}
 
-    async def gallery_advance(self) -> dict:
-        """Step the SDK's gallery to its next page, wrapping at the end.
+    async def gallery_turn(self, direction: str = "next") -> dict:
+        """Turn Zoom's gallery one page on, or back to page one.
 
         The browser only decodes the tiles on the visible page, so paging is
         what turns a 30 camera class into a bounded, constant memory cost:
-        a handful of streams at a time, rotating, instead of all of them.
+        a handful of streams at a time, rotating, instead of all of them. The
+        answer says what happened, and a turn that could not happen says why.
         """
         if not self._page:
-            return {"ok": False}
+            return {"ok": False, "why": "no page"}
         try:
             return await self._page.evaluate(
-                """async () => await window.zoomGalleryAdvance()""") or {"ok": False}
+                """async (d) => await window.zoomGalleryTurn(d)""",
+                "first" if direction == "first" else "next") or {"ok": False, "why": "no answer"}
         except Exception as e:
-            logger.debug("gallery advance failed: %s", e)
-            return {"ok": False}
+            logger.debug("gallery turn failed: %s", e)
+            return {"ok": False, "why": f"the page did not answer: {str(e)[:120]}"}
+
+    async def gallery_advance(self) -> dict:
+        """One page on, or back to page one from the last."""
+        return await self.gallery_turn("next")
+
+    async def rendered_users(self) -> Optional[List[str]]:
+        """User ids whose video tile Zoom has on screen right now."""
+        if not self._page:
+            return None
+        try:
+            ids = await self._page.evaluate(
+                """async () => await window.zoomRenderedVideoUsers()""")
+        except Exception as e:
+            logger.debug("rendered tiles read failed: %s", e)
+            return None
+        return None if ids is None else [str(i) for i in ids]
 
     async def stop_video(self) -> Optional[dict]:
         """Ask the page to press Zoom's Stop Video: the camera picture is

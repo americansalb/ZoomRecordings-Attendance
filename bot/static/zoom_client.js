@@ -31,11 +31,14 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-60: the bot knows about breakout rooms';
+const PAGE_BUILD = 'capture-62: the bot turns the gallery pages, so every face gets its turn';
 
-// How many tiles the gallery renders per page. Set by Python at join from
-// BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant, so a
-// 50 person room is two alternating pages by Zoom's rules, not ours.
+// The most tiles the gallery may put on a page. Set by Python at join from
+// BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant. It
+// is a ceiling, not the page size: Zoom sizes a page from the room it
+// has (a tile needs 240 pixels across and 136.75 down, read out of the
+// 6.2.0 kit), so the bot's 640 by 365 gallery holds two rows of two, four
+// tiles, one of them the bot's own picture, whatever this says.
 let galleryTilesWanted = 25;
 // Lookout mode: presence, camera state, and chat only. Those all ride
 // Zoom's signaling (the roster and user-added/updated/removed events), so
@@ -659,6 +662,12 @@ window.zoomDiagnostics = async () => {
   // trying to walk out of. The console shows this when a headcount
   // suddenly drops, so nobody has to guess whether a class left.
   out.breakout = { ...readBreakout(), events: breakout.events.slice(-10) };
+  // The gallery's pages: which one is on screen, how many there are, and
+  // the last turns with their outcome. A turn that failed says why.
+  try {
+    out.gallery = { paged: hasPagination(), page: gallery.page, pages: gallery.pages,
+      turns: gallery.turns, failures: gallery.failures, recent: gallery.recent.slice(-6) };
+  } catch (e) { out.gallery = { error: String(e).slice(0, 120) }; }
   out.videoEvents = videoEvents.slice(-30);
   out.chatLog = chatLog.slice(-20);
   try { out.renderedVideoUsers = await window.zoomRenderedVideoUsers(); }
@@ -1127,62 +1136,160 @@ window.zoomRenderedVideoUsers = async () => {
 };
 
 /*
- * Gallery paging: the "handful at a time" design.
+ * Gallery paging: one page on screen at a time, every page in its turn.
  *
- * The browser decodes every tile the gallery currently shows, and only
- * those, so a small window showing one page at a time puts a constant
- * ceiling on decode work regardless of class size. What it costs is
- * coverage: people on other pages have no tile to capture. This walks the
- * SDK's own pagination one step per call, so over a few sweeps every page
- * gets its turn in front of the camera, and the capture path's honesty
- * rule already handles the rest: not rendered means recorded as not
- * checked, never guessed.
+ * The browser decodes only the tiles on the page the gallery shows, so the
+ * bot shows one page at a time and turns through them: decode work stays
+ * the same whatever the class size. Only a tile on screen can have its
+ * face checked, so whether every student gets checked comes down to this
+ * turning, and nothing else.
  *
- * The controls are found by their accessible labels rather than class
- * names, and when nothing matches, the visible button labels are returned
- * so the bot's-view diagnostics show exactly what was on offer.
+ * FOUND 2026-09-25 (owner: face checks were "not even between
+ * participants"): this used to look for buttons labelled "next page" or
+ * "previous page". Zoom's are labelled "Increase page" and "Decrease page",
+ * read out of both kits the bot has run (3.13.2 and 6.2.0), so not one
+ * page was ever turned. The answer was thrown away, so nothing said so,
+ * and every face check, room picture and student photo came from the first
+ * page: at the bot's size four tiles, one of them the bot. Zoom's own
+ * words come first now, the older patterns after them.
+ *
+ * Zoom hides the arrow that cannot be used with visibility:hidden, never
+ * display:none, so whether one can be pressed is read from its computed
+ * style (offsetParent says yes to a hidden button). Zoom renders no page
+ * buttons at all while everybody fits on one page, which is a gallery
+ * with nothing to turn, not a fault.
  */
-window.zoomGalleryAdvance = async () => {
+const PAGE_WORDS = {
+  next: [/^\s*increase page\s*$/i, /next[ -]?page/i],
+  prev: [/^\s*decrease page\s*$/i, /prev(ious)?[ -]?page/i],
+};
+// The old matcher also read class names; kept as the last resort.
+const PAGE_CLASS_WORDS = {
+  next: /pagination[^a-z]*next|next[^a-z]*pagination/i,
+  prev: /pagination[^a-z]*prev|prev[^a-z]*pagination/i,
+};
+const gallery = { page: 0, pages: null, turns: 0, failures: 0, last: null, recent: [] };
+
+function pageButtons() {
   const root = document.getElementById('zoom-root') || document.body;
-  const btns = [...root.querySelectorAll('button')];
-  const label = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${
-    typeof b.className === 'string' ? b.className : ''}`;
-  const usable = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true'
-    && b.offsetParent !== null;
-  const next = btns.find((b) => /next[ -]?page|pagination[^a-z]*next|next[^a-z]*pagination/i.test(label(b)));
-  const prev = btns.find((b) => /prev(ious)?[ -]?page|pagination[^a-z]*prev|prev[^a-z]*pagination/i.test(label(b)));
-  if (next && usable(next)) { next.click(); return { ok: true, moved: 'next' }; }
-  if (prev && usable(prev)) {
-    // On the last page: walk back to the first so the cycle restarts.
-    let guard = 12;
-    while (guard-- > 0 && usable(prev)) {
-      prev.click();
-      await new Promise((r) => setTimeout(r, 120));
-    }
-    return { ok: true, moved: 'first' };
+  return [...root.querySelectorAll('button, [role="button"]')];
+}
+
+function pageButton(which, btns = pageButtons()) {
+  const words = (b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''}`.trim();
+  for (const re of PAGE_WORDS[which]) {
+    const hit = btns.find((b) => re.test(words(b)));
+    if (hit) return hit;
   }
-  return {
-    ok: false,
-    buttons: btns.filter((b) => b.offsetParent !== null)
-      .map((b) => label(b).trim().slice(0, 60)).filter(Boolean).slice(0, 12),
-  };
+  return btns.find((b) => PAGE_CLASS_WORDS[which].test(
+    typeof b.className === 'string' ? b.className : '')) || null;
+}
+
+function pressable(b) {
+  if (!b || b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+  const cs = getComputedStyle(b);
+  if (cs.visibility === 'hidden' || cs.display === 'none') return false;
+  return b.getClientRects().length > 0;
+}
+
+function hasPagination() {
+  return !!(pageButton('next') || pageButton('prev')
+    || document.querySelector('[aria-label="Pagination"]'));
+}
+
+function noteTurn(entry) {
+  gallery.last = { at: Date.now(), ...entry };
+  gallery.recent.push(gallery.last);
+  gallery.recent.splice(0, Math.max(0, gallery.recent.length - 12));
+  if (entry.ok) gallery.turns += 1; else gallery.failures += 1;
+}
+
+const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/*
+ * Turn the gallery. direction 'next' moves one page on, and from the last
+ * page goes back to the first; 'first' goes back to the first page. The
+ * answer always says what happened, and a turn that could not happen says
+ * why, with the buttons that were on the page, so a failure is never
+ * silent again.
+ */
+window.zoomGalleryTurn = async (direction = 'next') => {
+  const btns = pageButtons();
+  const next = pageButton('next', btns);
+  const prev = pageButton('prev', btns);
+  if (!next && !prev) {
+    if (!document.querySelector('[aria-label="Pagination"]')) {
+      gallery.page = 0;
+      gallery.pages = 1;
+      return { ok: true, moved: 'none', page: 0, pages: 1 };
+    }
+    const offered = btns.filter((b) => b.getClientRects().length > 0)
+      .map((b) => `${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''}`.trim())
+      .filter(Boolean).slice(0, 12);
+    const why = 'the gallery has more than one page but no page buttons were found';
+    noteTurn({ ok: false, why, buttons: offered });
+    return { ok: false, why, buttons: offered };
+  }
+  // Zoom hides "Decrease page" on the first page, which settles where we
+  // are whatever the count says (a change of view resets Zoom to page one).
+  if (!pressable(prev)) gallery.page = 0;
+  if (direction !== 'first' && pressable(next)) {
+    next.click();
+    gallery.page += 1;
+    await settle(60);
+    if (!pressable(pageButton('next'))) gallery.pages = gallery.page + 1;
+    noteTurn({ ok: true, moved: 'next', page: gallery.page });
+    return { ok: true, moved: 'next', page: gallery.page, pages: gallery.pages };
+  }
+  // Back to the first page. Zoom has no jump, so the other arrow is pressed
+  // until it hides, which is what happens on the first page. The presses it
+  // took say which page was on screen, whatever the count kept here said
+  // (Zoom moves the gallery by itself when people leave), so from the last
+  // page they are also how many pages there are.
+  const fromLast = direction !== 'first' && !pressable(next);
+  let presses = 0;
+  for (let guard = 0; guard < 60 && pressable(pageButton('prev')); guard += 1) {
+    pageButton('prev').click();
+    presses += 1;
+    await settle(40);
+  }
+  if (pressable(pageButton('prev'))) {
+    const why = 'could not get back to the first page';
+    noteTurn({ ok: false, why, presses });
+    return { ok: false, why, presses };
+  }
+  if (fromLast) gallery.pages = presses + 1;
+  gallery.page = 0;
+  noteTurn({ ok: true, moved: 'first', presses });
+  return { ok: true, moved: 'first', page: 0, pages: gallery.pages, presses };
 };
 
+// Kept for anything still calling the old name: one page on, or back to
+// the first from the last.
+window.zoomGalleryAdvance = async () => window.zoomGalleryTurn('next');
+
 window.zoomGalleryInfo = async () => {
-  // How many pages the gallery spans right now, so the grid proctor knows
-  // how fast to walk them to catch everyone inside the coverage window.
-  // tilesPerPage is what the SDK was told to show (BOT_GALLERY_TILES),
-  // which is also the decode budget: the smaller it is, the lighter each
-  // page and the more pages a big class takes.
+  // Where the gallery stands: whether it has pages at all, which page is
+  // on screen, how many pages the bot has found by walking them (null
+  // until it has reached the last one), and every turn it has made.
+  let participants = 1;
   try {
     const atts = (client && client.getAttendeeslist && client.getAttendeeslist()) || [];
-    const participants = Math.max(1, atts.length);
-    const per = Math.max(1, Math.min(galleryTilesWanted, 25));
-    return { participants, tilesPerPage: per, pages: Math.max(1, Math.ceil(participants / per)) };
-  } catch (e) {
-    return { participants: 1, tilesPerPage: 25, pages: 1,
-      error: String((e && e.message) || e).slice(0, 120) };
-  }
+    participants = Math.max(1, atts.length);
+  } catch (e) { /* the count is a nicety; the page state below is the point */ }
+  const prev = pageButton('prev');
+  const paged = hasPagination();
+  if (paged && !pressable(prev)) gallery.page = 0;
+  return {
+    participants,
+    paged,
+    page: paged ? gallery.page : 0,
+    pages: paged ? gallery.pages : 1,
+    canNext: pressable(pageButton('next')),
+    turns: gallery.turns,
+    failures: gallery.failures,
+    last: gallery.last,
+  };
 };
 
 window.zoomCaptureSupported = async () => true;

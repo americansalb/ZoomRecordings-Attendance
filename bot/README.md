@@ -28,6 +28,34 @@ backend ──HTTP (TUTOR_BOT.md)──► bot/app.py ──Playwright──► 
 - **All-Python orchestration**, reusing your OpenCV + Google stack. The native
   C++ Meeting SDK is a future upgrade behind the same `MeetingClient` interface.
 
+## Every face gets its turn: the gallery walk
+
+Only a tile on screen can have its face checked, and Zoom's gallery shows one
+page at a time. At the bot's 640 by 365 gallery a page is two rows of two,
+four tiles, one of them the bot's own picture (Zoom sizes a page from the room
+it has: a tile needs 240 pixels across and 136.75 down, read out of the 6.2.0
+kit). So a video-watching bot turns through the pages (`bot/capture.py`, the
+gallery walk):
+
+- A page turns once inside each observation, after that page's pixel work and
+  before the read, and again between observations as often as ten-second turns
+  fit, never more times than the gallery has pages with cameras on them.
+- A face reading counts once, at the first observation after it was made.
+- A trip ends when everyone with a camera on has been on screen in it, then the
+  walk goes back to page one. A page of only cameras-off tiles is not visited.
+- Under memory pressure the gallery holds still with the rest of the pixel work.
+  A lookout never turns a page.
+
+Zoom's page buttons are `aria-label="Increase page"` and `"Decrease page"`
+inside a div labelled `Pagination`, the unusable one hidden with
+`visibility:hidden`, and there are no buttons at all while everybody fits on one
+page. **Found 2026-09-25:** the bot looked for "next page", so it never turned a
+page and the three students on the first page got every face check. Every turn
+now answers with what happened; `/memz` carries a `gallery` summary per session
+and the diagnostics carry `galleryWalk`. The walk is pinned by
+`bot/tests/test_gallery_walk.py` (whole classes on a fake clock) and
+`bot/tests/test_gallery_live.py` (Zoom's buttons in a real Chromium).
+
 ## Known limitation: per-user frame capture
 
 Per-user video frames are **not obtainable** with the Component View Meeting

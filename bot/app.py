@@ -38,7 +38,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-60"
+BUILD = "capture-62"
 
 # What the CIA sweep poke last did, shown on /healthz. This box is the one
 # machine always awake, so its health page is where a person reads whether
@@ -50,6 +50,30 @@ CIA_STATE: Dict[str, Any] = {"pinger": "not started"}
 # the first two builds of the poke knocked there, where every poke was
 # answered 401 "Please log in" while the exams sat on Zoom.
 DEFAULT_UPLOADER_URL = "https://zoomrecordings-attendance.onrender.com"
+
+
+def _gallery_summary(manager, runtime_id: str) -> Optional[Dict[str, Any]]:
+    """The gallery walk of one live session, in counts: turns made and
+    refused, and how the last trip round the gallery went. Public on /memz
+    beside the memory figures, because whether every face gets its turn is
+    a question anyone should be able to answer from outside."""
+    try:
+        loop = manager._require(runtime_id).loop
+    except Exception:
+        return None
+    if loop is None or getattr(loop, "lookout", False):
+        return None
+    try:
+        rep = loop.gallery_report()
+    except Exception:
+        return None
+    trip = rep.get("last_trip") or {}
+    return {"paged": rep.get("paged"), "turns": rep.get("turns"),
+            "failures": rep.get("failures"),
+            "last_trip_seconds": trip.get("seconds"),
+            "last_trip_pages": trip.get("pages"),
+            "last_trip_cameras_seen": trip.get("seen"),
+            "last_trip_cameras_on": trip.get("cameras")}
 
 
 class MessageIn(BaseModel):
@@ -279,6 +303,9 @@ def build_app(
                     # per-page measurement), so growth can be placed.
                     "page_memory": diag.get("pageMemory"),
                     "media_elements": diag.get("mediaElements"),
+                    # Whether the gallery is turning, so every face on it
+                    # gets its turn: counts only, never names.
+                    "gallery": _gallery_summary(manager, rid),
                 })
             except Exception as e:
                 sessions.append({"runtime_id": rid, "error": str(e)[:120]})
@@ -374,6 +401,13 @@ def build_app(
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown runtime_id")
         data = await session.client.diagnostics()
+        # How the gallery walk is going: every face can only be checked
+        # when its page is on screen, so this is the coverage, in numbers.
+        if session.loop is not None:
+            try:
+                data["galleryWalk"] = session.loop.gallery_report()
+            except Exception:
+                pass
         # The container's own memory meter rides along. Face checking is
         # governed by it, so the console can say "faces are waiting because
         # memory is at 91 percent" instead of showing a silent zero.

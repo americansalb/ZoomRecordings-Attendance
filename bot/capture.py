@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -67,18 +68,18 @@ class CaptureLoop:
     # pace. Screenshots are the one genuinely heavy step left in a sweep.
     POLAROID_MIN_GAP_SECONDS = 10
 
-    # Gallery pages are never flipped faster than this. A freshly shown
-    # tile needs a second or two before it displays real video, so
-    # flipping every sweep at a one second pace would photograph loading
-    # tiles forever and churn stream subscriptions.
+    # The shortest turn a gallery page gets. A freshly shown tile needs a
+    # second or two before it displays real video, and the watcher checks
+    # each seat about once a second, so ten seconds is several good
+    # readings per person per turn. Turning faster would photograph
+    # loading tiles and churn Zoom's video subscriptions.
     PAGE_FLIP_MIN_GAP_SECONDS = 10
 
-    # Face checks are the expensive part of a sweep: each one renders a
-    # tile, screenshots it and runs the detector, while presence and camera
-    # state for the whole room come from one roster read. Capping the tile
-    # work per sweep keeps the sweep near the observation interval no
-    # matter how many cameras are on; the checks rotate, so over a few
-    # sweeps everyone with a camera on still gets sampled.
+    # Screenshot checks for people on screen whose tile the watcher could
+    # not read, per page turn. Each one screenshots a tile and runs the
+    # detector, the heavy step; presence and camera state for the whole
+    # room come from one roster read. Whoever has gone longest without a
+    # face result goes first, so nobody on a page is starved.
     FACE_CHECKS_PER_SWEEP = 4
 
     # The memory pressure valve. What kills the container is video decode,
@@ -103,8 +104,10 @@ class CaptureLoop:
     MEM_LEAVE_STRIKES = 2
     WATCHDOG_SECONDS = 2
 
-    # A watcher reading older than this is not evidence about right now.
-    WATCHER_FRESH_MS = 5000
+    # A face reading counts once, at the first observation after it was
+    # made (see _reading). The very first observation of a session has no
+    # earlier one to measure from, so it takes readings this recent.
+    FIRST_READ_WINDOW_SECONDS = 5
 
     # The page now loads the detector at join, the cheapest moment the
     # container ever sees, so arming here only STARTS the watch loop and
@@ -163,6 +166,10 @@ class CaptureLoop:
         # None means no shot yet: the first one goes immediately, so the
         # evidence starts when the bot does instead of one window late.
         self._last_room_shot = None
+        # Gallery page number -> monotonic time of its last room picture.
+        # Each page is photographed in its own turn, so a room picture
+        # covers the whole class rather than the first page over and over.
+        self._room_shot_at: dict = {}
         # One student at a time, each on their own clock: every
         # `student_photo_seconds` the person longest overdue gets one
         # picture, filed in a folder of their own. 0 means off. A room
@@ -172,8 +179,14 @@ class CaptureLoop:
         # renders a tile to photograph.
         self.student_photo_seconds = (
             0 if self.lookout else max(0, int(student_photo_seconds or 0)))
-        # user id -> monotonic time of their last student photo.
+        # user id -> monotonic time of their last student photo that was
+        # actually taken. A try that found no tile is not their turn.
         self._last_student_photo: dict = {}
+        # A photo falls due once per observation, and goes to whoever in
+        # the class is longest overdue, taken when their page comes up.
+        self._photo_owed_since: Optional[float] = None
+        # user id -> monotonic time before which a failed photo is not retried.
+        self._photo_retry_at: dict = {}
         self.face_detector = face_detector
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -183,8 +196,6 @@ class CaptureLoop:
         self._sweep_lock = asyncio.Lock()
         self._self_id: Optional[str] = None
         self._rearm_only = False
-        # Rotation cursor for the per-sweep face check cap.
-        self._face_rr = 0
         self._throttled = False
         # The bot's own camera picture is cosmetic, so at the memory hard
         # limit it is the first thing switched off, once.
@@ -193,13 +204,41 @@ class CaptureLoop:
         self._leaving = False
         # user id -> monotonic time of their last fallback screenshot.
         self._last_polaroid: dict = {}
-        self._last_advance = 0.0
-        # Grid proctoring: walk every gallery page so nobody goes longer
-        # than the coverage window (room_snapshot_seconds) unseen, at a
-        # one-page memory cost. These carry the live state for logs.
-        self._grid_pages = 1
-        self._grid_cover_seconds = 0.0
-        self._grid_last_ok = None
+        # user id -> (wall ms, face found): a screenshot check made in a
+        # page's turn, counted at the first observation after it.
+        self._fallback: dict = {}
+        # user id -> the screenshot record for their newest check, sent with
+        # the next observation (see _sweep): the backend files a record as a
+        # sample of that person at its own time, so one sent at the moment of
+        # the check would be a second sample between two observations.
+        self._pending_shots: dict = {}
+        # user id -> wall ms of the newest reading already counted, so no
+        # reading is counted twice.
+        self._counted_ms: dict = {}
+        # user id -> wall ms of their last face result of any kind. The
+        # screenshot fallback serves whoever has waited longest first.
+        self._last_face_ms: dict = {}
+        # Wall ms of the previous observation. A face reading counts once,
+        # at the first observation after it was made.
+        self._prev_read_ms: Optional[float] = None
+        # The gallery walk (see _between_sweeps). One page is on screen at
+        # a time; these say which, when it came up, who with a camera on
+        # has had their turn in this trip round the gallery, and how the
+        # last full trip went.
+        self._paged: Optional[bool] = None       # unknown until the first turn answers
+        self._page_index = 0
+        # The first page was up before the loop began, so the first turn
+        # takes the watcher's readings as recent as the first read does.
+        self._page_up_ms = (time.time() - self.FIRST_READ_WINDOW_SECONDS) * 1000
+        self._last_turn_mono = 0.0
+        self._trip_seen: set = set()
+        self._trip_pages = 1
+        self._trip_started = time.monotonic()
+        self._last_trip: Optional[dict] = None
+        self._turns_ok = 0
+        self._turn_failures = 0
+        self._last_turn: Optional[dict] = None
+        self._turn_fail_logged_at = 0.0
 
     @classmethod
     def _clamp(cls, seconds) -> int:
@@ -376,76 +415,463 @@ class CaptureLoop:
         except Exception as e:
             logger.warning("[CAPTURE] leave failed: %s", e)
 
-    @staticmethod
-    def _grid_interval(window_seconds, pages, min_flip):
-        """Seconds between grid shots so all `pages` pages are photographed
-        within `window_seconds`. One page is shot per tick and the gallery
-        advances one page per tick, so P ticks cover everyone; the tick is
-        window/pages, floored at min_flip because a page cannot be flipped
-        and painted faster than that. With one page there is nothing to
-        walk, so a shot every window seconds is the whole job."""
-        pages = max(1, int(pages))
-        if pages <= 1:
-            return max(1.0, float(window_seconds))
-        return max(float(window_seconds) / pages, float(min_flip))
+    # ── The gallery walk ────────────────────────────────────────────────
+    #
+    # Only a tile on screen can have its face checked, and the gallery
+    # shows one page at a time: four tiles at the bot's size, one of them
+    # the bot. So the walk decides whether every student gets checked, and
+    # it is built to be even by construction:
+    #
+    #   - Pages turn in step with the observations: once inside each
+    #     observation, after that page's pixel work and before the read,
+    #     then as many more times before the next observation as turns of
+    #     PAGE_FLIP_MIN_GAP_SECONDS fit, never more than the gallery has
+    #     pages with cameras on them. Below that pace, once every so many
+    #     observations.
+    #   - A face reading counts once, at the first observation after it
+    #     was made (_reading), so one turn of a page gives each person on
+    #     it one reading, whichever part of the interval it fell in.
+    #   - A trip round the gallery ends as soon as everyone with a camera
+    #     on has been on screen in it, and the next starts at page one, so
+    #     no page is skipped and none gets two turns in one trip.
+    #
+    # Every page comes round equally often, and so does every face.
+    # FOUND 2026-09-25: before this the gallery never turned at all (the
+    # page buttons were looked for under the wrong words), so the same
+    # three students got every check and nobody else got one.
 
-    async def _grid_sleep(self, seconds) -> None:
+    async def _rest_until(self, deadline: float) -> bool:
+        """Wait until `deadline` (monotonic), or less when stopped or woken.
+
+        True means something woke the loop (a stop, "take attendance now",
+        or a new pace) and the caller should return at once."""
+        if self._stop.is_set():
+            return True
+        timeout = deadline - time.monotonic()
+        if timeout > 0 and not self._wake.is_set():
+            waiters = [asyncio.ensure_future(self._stop.wait()),
+                       asyncio.ensure_future(self._wake.wait())]
+            try:
+                await asyncio.wait(waiters, timeout=timeout,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
+        woke = self._stop.is_set() or self._wake.is_set()
+        self._wake.clear()
+        return woke
+
+    def _turn_due_at_read(self) -> bool:
+        """Whether this observation turns the page, between its pixel work
+        and its read. Turning there, rather than after the read, means a
+        reading can never straddle two observations: the page read is the
+        page that just had its turn, and the new page has shown nothing yet."""
+        if self.lookout or self._throttled:
+            return False
+        since = time.monotonic() - self._last_turn_mono
+        if self._paged is False:
+            # One page, nothing to turn. Look again once a minute in case
+            # the class has grown past a page.
+            return since >= 60
+        if self.interval_seconds >= self.PAGE_FLIP_MIN_GAP_SECONDS:
+            return True
+        return since >= self.PAGE_FLIP_MIN_GAP_SECONDS
+
+    async def _between_sweeps(self, ctx: CaptureContext, started: float) -> None:
+        """The time between two observations, with the gallery turned on the
+        way. The interval is measured start to start, so the sweep's own
+        time counts against it: "observe every 10 seconds" used to mean "rest
+        10 seconds after each sweep", and with 4 to 8 second sweeps the real
+        cadence sat at 14 to 18. A sweep that outruns the interval gets a one
+        second breather so the API stays responsive, and that is the floor."""
+        deadline = max(started + float(self.interval_seconds), time.monotonic() + 1.0)
+        if self.lookout:
+            await self._rest_until(deadline)
+            return
+        floor = float(self.PAGE_FLIP_MIN_GAP_SECONDS)
+        remaining = deadline - time.monotonic()
+        k = max(1, int(remaining // floor))
+        if self._paged:
+            # The observation already turned once. No more turns in an
+            # interval than the gallery has pages worth showing.
+            if self._last_trip and self._last_trip.get("pages"):
+                k = min(k, max(1, int(self._last_trip["pages"])))
+        elif self.room_snapshot_seconds > 0:
+            # One page: nothing to turn. Extra looks inside the interval are
+            # needed only for room pictures due more often than it.
+            k = max(1, min(k, math.ceil(remaining / self.room_snapshot_seconds)))
+        else:
+            k = 1
+        slot = remaining / k
+        t0 = time.monotonic()
+        for j in range(1, k):
+            if await self._rest_until(t0 + j * slot):
+                return
+            # This page's turn is over: its pixel work, then the next page.
+            # Under the sweep's lock, so a "take attendance now" never reads
+            # the room halfway through a turn.
+            async with self._sweep_lock:
+                await self._visit_pass(ctx)
+                if self._paged and not self._throttled:
+                    await self._turn(ctx)
+        await self._rest_until(deadline)
+
+    async def _cameras_on(self, ctx: CaptureContext) -> set:
         try:
-            await asyncio.wait_for(self._stop.wait(), timeout=max(0.5, float(seconds)))
-        except asyncio.TimeoutError:
-            pass
+            parts = await self.client.list_participants()
+        except Exception:
+            return set()
+        return {str(p.user_id) for p in parts
+                if p.video_on and not p.is_hold
+                and not self._is_self(p.user_id, p.name, ctx)}
 
-    async def _grid_loop(self, ctx) -> None:
-        """Photograph the whole class as a grid, walking every gallery page
-        so nobody goes longer than the coverage window unseen, at a
-        one-page memory cost. Holds under memory pressure and never lets a
-        failed shot crash the process."""
+    async def _turn(self, ctx: CaptureContext) -> None:
+        """Turn the gallery: back to page one when everyone with a camera
+        on has had their turn in this trip, otherwise one page on (Zoom's
+        last page goes back to the first). What happened is kept, and a turn
+        that failed is said in the log, at most once a minute."""
+        cams = await self._cameras_on(ctx)
+        direction = "first" if cams and cams <= self._trip_seen else "next"
+        turn = getattr(self.client, "gallery_turn", None)
+        try:
+            res = (await turn(direction)) if turn is not None else {"ok": True, "moved": "none"}
+        except Exception as e:
+            res = {"ok": False, "why": f"the turn failed: {str(e)[:120]}"}
+        res = res or {}
+        now = time.monotonic()
+        self._last_turn_mono = now
+        self._page_up_ms = time.time() * 1000
+        moved = res.get("moved")
+        self._last_turn = {"at": round(time.time(), 1), "asked": direction,
+                           "ok": bool(res.get("ok")), "moved": moved,
+                           "why": res.get("why")}
+        if not res.get("ok"):
+            self._turn_failures += 1
+            if now - self._turn_fail_logged_at > 60:
+                self._turn_fail_logged_at = now
+                buttons = res.get("buttons")
+                logger.warning(
+                    "[CAPTURE] could not turn the gallery page: %s%s",
+                    res.get("why") or "no reason given",
+                    f"; buttons on the page: {buttons}" if buttons else "")
+            return
+        if moved == "next":
+            self._paged = True
+            self._turns_ok += 1
+            # The page says where it is when it can; Zoom moves the gallery
+            # by itself when people leave, so its word beats a count kept here.
+            page = res.get("page")
+            self._page_index = page if isinstance(page, int) and page > 0 else self._page_index + 1
+            self._trip_pages += 1
+            return
+        if moved == "first":
+            self._paged = True
+            self._turns_ok += 1
+        else:
+            self._paged = False
+        # Back at page one, or a gallery with one page: the trip is over.
+        self._last_trip = {
+            "seconds": round(now - self._trip_started, 1),
+            "pages": self._trip_pages,
+            "cameras": len(cams),
+            "seen": len(cams & self._trip_seen),
+        }
+        self._page_index = 0
+        self._trip_pages = 1
+        self._trip_seen = set()
+        self._trip_started = now
+
+    async def _rendered(self) -> Optional[set]:
+        """User ids with a video tile on screen now, or None when that
+        cannot be read (which counts nobody as seen, and checks everyone)."""
+        fn = getattr(self.client, "rendered_users", None)
+        if fn is None:
+            return None
+        try:
+            ids = await fn()
+        except Exception as e:
+            logger.debug("rendered tiles unavailable: %s", e)
+            return None
+        return None if ids is None else {str(i) for i in ids}
+
+    async def _watcher_users(self, *, arm: bool) -> dict:
+        """The seat watcher's per-person readings, {} when it has none.
+
+        The in-page watcher checks every seat on screen about once a
+        second; its readings are the face results, with a screenshot check
+        only for someone it could not read. With arm, a watcher that is
+        loaded but not yet watching is started when memory allows, and a
+        refusal is said, at most once a minute."""
+        if self.lookout:
+            return {}
+        try:
+            wstate = await self.client.watcher_state()
+            if wstate and wstate.get("running"):
+                return wstate.get("users") or {}
+            if arm and wstate is not None and not self._throttled:
+                mem = self.memory_fraction()
+                if mem < self.WATCHER_ARM_MAX_MEM:
+                    # Cameras may be on while the detector is not loaded
+                    # yet. Arm only with real headroom, measured now.
+                    arm_fn = getattr(self.client, "watcher_arm", None)
+                    if arm_fn is not None:
+                        armed = await arm_fn()
+                        if armed and armed.get("ok"):
+                            logger.info("[CAPTURE] seat watcher armed (memory at %d%%)",
+                                        int(mem * 100))
+                elif time.monotonic() - getattr(self, "_arm_declined_at", 0.0) > 60:
+                    # Declining silently hid an entire failure for a whole
+                    # session. Say it, at most once a minute.
+                    self._arm_declined_at = time.monotonic()
+                    logger.info(
+                        "[CAPTURE] watcher not armed: memory at %d%%, needs under %d%%; "
+                        "faces ride the screenshot fallback",
+                        int(mem * 100), int(self.WATCHER_ARM_MAX_MEM * 100))
+        except Exception:
+            return {}
+        return {}
+
+    @staticmethod
+    def _watcher_reading(wusers: dict, uid) -> Optional[tuple]:
+        """(wall ms, face found) from the watcher's last real read of this
+        person's tile, or None. A page from before readAt existed carries
+        lastCheckedAt only, which counts when that check was readable."""
+        s = wusers.get(str(uid)) if wusers else None
+        if not s or "facePresent" not in s:
+            return None
+        at = s.get("readAt")
+        if at is None and s.get("readable"):
+            at = s.get("lastCheckedAt")
+        if at is None:
+            return None
+        return (float(at), bool(s.get("facePresent")))
+
+    def _reading(self, uid, wusers: dict, since_ms: float) -> Optional[tuple]:
+        """The face reading this observation counts for one person: the
+        newest reading, from the watcher or a screenshot check, made since
+        the previous observation and not already counted. None means their
+        face was not looked at in that time, which is never the same claim
+        as looked at and not found."""
+        best = None
+        w = self._watcher_reading(wusers, uid)
+        if w and w[0] >= since_ms:
+            best = w
+        fb = self._fallback.get(str(uid))
+        if fb and fb[0] >= since_ms and (best is None or fb[0] > best[0]):
+            best = fb
+        if best is None or best[0] <= self._counted_ms.get(str(uid), float("-inf")):
+            return None
+        return best
+
+    async def _visit_pass(self, ctx: CaptureContext) -> None:
+        """The pixel work for the page on screen, at the end of its turn."""
+        if self.lookout or self._throttled:
+            return
+        try:
+            participants = {p.user_id: p for p in await self.client.list_participants()}
+        except Exception as e:
+            logger.debug("page turn: roster unavailable: %s", e)
+            return
+        await self._pass(ctx, participants, await self._watcher_users(arm=False))
+
+    async def _pass(self, ctx: CaptureContext, participants: dict, wusers: dict) -> None:
+        """Everything that needs the pixels of the page on screen, done once
+        per turn of that page: a screenshot check for anyone on it the
+        watcher could not read in this turn, the student photo when the
+        person longest overdue is on it, and the page's room picture when
+        it is due. Only people whose tile is on screen are tried: a try on
+        somebody on another page finds nothing, and used to cost them their
+        turn."""
+        if self.lookout or self._throttled:
+            return
+        rendered = await self._rendered()
+        on_screen = []
+        for uid, p in participants.items():
+            if self._is_self(uid, p.name, ctx) or p.is_hold or not p.video_on:
+                continue
+            if rendered is not None and str(uid) not in rendered:
+                continue
+            on_screen.append(p)
+        if rendered is not None:
+            # Who has had their turn in this trip round the gallery. Only a
+            # tile Zoom actually rendered counts; not knowing counts nobody,
+            # so a failed read walks the gallery on rather than back.
+            self._trip_seen.update(str(p.user_id) for p in on_screen)
+        since_ms = max(self._page_up_ms, self._prev_read_ms or 0.0)
+        await self._fallback_checks(ctx, on_screen, wusers, since_ms)
+        await self._student_photo(ctx, on_screen, participants)
+        await self._room_picture(ctx)
+
+    async def _fallback_checks(self, ctx: CaptureContext, on_screen: list,
+                               wusers: dict, since_ms: float) -> None:
+        now_mono = time.monotonic()
+        needs = []
+        for p in on_screen:
+            uid = str(p.user_id)
+            w = self._watcher_reading(wusers, uid)
+            if w and w[0] >= since_ms:
+                continue                      # the watcher read them in this turn
+            fb = self._fallback.get(uid)
+            if fb and fb[0] >= since_ms:
+                continue                      # already checked in this turn
+            if now_mono - self._last_polaroid.get(uid, float("-inf")) < self.POLAROID_MIN_GAP_SECONDS:
+                continue
+            needs.append(p)
+        # Whoever has gone longest without any face result goes first.
+        needs.sort(key=lambda p: self._last_face_ms.get(str(p.user_id), float("-inf")))
+        # At a fast observation pace the loop must stay near its interval,
+        # and screenshots are the one step that cannot: one per turn there.
+        cap = self.FACE_CHECKS_PER_SWEEP if self.interval_seconds >= 10 else 1
         folder = f"LiveTutor {ctx.session_label}".strip()
-        # The first shot goes immediately, so evidence starts with the bot.
-        while not self._stop.is_set():
-            window = max(1, int(self.room_snapshot_seconds or 0))
-            if window <= 0:
-                await self._grid_sleep(5)
-                continue
-            # A fresh page spins up fresh decoders, the opposite of what a
-            # tight machine needs. Hold, and let coverage resume when the
-            # pressure lifts; the record is never a reason to push the box
-            # over its line.
-            if self._throttled:
-                self._grid_cover_seconds = 0.0
-                await self._grid_sleep(min(window, 5))
-                continue
-            pages = 1
+        for p in needs[:cap]:
+            uid = str(p.user_id)
+            self._last_polaroid[uid] = time.monotonic()
             try:
-                info = await self.client.gallery_info() or {}
-                pages = max(1, int(info.get("pages") or 1))
+                data = await self.client.capture_user(p.user_id)
             except Exception as e:
-                logger.debug("gallery info unavailable: %s", e)
-            self._grid_pages = pages
+                logger.warning("capture_user(%s) failed: %s", p.user_id, e)
+                data = None
+            if not data:
+                continue
+            # A frame was examined: from here the answer is True or False,
+            # never None. OpenCV runs off the event loop so chat and the
+            # other captures are not stalled for the length of a detection.
+            found = False
             try:
-                shot = await self.client.page_screenshot()
-                if shot:
-                    ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                    await self.storage.upload(
-                        data=shot,
-                        filename=f"room_{_safe(ctx.session_label)}_{ts}.png",
-                        session_folder=folder)
-                    self._grid_last_ok = time.time()
-                    self._last_room_shot = time.monotonic()
+                found = bool(await asyncio.to_thread(self.face_detector, data))
             except Exception as e:
-                logger.warning("grid room shot failed: %s", e)
-            interval = self._grid_interval(window, pages, self.PAGE_FLIP_MIN_GAP_SECONDS)
-            # The honest coverage window: what we actually achieve, which is
-            # the target when the machine can flip fast enough, and longer
-            # when a big class needs more pages than the flip gap allows.
-            self._grid_cover_seconds = round(interval * pages, 1)
-            if pages > 1:
-                try:
-                    await self.client.gallery_advance()
-                    self._last_advance = time.monotonic()
-                except Exception as e:
-                    logger.debug("grid advance skipped: %s", e)
-            await self._grid_sleep(interval)
+                logger.warning("face check failed for %s: %s", p.user_id, e)
+            at_ms = time.time() * 1000
+            self._fallback[uid] = (at_ms, found)
+            stored = False
+            image_url = None
+            drive_file_id = None
+            if self.store_images:
+                ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+                filename = f"{_safe(ctx.session_label)}_{_safe(p.name)}_{ts}.png"
+                drive_file_id, image_url = await self.storage.upload(
+                    data=data, filename=filename, session_folder=folder)
+                stored = bool(drive_file_id or image_url)
+            # The manifest exists to account for captured pixels. It goes
+            # with the next observation, stamped with its time.
+            self._pending_shots[uid] = {
+                "stored": stored,
+                "image_url": image_url,
+                "drive_file_id": drive_file_id,
+            }
+
+    async def _student_photo(self, ctx: CaptureContext, on_screen: list,
+                             participants: dict) -> None:
+        """One student photographed per observation, the one in the whole
+        class longest overdue, taken when their page comes up. If they have
+        not come on screen in a full trip round the gallery (their tile
+        never renders), the longest overdue person on this page goes
+        instead, so the photo is never held for someone the bot cannot see.
+        Only people with a camera on are photographed: a camera-off student
+        has no tile, and a missing photo must never be mistaken for a photo
+        of an empty seat."""
+        if self.student_photo_seconds <= 0 or self._photo_owed_since is None:
+            return
+        now = time.monotonic()
+
+        def eligible(p) -> bool:
+            if p.is_host:
+                return False
+            uid = str(p.user_id)
+            last = self._last_student_photo.get(uid)
+            if last is not None and now - last < self.student_photo_seconds:
+                return False
+            return now >= self._photo_retry_at.get(uid, float("-inf"))
+
+        def overdue(p) -> float:
+            last = self._last_student_photo.get(str(p.user_id))
+            return float("-inf") if last is None else last   # never photographed first
+
+        here = sorted((p for p in on_screen if eligible(p)), key=overdue)
+        if not here:
+            return
+        everyone = sorted(
+            (p for p in participants.values()
+             if p.video_on and not p.is_hold
+             and not self._is_self(p.user_id, p.name, ctx) and eligible(p)),
+            key=overdue)
+        trip = (self._last_trip or {}).get("seconds") or 2 * self.interval_seconds
+        waited = now - self._photo_owed_since
+        if everyone and overdue(everyone[0]) < overdue(here[0]) and waited < trip + self.interval_seconds:
+            return      # someone waiting longer is on another page: their turn is coming
+        p = here[0]
+        uid = str(p.user_id)
+        try:
+            shot = await self.client.capture_user(p.user_id)
+        except Exception as e:
+            logger.warning("student photo failed for %s: %s", p.user_id, e)
+            shot = None
+        if not shot:
+            self._photo_retry_at[uid] = time.monotonic() + self.POLAROID_MIN_GAP_SECONDS
+            return
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        folder = f"LiveTutor {ctx.session_label}".strip()
+        try:
+            # The folder is named for the person and carries their Zoom id,
+            # so two students with the same display name never share one.
+            await self.storage.upload(
+                data=shot,
+                filename=f"{_safe(p.name)}_{ts}.png",
+                session_folder=folder,
+                subfolder=f"{_safe(p.name)}_{_safe(uid)}")
+        except Exception as e:
+            logger.warning("student photo upload failed for %s: %s", p.user_id, e)
+            return
+        self._last_student_photo[uid] = time.monotonic()
+        self._photo_owed_since = None
+
+    async def _room_picture(self, ctx: CaptureContext) -> None:
+        """A picture of the page on screen, each gallery page on its own
+        clock, so the pictures cover the whole class within the window
+        rather than the first page over and over."""
+        if self.room_snapshot_seconds <= 0:
+            return
+        now = time.monotonic()
+        key = self._page_index if self._paged else 0
+        last = self._room_shot_at.get(key)
+        if last is not None and now - last < self.room_snapshot_seconds:
+            return
+        try:
+            shot = await self.client.page_screenshot()
+        except Exception as e:
+            logger.warning("room picture failed: %s", e)
+            return
+        if not shot:
+            return
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        page = f"_page{key + 1}" if self._paged else ""
+        try:
+            await self.storage.upload(
+                data=shot,
+                filename=f"room_{_safe(ctx.session_label)}{page}_{ts}.png",
+                session_folder=f"LiveTutor {ctx.session_label}".strip())
+        except Exception as e:
+            logger.warning("room picture upload failed: %s", e)
+            return
+        self._room_shot_at[key] = now
+        self._last_room_shot = now
+
+    def gallery_report(self) -> dict:
+        """How the gallery walk is going, for the console and /memz: whether
+        the gallery has pages, which is on screen, how many turns worked and
+        failed, and the last full trip round it (how long it took, how many
+        pages, and how many of the cameras were on screen at some point)."""
+        return {
+            "lookout": self.lookout,
+            "paged": self._paged,
+            "page": self._page_index + 1,
+            "turns": self._turns_ok,
+            "failures": self._turn_failures,
+            "last_turn": self._last_turn,
+            "last_trip": self._last_trip,
+            "seen_this_trip": len(self._trip_seen),
+            "paused_for_memory": self._throttled,
+        }
 
     async def _memory_watchdog(self) -> None:
         """Check pressure every couple of seconds, not once per sweep.
@@ -481,7 +907,10 @@ class CaptureLoop:
         async with self._sweep_lock:
             return await self._sweep(ctx)
 
-    async def _sweep(self, ctx: CaptureContext) -> List[dict]:
+    async def _sweep(self, ctx: CaptureContext, *, turn: bool = False) -> List[dict]:
+        """One observation of the room: the page on screen gets its pixel
+        work, the page turns when `turn` (the loop decides), then everyone's
+        attendance row is read and sent in one request."""
         rows: List[dict] = []
 
         if self._self_id is None:
@@ -496,92 +925,9 @@ class CaptureLoop:
 
         # video_on comes from the live roster; the ledger carries the durations.
         participants = {p.user_id: p for p in await self.client.list_participants()}
-        folder = f"LiveTutor {ctx.session_label}".strip()
         captured_at = snapshot.at or time.time()
 
-        # The in-page watcher checks every rendered seat about once a second.
-        # When it has a fresh reading for someone, that reading IS their face
-        # result this sweep, and no screenshot is taken for them: full
-        # coverage at watcher speed. Anyone it cannot see (tiles unreadable,
-        # watcher off, other gallery page) falls back to the screenshot
-        # rotation below, so the worst case is exactly the old behaviour.
-        wusers = {}
-        try:
-            wstate = None if self.lookout else await self.client.watcher_state()
-            if wstate and wstate.get("running"):
-                wusers = wstate.get("users") or {}
-            elif wstate is not None and not self._throttled:
-                mem = self.memory_fraction()
-                if mem < self.WATCHER_ARM_MAX_MEM:
-                    # Cameras may be on while the detector is not loaded
-                    # yet. Arm only with real headroom, measured now.
-                    arm = getattr(self.client, "watcher_arm", None)
-                    if arm is not None:
-                        armed = await arm()
-                        if armed and armed.get("ok"):
-                            logger.info("[CAPTURE] seat watcher armed (memory at %d%%)",
-                                        int(mem * 100))
-                elif time.monotonic() - getattr(self, "_arm_declined_at", 0.0) > 60:
-                    # Declining silently hid an entire failure for a whole
-                    # session. Say it, at most once a minute.
-                    self._arm_declined_at = time.monotonic()
-                    logger.info(
-                        "[CAPTURE] watcher not armed: memory at %d%%, needs under %d%%; "
-                        "faces ride the screenshot fallback",
-                        int(mem * 100), int(self.WATCHER_ARM_MAX_MEM * 100))
-        except Exception:
-            wusers = {}
-        now_ms = time.time() * 1000
-
-        def watcher_face(uid) -> Optional[bool]:
-            s = wusers.get(str(uid))
-            if not s or not s.get("readable"):
-                return None
-            if now_ms - (s.get("lastCheckedAt") or 0) > self.WATCHER_FRESH_MS:
-                return None
-            return bool(s.get("facePresent"))
-
-        # Who is eligible for a face check this sweep. With the cap, a room
-        # of thirty cameras costs the same per sweep as a room of four; the
-        # cursor walks the list so nobody is starved across sweeps.
-        starved = False
-        eligible = []
-        fallback_needed = 0
-        # A lookout takes no screenshot turns at all: presence and camera
-        # state for the whole room already came from the one roster read.
-        for row in ([] if self.lookout else snapshot.rows):
-            if self._is_self(row.user_id, row.name, ctx):
-                continue
-            p = participants.get(row.user_id)
-            if p is not None and p.is_hold:
-                continue
-            if (bool(p.video_on) if p else bool(row.video_on)):
-                # Covered by the watcher means no screenshot turn needed,
-                # and nobody gets a fallback screenshot more often than
-                # POLAROID_MIN_GAP_SECONDS regardless of the notebook pace.
-                uid = str(row.user_id)
-                if watcher_face(uid) is None:
-                    fallback_needed += 1
-                    if (time.monotonic() - self._last_polaroid.get(uid, 0.0)
-                            >= self.POLAROID_MIN_GAP_SECONDS):
-                        eligible.append(uid)
-        # At a fast observation pace the sweep itself must stay near the
-        # interval, and screenshots are the one step that cannot. Four
-        # captures at up to four seconds each inside a one second notebook
-        # meant the loop ran flat out doing screenshots back to back, CPU
-        # pinned, for the whole meeting: the cadence lied and the container
-        # lived on the edge. One capture per fast sweep still rotates
-        # through everyone; the watcher carries the rest.
-        cap = self.FACE_CHECKS_PER_SWEEP if self.interval_seconds >= 10 else 1
-        if len(eligible) <= cap:
-            face_turn = set(eligible)
-        else:
-            start = self._face_rr % len(eligible)
-            face_turn = {eligible[(start + i) % len(eligible)]
-                         for i in range(cap)}
-            self._face_rr = (start + cap) % len(eligible)
-
-        # The valve: under memory pressure, faces wait and attendance
+        # The valve: under memory pressure, pixel work waits and attendance
         # continues. Unchecked people are recorded as not checked, the
         # same honesty rule as a tile that never rendered. Escalation also
         # runs from the watchdog between sweeps; recovery only here, with
@@ -591,8 +937,29 @@ class CaptureLoop:
             self._throttled = False
             logger.info("[CAPTURE] memory back under %d%%; face captures resume",
                         int(self.MEM_RESUME_BELOW * 100))
-        if self._throttled:
-            face_turn = set()
+
+        # A student photo falls due once per observation, and goes to the
+        # person longest overdue when their page comes up (_student_photo).
+        if self.student_photo_seconds > 0 and self._photo_owed_since is None:
+            self._photo_owed_since = time.monotonic()
+
+        # The page on screen has its turn's pixel work now, before the read,
+        # so what it produces is counted in this observation.
+        await self._pass(ctx, participants, await self._watcher_users(arm=True))
+        # Asked before the sweep began; the valve above may have closed since.
+        # A turn puts a new page of video in front of the decoder, so under
+        # pressure the gallery holds still with the rest of the pixel work.
+        if turn and not self._throttled and not self.lookout:
+            await self._turn(ctx)
+
+        # The read. A face reading counts once: made since the previous
+        # observation and not counted before. The mark is taken before the
+        # readings are fetched, so one made while they are fetched is counted
+        # here and never again, and none falls between two observations.
+        read_mark_ms = time.time() * 1000
+        since_ms = (self._prev_read_ms if self._prev_read_ms is not None
+                    else read_mark_ms - self.FIRST_READ_WINDOW_SECONDS * 1000)
+        wusers = await self._watcher_users(arm=False)
 
         for row in snapshot.rows:
             if self._is_self(row.user_id, row.name, ctx):
@@ -611,49 +978,19 @@ class CaptureLoop:
             is_host = bool(p.is_host) if p else False
             is_cohost = bool(p.is_co_host) if p else False
 
-            wface = watcher_face(row.user_id) if video_on else None
-            data: Optional[bytes] = None
-            if video_on and wface is None and str(row.user_id) in face_turn:
-                self._last_polaroid[str(row.user_id)] = time.monotonic()
-                try:
-                    data = await self.client.capture_user(row.user_id)
-                except Exception as e:
-                    logger.warning("capture_user(%s) failed: %s", row.user_id, e)
-                    data = None
-                if data is None:
-                    # Their turn came up but no tile was rendered: they are
-                    # on another gallery page. Page after this sweep.
-                    starved = True
-
             # None means "never looked", which is not the same claim as False,
             # "looked and saw nobody". Sending False for an unexamined frame
             # made every tick read downstream as a completed face check, so a
             # report could show 0 of 27 checks failing when no check ever ran.
-            # Per-user frames are unavailable on this SDK, so today this is
-            # always None; it must stay honest if that ever changes.
-            face: Optional[bool] = wface
-            if wface is None and data:
-                face = False
-                # OpenCV decode + Haar cascade is CPU-bound and was running
-                # inline on the event loop, stalling chat and the other
-                # participants' captures for the length of every detection.
-                try:
-                    face = bool(await asyncio.to_thread(self.face_detector, data))
-                except Exception as e:
-                    logger.warning("face check failed for %s: %s", row.user_id, e)
+            reading = self._reading(row.user_id, wusers, since_ms) if video_on else None
+            face: Optional[bool] = None
+            if reading is not None:
+                face = reading[1]
+                uid = str(row.user_id)
+                self._counted_ms[uid] = reading[0]
+                self._last_face_ms[uid] = reading[0]
 
-            stored = False
-            image_url = None
-            drive_file_id = None
-            if self.store_images and data:
-                ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                filename = f"{_safe(ctx.session_label)}_{_safe(row.name)}_{ts}.png"
-                drive_file_id, image_url = await self.storage.upload(
-                    data=data, filename=filename, session_folder=folder
-                )
-                stored = bool(drive_file_id or image_url)
-
-            attendance = {
+            rows.append({
                 "participant_id": row.user_id,
                 "participant_name": row.name,
                 "registrant_id": None,
@@ -665,33 +1002,39 @@ class CaptureLoop:
                 "video_on_seconds": row.video_on_seconds,
                 "observed_seconds": row.observed_seconds,
                 "face_present": face,
-                "face_checked": (data is not None) or (wface is not None),
+                "face_checked": face is not None,
                 "is_host": is_host,
                 "is_cohost": is_cohost,
-            }
-            manifest = {
+            })
+
+        # The screenshot records of the checks made since the last
+        # observation go now, stamped with this observation's time and
+        # saying what its row says. The backend files each record as a
+        # sample of that person at its time, so this lands on the same
+        # sample as the row that follows, as it always did: stamped at the
+        # moment of the check it would be a second sample of them between
+        # two observations, and their face result counted twice. A record
+        # for someone with no row now (gone to the waiting room) is not
+        # sent, or it would put them in the meeting at this time.
+        for r in rows:
+            shot = self._pending_shots.pop(str(r["participant_id"]), None)
+            if shot is None:
+                continue
+            await self.backend.post_screenshot({
                 "session_ref": ctx.session_ref,
                 "runtime_id": ctx.runtime_id,
-                "participant_id": row.user_id,
-                "participant_name": row.name,
+                "participant_id": r["participant_id"],
+                "participant_name": r["participant_name"],
                 "registrant_id": None,
                 "captured_at": captured_at,
-                "video_on": video_on,
-                "face_present": face,
-                "stored": stored,
-                "image_url": image_url,
-                "drive_file_id": drive_file_id,
-                "is_host": is_host,
-                "is_cohost": is_cohost,
-            }
-            # The manifest exists to account for captured pixels. At a one
-            # second pace with the watcher carrying faces, most ticks have
-            # no pixels, and posting an empty manifest per person per
-            # second would double the wire traffic for nothing. The
-            # attendance row above carries presence, camera, and face.
-            if data is not None or stored:
-                await self.backend.post_screenshot(manifest)
-            rows.append(attendance)
+                "present": r["present"],
+                "video_on": r["video_on"],
+                "face_present": r["face_present"],
+                **shot,
+                "is_host": r["is_host"],
+                "is_cohost": r["is_cohost"],
+            })
+        self._pending_shots.clear()
 
         # The whole sweep's attendance goes in one request. Per-person posts
         # made the wire the bottleneck: 25 people at a one second pace was
@@ -700,78 +1043,7 @@ class CaptureLoop:
             await self.backend.post_attendance_batch(
                 session_ref=ctx.session_ref, runtime_id=ctx.runtime_id,
                 captured_at=captured_at, rows=rows)
-
-        # The other half of the "handful at a time" design: the browser only
-        # decodes the gallery page it shows, so when someone's face turn
-        # found no rendered tile, or there are more cameras than one page
-        # holds, step the gallery so the next page gets its turn. One step
-        # per sweep; the capture rotation and this rotation mesh over a few
-        # sweeps to cover everyone at a constant memory cost.
-        # Flip the gallery when people still need coverage the current page
-        # cannot give them. Not while throttled (fresh pages spin up fresh
-        # decoders, the opposite of what memory pressure needs) and never
-        # faster than the dwell gap, or a fast notebook pace would flip to
-        # tiles still loading and photograph nothing forever.
-        if ((starved or fallback_needed > cap)
-                and self.room_snapshot_seconds == 0
-                and not self._throttled
-                and time.monotonic() - self._last_advance >= self.PAGE_FLIP_MIN_GAP_SECONDS):
-            advance = getattr(self.client, "gallery_advance", None)
-            if advance is not None:
-                self._last_advance = time.monotonic()
-                try:
-                    await advance()
-                except Exception as e:
-                    logger.debug("gallery advance skipped: %s", e)
-
-        # The whole-room grid shot used to ride this sweep. It now runs on
-        # its own loop (_grid_loop) so it can walk every gallery page fast
-        # enough that everyone is photographed within the coverage window,
-        # instead of at most once per observation interval.
-
-        # One student, photographed on their own clock and filed in a
-        # folder of their own. Whoever is longest overdue goes next, so a
-        # class rotates fairly instead of favouring whoever sits on the
-        # first gallery page. Only people with a camera on are eligible:
-        # a camera-off student has no tile, so there is nothing to
-        # photograph and a missing photo must never be mistaken for a
-        # photo of an empty seat. One capture per sweep, skipped under
-        # memory pressure like every other pixel path.
-        if self.student_photo_seconds > 0 and not self._throttled:
-            now_mono = time.monotonic()
-            due = []
-            for row in snapshot.rows:
-                if self._is_self(row.user_id, row.name, ctx):
-                    continue
-                p = participants.get(row.user_id)
-                if p is not None and (p.is_hold or p.is_host):
-                    continue
-                if not (bool(p.video_on) if p else bool(row.video_on)):
-                    continue
-                last = self._last_student_photo.get(str(row.user_id))
-                if last is not None and now_mono - last < self.student_photo_seconds:
-                    continue
-                # Never photographed yet sorts first, then longest overdue.
-                due.append((last if last is not None else -1.0, row))
-            if due:
-                due.sort(key=lambda x: x[0])
-                row = due[0][1]
-                self._last_student_photo[str(row.user_id)] = now_mono
-                try:
-                    shot = await self.client.capture_user(row.user_id)
-                    if shot:
-                        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                        # The folder is named for the person and carries
-                        # their Zoom id, so two students with the same
-                        # display name never share a folder.
-                        await self.storage.upload(
-                            data=shot,
-                            filename=f"{_safe(row.name)}_{ts}.png",
-                            session_folder=folder,
-                            subfolder=f"{_safe(row.name)}_{_safe(str(row.user_id))}")
-                except Exception as e:
-                    logger.warning("student photo failed for %s: %s", row.user_id, e)
-
+        self._prev_read_ms = read_mark_ms
         return rows
 
     async def run(self, ctx: CaptureContext) -> None:
@@ -786,48 +1058,22 @@ class CaptureLoop:
         except Exception:
             pass
         watchdog = asyncio.create_task(self._memory_watchdog())
-        grid = None
-        if self.room_snapshot_seconds > 0 and not self.lookout:
-            grid = asyncio.create_task(self._grid_loop(ctx))
         try:
             while not self._stop.is_set():
-                elapsed = 0.0
+                started = time.monotonic()
                 if self._rearm_only:
                     # The wake was an interval change, not a request to observe.
                     self._rearm_only = False
                 else:
-                    started = time.monotonic()
                     try:
-                        await self.run_once(ctx)
+                        async with self._sweep_lock:
+                            await self._sweep(ctx, turn=self._turn_due_at_read())
                     except Exception as e:  # keep the loop alive across transient errors
                         logger.warning("[CAPTURE] run_once error: %s", e)
-                    elapsed = time.monotonic() - started
-                await self._sleep_until_next(elapsed)
+                await self._between_sweeps(ctx, started)
         finally:
             watchdog.cancel()
-            if grid is not None:
-                grid.cancel()
         logger.info("[CAPTURE] attendance loop stopped for session %s", ctx.session_ref)
-
-    async def _sleep_until_next(self, elapsed: float = 0.0) -> None:
-        """Wait out the rest of the interval, but wake early on stop or a nudge.
-
-        The interval is measured start to start, so the sweep's own duration
-        counts against it: "observe every 10 seconds" used to mean "rest 10
-        seconds after each sweep", and with 4 to 8 second sweeps the real
-        cadence sat at 14 to 18. A sweep that outruns the interval gets a one
-        second breather so the API stays responsive, and that is the floor.
-        """
-        timeout = max(1.0, self.interval_seconds - elapsed)
-        waiters = [asyncio.ensure_future(self._stop.wait()),
-                   asyncio.ensure_future(self._wake.wait())]
-        try:
-            await asyncio.wait(waiters, timeout=timeout,
-                               return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for w in waiters:
-                w.cancel()
-            self._wake.clear()
 
     def stop(self) -> None:
         self._stop.set()

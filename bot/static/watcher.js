@@ -129,10 +129,15 @@
         continue;
       }
       const faces = lastCount < 0 ? 0 : lastCount;
+      // readAt is the last check that actually read the tile. It survives
+      // a later check that came up blank (the spread above keeps it), so a
+      // flicker at the end of a page's turn never costs that page's people
+      // the reading the turn produced.
       state.set(String(t.id), {
         readable: true,
         path,
         lastCheckedAt: now,
+        readAt: now,
         facePresent: faces > 0,
         faceCount: faces,
         lastFaceAt: faces > 0 ? now : (prev.lastFaceAt || null),
