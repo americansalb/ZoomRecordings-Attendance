@@ -185,7 +185,8 @@ class MeetingClient(ABC):
     @abstractmethod
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
                    signature: str, sdk_key: str, zak: Optional[str] = None,
-                   lookout: bool = False) -> None: ...
+                   lookout: bool = False, tk: Optional[str] = None,
+                   user_email: Optional[str] = None) -> None: ...
 
     @abstractmethod
     async def send_chat(self, text: str, to_user_id: Optional[str] = None) -> bool:
@@ -708,7 +709,8 @@ class ChromiumZoomClient(MeetingClient):
 
     async def join(self, *, meeting_number: str, passcode: str, display_name: str,
                    signature: str, sdk_key: str, zak: Optional[str] = None,
-                   lookout: bool = False) -> None:
+                   lookout: bool = False, tk: Optional[str] = None,
+                   user_email: Optional[str] = None) -> None:
         await self._driver_start()
         self._joining = True
         self._diet_active = bool(lookout)
@@ -736,6 +738,10 @@ class ChromiumZoomClient(MeetingClient):
                 "userName": display_name,
                 # Bearer credential: never log this.
                 "zak": zak or None,
+                # A registered room's token and the email the bot was
+                # registered under. Also a credential: never log it.
+                "tk": tk or None,
+                "userEmail": user_email or None,
                 # Tiles per gallery page. 25 is Zoom's own per-participant
                 # ceiling; tunable down without a rebuild if the memory
                 # meter on /healthz ever argues for it.

@@ -84,6 +84,25 @@ def _passcode_from_join_url(join_url: Optional[str]) -> str:
         return ""
 
 
+def _registrant_token_from_join_url(join_url: Optional[str]) -> str:
+    """The registrant's token a registered person's own link carries.
+
+    A room that gives everyone their own link (Zoom calls it a registered
+    meeting) refuses anybody who joins without one, the bot included:
+    Zoom answers "This meeting requires registration" and the bot never
+    reaches the class. The control plane registers the bot and hands over
+    the bot's own link; the token rides in it as ?tk=, and the Web SDK
+    takes it as the join's tk (found 2026-09-26, Session 142's first
+    class, the first registered room the bot was sent into)."""
+    if not join_url:
+        return ""
+    try:
+        qs = parse_qs(urlparse(join_url).query)
+        return (qs.get("tk") or [""])[0]
+    except Exception:
+        return ""
+
+
 class BotManager:
     def __init__(
         self,
@@ -206,6 +225,17 @@ class BotManager:
             zak=zak,
             lookout=lookout,
         )
+        # A registered room: the bot's own link carries its token, and
+        # Zoom checks the email the bot was registered under. Only passed
+        # when present, so every other room joins exactly as before.
+        tk = (payload.get("tk")
+              or _registrant_token_from_join_url(payload.get("join_url"))
+              or None)
+        if tk:
+            join_kwargs["tk"] = tk
+            user_email = str(payload.get("user_email") or "").strip()
+            if user_email:
+                join_kwargs["user_email"] = user_email
         try:
             try:
                 await client.join(**join_kwargs)

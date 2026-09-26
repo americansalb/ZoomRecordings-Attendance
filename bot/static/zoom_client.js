@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-62: the bot turns the gallery pages, so every face gets its turn';
+const PAGE_BUILD = 'capture-62: the bot turns the gallery pages, so every face gets its turn, and joins a room that gives everyone their own link';
 
 // The most tiles the gallery may put on a page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant. It
@@ -360,6 +360,13 @@ window.zoomJoin = async (cfg) => {
   // Only set when present, so a join without one behaves exactly as
   // before on accounts that still permit it.
   if (cfg.zak) joinArgs.zak = cfg.zak;
+  // A room that gives everyone their own link (a registered meeting)
+  // refuses a join without the registrant's token: "This meeting requires
+  // registration". The control plane registers the bot and sends its
+  // token; Zoom also checks the email it was registered under. Only set
+  // when present, so every other room joins exactly as before.
+  if (cfg.tk) joinArgs.tk = cfg.tk;
+  if (cfg.tk && cfg.userEmail) joinArgs.userEmail = cfg.userEmail;
   // While join() is pending the SDK may be sitting in the waiting room,
   // which looks identical to a slow connect from the outside. Watch the
   // SDK's own UI for the waiting room text and say so, both as a lifecycle
