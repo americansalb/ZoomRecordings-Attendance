@@ -269,5 +269,65 @@
     }
   }
 
-  window.CameraFace = { start, stop, buttonInfo, probeCamera, visibleLabels, zoomWords, findButton };
+  /**
+   * Keep the picture on for the whole meeting.
+   *
+   * start() runs once, at the join. Anything that switched the picture
+   * off after that (the host pressing Stop Video on the bot, Zoom's own
+   * reconnect, a breakout room opening or closing) left the bot as a
+   * blank tile until the class ended, because nothing looked again.
+   * This looks every `everyMs`: it writes what Zoom says right now into
+   * state.liveOn and state.liveCheckedAt, and when the picture is off it
+   * runs start() again. `allowed()` is asked first each time, so the
+   * memory valve and the headcount cap still win. After `quickTries`
+   * failed tries in a row it slows to one try every `slowMs`, so a room
+   * where the host does not allow video is not pressed all night.
+   * Returns a function that stops the keeper. Never throws.
+   */
+  function keep(opts) {
+    const {
+      client, state, allowed, everyMs = 30000, quickTries = 4, slowMs = 10 * 60 * 1000,
+      startOpts = { deadlineMs: 45000, maxClicks: 2 },
+    } = opts || {};
+    let stopped = false;
+    let busy = false;
+    let failures = 0;
+    let lastTry = 0;
+    state.restarts = state.restarts || 0;
+    state.liveOn = null;
+    state.liveCheckedAt = null;
+    async function look() {
+      if (stopped || busy) return;
+      busy = true;
+      try {
+        const on = videoOnFor(client);
+        state.liveOn = on;
+        state.liveCheckedAt = new Date().toISOString();
+        if (on !== false) { if (on === true) failures = 0; return; }
+        const ok = typeof allowed === 'function' ? allowed() : true;
+        if (ok !== true) { state.keeper = typeof ok === 'string' ? ok : 'not allowed right now'; return; }
+        if (failures >= quickTries && Date.now() - lastTry < slowMs) {
+          state.keeper = `off after ${failures} tries, trying again every ${Math.round(slowMs / 60000)} minutes`;
+          return;
+        }
+        lastTry = Date.now();
+        state.restarts += 1;
+        state.keeper = `the picture was off, switching it back on (${state.restarts})`;
+        await start({ ...startOpts, client, state, root: opts.root });
+        const now = videoOnFor(client);
+        state.liveOn = now;
+        state.liveCheckedAt = new Date().toISOString();
+        if (now === true) { failures = 0; state.keeper = `switched back on (${state.restarts})`; }
+        else { failures += 1; }
+      } catch (e) {
+        state.keeper = 'keeper error: ' + String((e && e.message) || e).slice(0, 120);
+      } finally {
+        busy = false;
+      }
+    }
+    const timer = setInterval(look, everyMs);
+    return () => { stopped = true; clearInterval(timer); };
+  }
+
+  window.CameraFace = { start, stop, keep, buttonInfo, probeCamera, visibleLabels, zoomWords, findButton };
 })();

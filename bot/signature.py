@@ -28,13 +28,19 @@ def meeting_sdk_signature(
     sdk_secret: str,
     meeting_number: str,
     role: int = 0,
-    expire_seconds: int = 7200,
+    expire_seconds: int = 86400,
 ) -> str:
+    # A day, not two hours. Zoom's SDK presents this same pass again
+    # whenever it reconnects by itself (a network blip, a move between
+    # Zoom's servers), and a class with its Skills Lab runs past three
+    # hours: a reconnect after the two hour mark was refused with "The
+    # signature has expired" and the bot fell out of the class
+    # (2026-11-14). Zoom allows up to 48 hours.
     if not sdk_key or not sdk_secret:
         raise ValueError("SDK key/secret required to sign a join")
 
     iat = int(time.time()) - 30          # small skew allowance
-    exp = iat + max(1800, expire_seconds)  # Zoom requires >= 30 min
+    exp = iat + min(48 * 3600 - 60, max(1800, expire_seconds))  # Zoom requires 30 minutes to 48 hours
 
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
