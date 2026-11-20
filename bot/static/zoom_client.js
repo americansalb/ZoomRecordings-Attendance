@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-62: the bot turns the gallery pages, so every face gets its turn, and joins a room that gives everyone their own link';
+const PAGE_BUILD = 'capture-63: the camera picture is kept on for the whole meeting, and the pass into Zoom lasts a day';
 
 // The most tiles the gallery may put on a page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant. It
@@ -594,14 +594,43 @@ async function startCameraFace() {
     cameraFace.videoOn = false;
     cameraFace.phase = `off: ${people} people in the room, the picture stays off above ${cameraFaceMaxPeople}`;
     cameraFace.reason = cameraFace.phase;
+    // Still kept: a room that empties below the cap gets the picture.
+    keepCameraFace();
     return;
   }
   await window.CameraFace.start({
     client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,
   });
+  keepCameraFace();
+}
+
+// The picture is kept on for the whole meeting, not only tried at the
+// join (CameraFace.keep). It stays off once Python switched it off to
+// make room, while the room is over the headcount cap, and while the bot
+// is not connected.
+let cameraFaceStoppedForMemory = false;
+let cameraFaceKeeper = null;
+function keepCameraFace() {
+  if (cameraFaceKeeper || !window.CameraFace || !window.CameraFace.keep) return;
+  cameraFaceKeeper = window.CameraFace.keep({
+    client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,
+    allowed: () => {
+      if (!cameraFaceWanted) return 'not wanted for this session';
+      if (cameraFaceStoppedForMemory) return 'switched off to make room, staying off';
+      if (!joined) return 'not connected to the meeting';
+      const people = roomSize();
+      if (cameraFaceMaxPeople > 0 && people > cameraFaceMaxPeople) {
+        return `${people} people in the room, the picture stays off above ${cameraFaceMaxPeople}`;
+      }
+      return true;
+    },
+  });
 }
 
 window.zoomStopVideo = async () => {
+  // Python asks for this at the memory limit: the keeper must not put
+  // the picture back.
+  cameraFaceStoppedForMemory = true;
   if (!window.CameraFace) return { ok: false, phase: 'camera script not loaded' };
   return window.CameraFace.stop({
     client, root: document.getElementById('zoom-root') || document.body, state: cameraFace,

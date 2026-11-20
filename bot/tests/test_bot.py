@@ -64,6 +64,16 @@ def test_signature():
     payload = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
     assert payload["mn"] == "98765" and payload["role"] == 0
     assert payload["sdkKey"] == "KEY" and payload["exp"] > payload["iat"]
+    # The pass outlasts a class and its Skills Lab: Zoom's SDK presents it
+    # again on every reconnect, and a two hour pass failed those after the
+    # two hour mark. Zoom's own limit is 48 hours.
+    life = payload["exp"] - payload["iat"]
+    assert 12 * 3600 <= life < 48 * 3600, life
+    assert payload["tokenExp"] == payload["exp"]
+    long = meeting_sdk_signature("KEY", "SECRET", "98765", expire_seconds=10 ** 7)
+    lp = long.split(".")[1]
+    lpay = json.loads(base64.urlsafe_b64decode(lp + "=" * (-len(lp) % 4)))
+    assert lpay["exp"] - lpay["iat"] < 48 * 3600
     print("  signature OK")
 
 

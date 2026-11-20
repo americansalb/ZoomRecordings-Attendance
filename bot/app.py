@@ -38,7 +38,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-62"
+BUILD = "capture-63"
 
 # What the CIA sweep poke last did, shown on /healthz. This box is the one
 # machine always awake, so its health page is where a person reads whether
