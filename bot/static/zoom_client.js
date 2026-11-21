@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-63: the camera picture is kept on for the whole meeting, and the pass into Zoom lasts a day';
+const PAGE_BUILD = 'capture-64: the camera picture is 320 by 180 at five frames a second, so a full class does not starve it';
 
 // The most tiles the gallery may put on a page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant. It

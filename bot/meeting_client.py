@@ -37,8 +37,21 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
 
-def image_bytes_to_y4m(data: bytes, path: str, width: int = 640, height: int = 360,
-                       fps: int = 10) -> bool:
+# The size and pace of the bot's camera picture. It was 640 by 360 at ten
+# frames a second. On 2026-11-21, in Session 144 (96 devices), Zoom's own
+# per-minute figures showed the bot sending 0 to 6 frames a second instead
+# of 10, at 256 by 144 instead of 640 by 360, with no loss and a steady
+# bitrate: the network was fine and memory was at half, but the bot's
+# computer could not encode its picture fast enough, so people saw it go
+# in and out. A still picture loses nothing at 320 by 180 and five frames a
+# second, and that is an eighth of the encoding work.
+CAMERA_FACE_WIDTH = 320
+CAMERA_FACE_HEIGHT = 180
+CAMERA_FACE_FPS = 5
+
+
+def image_bytes_to_y4m(data: bytes, path: str, width: int = CAMERA_FACE_WIDTH,
+                       height: int = CAMERA_FACE_HEIGHT, fps: int = CAMERA_FACE_FPS) -> bool:
     """Decode an image (JPEG, PNG, WebP) and write it as a two-frame Y4M
     file Chromium's fake webcam can play, letterboxed onto 16:9 so the
     whole picture shows in a Zoom tile. False when the image cannot be
@@ -514,7 +527,7 @@ class ChromiumZoomClient(MeetingClient):
     ]
 
     # The bot's camera picture: a still image Chromium's fake webcam plays
-    # on a loop (bot/assets/bot-face.y4m, 640x360, 10 frames a second).
+    # on a loop (bot/assets/bot-face.y4m, 320x180, 5 frames a second).
     # Zoom shows a profile photo only for a signed-in account and this bot
     # is a guest, so the picture rides the camera instead. The flag only
     # decides what the fake webcam shows; the cost arrives when the page
