@@ -226,6 +226,13 @@ class MeetingClient(ABC):
         """Raw SDK state, for diagnosing disputed camera state."""
         return {}
 
+    async def breakout_test(self, names: Optional[list] = None,
+                            open_seconds: int = 15,
+                            make_cohost: Optional[str] = None) -> dict:
+        """Try to make, open and close breakout rooms from this seat, and
+        say what role Zoom gave it. Meant for an empty test meeting."""
+        return {"steps": [], "done": "not supported by this client"}
+
     async def page_screenshot(self) -> Optional[bytes]:
         """PNG of the whole meeting page, for the console's evidence view."""
         return None
@@ -1008,6 +1015,17 @@ class ChromiumZoomClient(MeetingClient):
             return str(uid) if uid else None
         except Exception:
             return None
+
+    async def breakout_test(self, names: Optional[list] = None,
+                            open_seconds: int = 15,
+                            make_cohost: Optional[str] = None) -> dict:
+        try:
+            return await self._page.evaluate(
+                """async (o) => await window.zoomBreakoutTest(o)""",
+                {"names": names or [], "openSeconds": int(open_seconds),
+                 "makeCoHost": make_cohost or None}) or {}
+        except Exception as e:
+            return {"steps": [], "done": f"the test could not run: {str(e)[:300]}"}
 
     async def diagnostics(self) -> dict:
         """Raw SDK state, for when reported camera state is disputed."""

@@ -31,7 +31,7 @@ function zoomError(prefix, e) {
 
 // Shown in diagnostics so "is the deployed bot actually running this code"
 // is answerable from the console instead of by archaeology on Render.
-const PAGE_BUILD = 'capture-65: the bot leaves its meeting when its computer restarts, so Zoom lets the next one in';
+const PAGE_BUILD = 'capture-66: a breakout room test that says whether this seat can make, open and close rooms';
 
 // The most tiles the gallery may put on a page. Set by Python at join from
 // BOT_GALLERY_TILES; 25 is Zoom's ceiling for any single participant. It
@@ -877,6 +877,145 @@ window.zoomBreakout = async () => (readBreakout(), {
   gaveUp: breakout.gaveUp,
   events: breakout.events.slice(-10)
 });
+
+/*
+ * The breakout room test (2026-11-21). Can this seat run a class's rooms?
+ * Only a host or co-host can, and the bot has never been either, so this
+ * answers three things in an empty test meeting and changes nothing in a
+ * class: what role Zoom gave this seat, whether rooms can be made from it,
+ * and whether they open and close. Every step is written down with Zoom's
+ * own answer, so a refusal says which step refused and why.
+ */
+function boErr(e) {
+  if (!e) return 'unknown';
+  if (typeof e === 'string') return e.slice(0, 300);
+  const parts = [e.reason, e.message, e.type, e.errorCode].filter((x) => x !== undefined && x !== null);
+  return (parts.length ? parts.join(' | ') : JSON.stringify(e)).slice(0, 300);
+}
+
+// The Component View draws its own host panel, and the panel's code holds
+// the call that makes rooms (the public client offers only the one that
+// opens rooms already made). Walk React's own record of the drawn page to
+// find that object. Best effort: if it is not found, the test says so.
+function findRoomMaker() {
+  const seen = new Set();
+  const looks = (v) => v && typeof v === 'object' && typeof v.createRooms === 'function'
+    && typeof v.openRooms === 'function';
+  const fromValue = (v, depth) => {
+    if (!v || typeof v !== 'object' || depth > 3 || seen.has(v)) return null;
+    seen.add(v);
+    if (looks(v)) return v;
+    if (depth < 3) {
+      for (const k of Object.keys(v).slice(0, 60)) {
+        let x = null;
+        try { x = fromValue(v[k], depth + 1); } catch (e) { x = null; }
+        if (x) return x;
+      }
+    }
+    return null;
+  };
+  const nodes = document.querySelectorAll('#meetingSDKElement *, #zmmtg-root *, body *');
+  for (let i = 0; i < nodes.length && i < 4000; i += 1) {
+    const el = nodes[i];
+    const key = Object.keys(el).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+    if (!key) continue;
+    let f = el[key];
+    for (let up = 0; f && up < 80; up += 1, f = f.return) {
+      let ctx = f.dependencies && f.dependencies.firstContext;
+      for (let n = 0; ctx && n < 20; n += 1, ctx = ctx.next) {
+        const hit = fromValue(ctx.memoizedValue, 0);
+        if (hit) return hit;
+      }
+      const hit = fromValue(f.memoizedProps && f.memoizedProps.value, 0);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+window.zoomBreakoutTest = async (opts) => {
+  const o = opts || {};
+  const names = Array.isArray(o.names) && o.names.length ? o.names.slice(0, 4) : ['Test room 1', 'Test room 2'];
+  const openSeconds = Math.max(3, Math.min(60, Number(o.openSeconds) || 15));
+  const steps = [];
+  const step = (name, ok, detail) => steps.push({ step: name, ok: !!ok, detail: detail === undefined ? null : detail });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const out = { at: new Date().toISOString(), steps };
+  if (!client) { step('client', false, 'no client'); return out; }
+
+  // From a host seat: make the named person a co-host, the way a trainer
+  // would by hand, and stop there.
+  if (o.makeCoHost) {
+    try {
+      const want = String(o.makeCoHost).toLowerCase();
+      const users = client.getAttendeeslist() || [];
+      const who = users.find((u) => String(u.userId) === want)
+        || users.find((u) => String(u.displayName || u.userName || '').toLowerCase().includes(want));
+      if (!who) { step('find the person to make co-host', false, users.map((u) => u.displayName)); return out; }
+      await client.makeCoHost(who.userId);
+      step('make co-host', true, who.displayName);
+    } catch (e) { step('make co-host', false, boErr(e)); }
+    out.done = 'finished';
+    return out;
+  }
+
+  try {
+    const me = client.getCurrentUser && client.getCurrentUser();
+    out.role = {
+      isHost: typeof client.isHost === 'function' ? !!client.isHost() : null,
+      isCoHost: typeof client.isCoHost === 'function' ? !!client.isCoHost() : null,
+      isOriginHost: typeof client.isOriginHost === 'function' ? !!client.isOriginHost() : null,
+      userId: me ? String(me.userId) : null,
+      displayName: me ? (me.displayName || null) : null,
+      userRole: me ? (me.userRole ?? null) : null,
+      isGuest: me ? (me.isGuest ?? null) : null,
+    };
+    step('role', true, out.role);
+  } catch (e) { step('role', false, boErr(e)); }
+
+  let rooms = [];
+  try {
+    rooms = (client.getBreakoutRoomList && client.getBreakoutRoomList()) || [];
+    step('rooms already made', true, rooms.map((r) => ({ name: r.name, id: !!r.roomId })));
+  } catch (e) { step('rooms already made', false, boErr(e)); }
+
+  if (!rooms.length) {
+    let maker = null;
+    try { maker = findRoomMaker(); } catch (e) { maker = null; }
+    step('found the call that makes rooms', !!maker, maker ? null : 'not found on the page');
+    if (maker) {
+      try {
+        const made = await maker.createRooms(names, 1);
+        rooms = Array.isArray(made) ? made : [];
+        step('make rooms', rooms.length > 0, rooms.map((r) => r.name));
+      } catch (e) { step('make rooms', false, boErr(e)); }
+    }
+  }
+  if (!rooms.length) { out.done = 'no rooms to open'; return out; }
+
+  try {
+    const list = rooms.map((r) => ({ roomId: r.roomId, name: r.name, attendeeList: [] }));
+    await client.openBreakoutRooms(list, { isAutoJoinRoom: false, isBackToMainSessionEnabled: true, waitSeconds: 0 });
+    step('open rooms', true, list.map((r) => r.name));
+  } catch (e) { step('open rooms', false, boErr(e)); out.done = 'could not open'; return out; }
+
+  await wait(4000);
+  try { step('status while open', true, { status: client.getBreakoutRoomStatus() }); }
+  catch (e) { step('status while open', false, boErr(e)); }
+  await wait(Math.max(0, openSeconds * 1000 - 4000));
+
+  try { await client.closeAllBreakoutRooms(); step('close rooms', true); }
+  catch (e) { step('close rooms', false, boErr(e)); }
+  for (let i = 0; i < 20; i += 1) {
+    await wait(1000);
+    let st = null;
+    try { st = client.getBreakoutRoomStatus(); } catch (e) { st = null; }
+    if (Number(st) !== 2 && Number(st) !== 3) { step('status after closing', true, { status: st }); break; }
+    if (i === 19) step('status after closing', false, { status: st });
+  }
+  out.done = 'finished';
+  return out;
+};
 
 window.zoomPresence = async () => {
   const t = nowMs();
