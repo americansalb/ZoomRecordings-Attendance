@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .capture import CaptureLoop
+from .cpu_meter import report as cpu_report
 from .config import Config, load_config
 from .manager import BotManager
 from .meeting_client import build_meeting_client
@@ -38,7 +39,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-63"
+BUILD = "capture-64"
 
 # What the CIA sweep poke last did, shown on /healthz. This box is the one
 # machine always awake, so its health page is where a person reads whether
@@ -259,6 +260,9 @@ def build_app(
                 # here rather than inferred from a percentage.
                 "memory_limit_mb": CaptureLoop.memory_limit_mb(),
                 "memory_with_cache": round(CaptureLoop.memory_fraction(with_cache=True), 3),
+                # The processor: how busy, and how often the platform held
+                # the container back, since the last time this was asked.
+                "cpu": cpu_report(),
                 "drive": {"folder": bool(config.drive_folder_id), "credentials": drive_creds,
                           "ready": bool(config.drive_folder_id) and drive_creds},
                 "cia": dict(CIA_STATE)}

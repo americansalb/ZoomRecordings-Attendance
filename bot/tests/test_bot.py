@@ -997,9 +997,9 @@ def test_pool_picture_becomes_the_camera(tmp_path, monkeypatch):
     out = tmp_path / "face.y4m"
     assert image_bytes_to_y4m(png.tobytes(), str(out))
     data = out.read_bytes()
-    assert data.startswith(b"YUV4MPEG2 W640 H360 F10:1")
+    assert data.startswith(b"YUV4MPEG2 W320 H180 F5:1")
     header_len = data.index(b"\n") + 1
-    frame_len = 640 * 360 * 3 // 2
+    frame_len = 320 * 180 * 3 // 2
     assert len(data) == header_len + 2 * (len(b"FRAME\n") + frame_len)
 
     monkeypatch.delenv("BOT_CAMERA_FACE", raising=False)
