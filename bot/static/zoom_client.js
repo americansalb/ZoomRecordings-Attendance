@@ -949,7 +949,8 @@ window.zoomBreakoutTest = async (opts) => {
     try {
       const want = String(o.makeCoHost).toLowerCase();
       const users = client.getAttendeeslist() || [];
-      const who = users.find((u) => String(u.displayName || u.userName || '').toLowerCase().includes(want));
+      const who = users.find((u) => String(u.userId) === want)
+        || users.find((u) => String(u.displayName || u.userName || '').toLowerCase().includes(want));
       if (!who) { step('find the person to make co-host', false, users.map((u) => u.displayName)); return out; }
       await client.makeCoHost(who.userId);
       step('make co-host', true, who.displayName);
@@ -964,6 +965,8 @@ window.zoomBreakoutTest = async (opts) => {
       isHost: typeof client.isHost === 'function' ? !!client.isHost() : null,
       isCoHost: typeof client.isCoHost === 'function' ? !!client.isCoHost() : null,
       isOriginHost: typeof client.isOriginHost === 'function' ? !!client.isOriginHost() : null,
+      userId: me ? String(me.userId) : null,
+      displayName: me ? (me.displayName || null) : null,
       userRole: me ? (me.userRole ?? null) : null,
       isGuest: me ? (me.isGuest ?? null) : null,
     };
