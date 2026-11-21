@@ -84,4 +84,14 @@ EXPOSE 8088
 # that never finish, so it sat there refusing to die while Render kept
 # routing traffic to it, and the healthy replacement never took over. Twenty
 # seconds is more than any legitimate request here needs.
-CMD ["sh", "-c", "uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088} --timeout-graceful-shutdown 20"]
+#
+# exec, so uvicorn IS the container's first process and receives the stop
+# signal itself. Without it the shell was first, the shell forks rather than
+# replacing itself (dash, checked 2026-11-21), and a first process with no
+# handler of its own ignores the stop signal. So a deploy never ran the
+# shutdown that walks each bot out of its meeting: the platform waited out
+# its grace and killed everything, and Zoom kept the dead connection. On
+# 2026-11-21 Zoom listed the old bot in Session 144 for five and a half
+# minutes after the restart at 12:12 PM Eastern, and turned every
+# replacement away with "participant exist" until it dropped.
+CMD ["sh", "-c", "exec uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088} --timeout-graceful-shutdown 20"]
