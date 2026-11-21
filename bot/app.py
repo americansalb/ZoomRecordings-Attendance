@@ -434,7 +434,8 @@ def build_app(
         body = body or {}
         names = body.get("names") if isinstance(body.get("names"), list) else None
         return await session.client.breakout_test(
-            names=names, open_seconds=int(body.get("open_seconds") or 15))
+            names=names, open_seconds=int(body.get("open_seconds") or 15),
+            make_cohost=(str(body["make_cohost"])[:80] if body.get("make_cohost") else None))
 
     @app.post("/bots/{runtime_id}/capture")
     async def capture_now(runtime_id: str,

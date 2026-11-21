@@ -15,9 +15,11 @@ def test_breakout_test_endpoint_runs_the_client_test():
     seen = {}
 
     class Client(FakeMeetingClient):
-        async def breakout_test(self, names=None, open_seconds=15):
+        async def breakout_test(self, names=None, open_seconds=15, make_cohost=None):
             seen["names"] = names
             seen["open_seconds"] = open_seconds
+            if make_cohost:
+                seen["make_cohost"] = make_cohost
             return {"role": {"isHost": True}, "steps": [], "done": "finished"}
 
     cfg = Config(backend_url="http://backend", bot_shared_secret=None,
@@ -35,6 +37,8 @@ def test_breakout_test_endpoint_runs_the_client_test():
     assert r.status_code == 200, r.text
     assert r.json()["done"] == "finished"
     assert seen == {"names": ["A", "B"], "open_seconds": 9}
+    r = c.post(f"/bots/{rid}/breakout-test", json={"make_cohost": "Attendance Bot"})
+    assert r.status_code == 200 and seen["make_cohost"] == "Attendance Bot"
     assert c.post("/bots/nope/breakout-test", json={}).status_code == 404
 
 

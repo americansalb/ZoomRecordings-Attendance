@@ -943,6 +943,21 @@ window.zoomBreakoutTest = async (opts) => {
   const out = { at: new Date().toISOString(), steps };
   if (!client) { step('client', false, 'no client'); return out; }
 
+  // From a host seat: make the named person a co-host, the way a trainer
+  // would by hand, and stop there.
+  if (o.makeCoHost) {
+    try {
+      const want = String(o.makeCoHost).toLowerCase();
+      const users = client.getAttendeeslist() || [];
+      const who = users.find((u) => String(u.displayName || u.userName || '').toLowerCase().includes(want));
+      if (!who) { step('find the person to make co-host', false, users.map((u) => u.displayName)); return out; }
+      await client.makeCoHost(who.userId);
+      step('make co-host', true, who.displayName);
+    } catch (e) { step('make co-host', false, boErr(e)); }
+    out.done = 'finished';
+    return out;
+  }
+
   try {
     const me = client.getCurrentUser && client.getCurrentUser();
     out.role = {
