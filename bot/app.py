@@ -39,7 +39,7 @@ from .backend_client import BackendClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD = "capture-65"
+BUILD = "capture-66"
 
 # What the CIA sweep poke last did, shown on /healthz. This box is the one
 # machine always awake, so its health page is where a person reads whether
@@ -420,6 +420,21 @@ def build_app(
         except Exception:
             pass
         return data
+
+    @app.post("/bots/{runtime_id}/breakout-test")
+    async def bot_breakout_test(runtime_id: str, body: Optional[Dict[str, Any]] = None,
+                                x_tutor_bot_secret: Optional[str] = Header(default=None)):
+        """Whether this seat can run breakout rooms: its role, then make,
+        open and close test rooms. For an empty test meeting only."""
+        _check_secret(x_tutor_bot_secret)
+        try:
+            session = manager._require(runtime_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unknown runtime_id")
+        body = body or {}
+        names = body.get("names") if isinstance(body.get("names"), list) else None
+        return await session.client.breakout_test(
+            names=names, open_seconds=int(body.get("open_seconds") or 15))
 
     @app.post("/bots/{runtime_id}/capture")
     async def capture_now(runtime_id: str,

@@ -91,7 +91,7 @@ EXPOSE 8088
 # handler of its own ignores the stop signal. So a deploy never ran the
 # shutdown that walks each bot out of its meeting: the platform waited out
 # its grace and killed everything, and Zoom kept the dead connection. On
-# 2026-11-21 Zoom listed the old bot in Session 144 for five and a half
-# minutes after the restart at 12:12 PM Eastern, and turned every
-# replacement away with "participant exist" until it dropped.
+# 2026-11-21 Zoom kept listing the old bot in a leftover room after the
+# restart at 12:12 PM Eastern, until that meeting ended at 12:18 PM, and
+# turned every replacement away with "participant exist" the whole time.
 CMD ["sh", "-c", "exec uvicorn bot.app:app --host 0.0.0.0 --port ${PORT:-8088} --timeout-graceful-shutdown 20"]
